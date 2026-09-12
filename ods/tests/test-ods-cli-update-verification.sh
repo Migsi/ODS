@@ -153,6 +153,7 @@ chmod +x "$bin_dir/docker" "$bin_dir/sleep"
 
 PATH="$bin_dir:$PATH" \
 ODS_HOME="$install_dir" \
+ODS_AGENT_FORCE_SESSION=true \
 NO_COLOR=1 \
 TEST_DOCKER_LOG="$docker_log" \
 TEST_DOCKER_PULL_COUNT="$pull_count_file" \
@@ -168,6 +169,16 @@ ODS_COMPOSE_PULL_RETRY_DELAY_N=0 \
 grep -q 'Update complete' "$tmp_dir/update.out" || {
     cat "$tmp_dir/update.out" >&2
     printf '[FAIL] update did not reach completion\n' >&2
+    exit 1
+}
+
+# This focused fixture intentionally omits the host-agent script.  Updating the
+# container stack must still complete because host-agent restart is documented
+# as non-fatal, while the standalone `ods agent start` command retains a
+# non-zero result for the missing runtime.
+grep -q 'Host agent restart failed (non-fatal)' "$tmp_dir/update.out" || {
+    cat "$tmp_dir/update.out" >&2
+    printf '[FAIL] missing host agent was not contained as a non-fatal update warning\n' >&2
     exit 1
 }
 
