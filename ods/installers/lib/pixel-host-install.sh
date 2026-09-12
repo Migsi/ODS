@@ -2338,7 +2338,7 @@ _ods_pixel_install_access_service() {
     # This coordinator is privileged. Never run or import its implementation
     # from the owner's mutable checkout, even when the host agent is unprivileged.
     ods_sudo python3 - "${INSTALL_DIR:?}" "$owner" "$openclaw_bin" "$gateway_port" <<'PY'
-import fcntl, json, os, pathlib, pwd, stat, subprocess, sys, tempfile
+import fcntl, json, os, pathlib, pwd, socket, stat, subprocess, sys, tempfile, time
 source = pathlib.Path(sys.argv[1])
 owner = pwd.getpwnam(sys.argv[2])
 if owner.pw_uid == 0:
@@ -2428,6 +2428,48 @@ write(pathlib.Path('/etc/systemd/system/ods-pixel-access.service'), (host / 'ods
 subprocess.run(['systemctl', 'daemon-reload'], check=True)
 subprocess.run(['systemctl', 'enable', 'ods-pixel-access.service'], check=True)
 subprocess.run(['systemctl', 'restart', 'ods-pixel-access.service'], check=True)
+# systemctl restart returns when the simple service process has spawned, before
+# its root daemon has necessarily replaced the RuntimeDirectory socket's
+# root-only bind mode with the admitted owner's group and 0660 mode. Do not let
+# an immediate owner client race that custody transition.
+socket_path = pathlib.Path('/run/ods-pixel-access/control.sock')
+for attempt in range(30):
+    try:
+        directory_info = socket_path.parent.lstat()
+        socket_info = socket_path.lstat()
+        owner_ready = (
+            stat.S_ISDIR(directory_info.st_mode)
+            and directory_info.st_uid == 0
+            and stat.S_IMODE(directory_info.st_mode) == 0o711
+            and stat.S_ISSOCK(socket_info.st_mode)
+            and socket_info.st_uid == 0
+            and socket_info.st_gid == owner.pw_gid
+            and stat.S_IMODE(socket_info.st_mode) == 0o660
+        )
+        if owner_ready:
+            # A stopped coordinator can leave an old, correctly owned socket
+            # inode behind until the replacement process unlinks it. Require a
+            # live, read-only protocol response as well as the DAC contract.
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
+                probe.settimeout(2)
+                probe.connect(str(socket_path))
+                probe.sendall(b'{"operation":"status"}\n')
+                with probe.makefile('rb') as stream:
+                    response = json.loads(stream.readline(65537))
+            owner_ready = (
+                set(response) == {'status', 'body'}
+                and response['status'] in (200, 400, 403, 409, 503)
+                and isinstance(response['body'], dict)
+            )
+    except (FileNotFoundError, ConnectionError, TimeoutError, OSError,
+            ValueError, TypeError, json.JSONDecodeError):
+        owner_ready = False
+    if owner_ready:
+        break
+    if attempt < 29:
+        time.sleep(1)
+else:
+    raise SystemExit('Pixel access coordinator socket did not become owner-ready')
 PY
     [[ $? -eq 0 ]] || return 1
 }

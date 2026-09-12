@@ -2215,6 +2215,24 @@ assert model_finish < release_failure < rollback_restore
 assert chr(39) + "gateway_port" + chr(39) + ": gateway_port" in text
 assert "pixel_access_reconcile.py" in text
 assert "pixel_model_transition.py" in text
+access_install = text.index("_ods_pixel_install_access_service()")
+access_install_end = text.index("_ods_pixel_mark_installing()", access_install)
+access_install_body = text[access_install:access_install_end]
+access_restart = access_install_body.index("subprocess.run([")
+access_socket_wait = access_install_body.index("socket_path = pathlib.Path(", access_restart)
+assert access_restart < access_socket_wait
+assert "systemctl" in access_install_body[access_restart:access_socket_wait]
+assert "restart" in access_install_body[access_restart:access_socket_wait]
+assert "ods-pixel-access.service" in access_install_body[access_restart:access_socket_wait]
+assert "/run/ods-pixel-access/control.sock" in access_install_body[access_socket_wait:]
+assert "stat.S_IMODE(directory_info.st_mode) == 0o711" in access_install_body
+assert "socket_info.st_gid == owner.pw_gid" in access_install_body
+assert "stat.S_IMODE(socket_info.st_mode) == 0o660" in access_install_body
+assert "probe.connect(str(socket_path))" in access_install_body
+assert "probe.sendall(b" in access_install_body
+assert "operation" in access_install_body and "status" in access_install_body
+assert "range(30)" in access_install_body
+assert "Pixel access coordinator socket did not become owner-ready" in access_install_body
 assert "_ods_pixel_reverify_access_after_gateway_restart \"$owner\" \"$home\" true" in text
 assert "rollback=verified" in text
 assert "rollback=failed" in text
