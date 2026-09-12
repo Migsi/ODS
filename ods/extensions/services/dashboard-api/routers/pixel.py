@@ -644,6 +644,7 @@ async def _retained_chat_stream(request, body, owner):
 async def _produce_retained_result(store, identity, body, config):
     edge_url, key = config
     done_seen = False
+    terminal_error_seen = False
     cancelled = False
     failed = False
     stopped = False
@@ -667,7 +668,19 @@ async def _produce_retained_result(store, identity, body, config):
                             if len(line.rstrip(b"\r\n")) > _MAX_SSE_LINE_BYTES:
                                 raise ResultCapacity("SSE line limit")
                             store.append(identity, line)
-                            if line.rstrip(b"\r\n") == b"data: [DONE]":
+                            stripped = line.rstrip(b"\r\n")
+                            if stripped.startswith(b"data: ") and stripped != b"data: [DONE]":
+                                try:
+                                    event = json.loads(stripped[6:])
+                                except (json.JSONDecodeError, UnicodeDecodeError):
+                                    event = None
+                                if isinstance(event, dict) and "error" in event:
+                                    # A syntactically terminal SSE stream can still be a
+                                    # failed attempt. Keep its sanitized error bytes for
+                                    # replay, but never publish it as a completed result.
+                                    terminal_error_seen = True
+                                    failed = True
+                            if stripped == b"data: [DONE]":
                                 done_seen = True
                                 break
                         if done_seen:
@@ -695,7 +708,13 @@ async def _produce_retained_result(store, identity, body, config):
                 text = "Pixel was stopped." if cancelled else "Pixel could not complete the response. Check saved work before continuing."
                 store.append(identity, _error_event(text) + b"data: [DONE]\n\n", terminal=True)
         finally:
-            state = "complete" if done_seen else "cancelled" if cancelled else "interrupted" if failed and stopped else "unresolved" if failed else "complete"
+            state = (
+                "complete" if done_seen and not terminal_error_seen
+                else "cancelled" if cancelled
+                else "interrupted" if terminal_error_seen or failed and stopped
+                else "unresolved" if failed
+                else "complete"
+            )
             store.finish(identity, state)
 
 

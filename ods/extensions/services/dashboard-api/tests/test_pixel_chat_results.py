@@ -191,6 +191,40 @@ def test_truncated_upstream_retains_error_and_does_not_release_unknown_native_wo
     asyncio.run(run())
 
 
+def test_terminal_upstream_error_is_replayable_but_never_complete(store, monkeypatch):
+    async def run():
+        terminal_error = b'data: {"error":"upstream error"}\n\ndata: [DONE]\n\n'
+        monkeypatch.setattr(
+            pixel.httpx,
+            "AsyncClient",
+            lambda **kw: FakeClient(
+                FakeResponse(content_type="text/event-stream", chunks=[terminal_error])
+            ),
+        )
+        cancels = []
+
+        async def cancel(*args):
+            cancels.append(args)
+            return True
+
+        monkeypatch.setattr(pixel, "_cancel_edge_run", cancel)
+        await pixel.pixel_chat_stream(ConnectedRequest(), body(), OWNER)
+        await asyncio.gather(*list(pixel._result_tasks.values()))
+
+        result = await pixel.pixel_chat_result(
+            pixel.ChatResultRequest(chat_id="chat-test", request_id="attempt-one"),
+            OWNER,
+        )
+        assert result == {
+            "state": "interrupted",
+            "events": 'data: {"error":"upstream error"}\n\ndata: [DONE]\n',
+        }
+        assert not store.has_pending(IDENTITY[:2])
+        assert not cancels
+
+    asyncio.run(run())
+
+
 def test_terminal_write_failure_still_releases_known_stopped_attempt(store, monkeypatch):
     async def run():
         append = store.append
