@@ -357,7 +357,8 @@ backup_user_data() {
             log_error "Refusing symlinked user-data path: $path"
             return 1
         elif [[ -d "$full_path" ]]; then
-            local dest_dir="$backup_dir/$(dirname "$path")"
+            local dest_dir
+            dest_dir="$backup_dir/$(dirname "$path")"
             local -a extra_args=()
             if [[ "$path" == "data/user-extensions" ]]; then
                 # The source is passed without a trailing slash, so rsync's
