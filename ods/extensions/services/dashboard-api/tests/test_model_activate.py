@@ -3711,16 +3711,26 @@ def test_managed_pixel_reconcile_is_noop_when_this_install_does_not_own_pixel(
     assert _mod._reconcile_ods_managed_pixel_model("safe-model", 65536) == "not_installed"
 
 
+@pytest.mark.parametrize(
+    ("gateway_setting", "expected_gateway_port"),
+    [
+        ("PIXEL_GATEWAY_PORT=18790\n", "18790"),
+        ("", "18789"),
+    ],
+)
 def test_managed_pixel_reconcile_uses_positional_args_and_minimal_environment(
     tmp_path,
     monkeypatch,
+    gateway_setting,
+    expected_gateway_port,
 ):
     install_dir = tmp_path / "install"
     home = tmp_path / "owner-home"
     install_dir.mkdir()
     home.mkdir()
     (install_dir / ".env").write_text(
-        "PIXEL_SOURCE_URL=https://github.com/Osmantic/Pixel.git\n",
+        "PIXEL_SOURCE_URL=https://github.com/Osmantic/Pixel.git\n"
+        f"{gateway_setting}",
         encoding="utf-8",
     )
     captured = {}
@@ -3759,7 +3769,38 @@ def test_managed_pixel_reconcile_uses_positional_args_and_minimal_environment(
     assert captured["kwargs"]["env"]["PIXEL_SOURCE_URL"] == (
         "https://github.com/Osmantic/Pixel.git"
     )
+    assert captured["kwargs"]["env"]["PIXEL_GATEWAY_PORT"] == expected_gateway_port
     assert "UNRELATED_SECRET" not in captured["kwargs"]["env"]
+
+
+@pytest.mark.parametrize("gateway_port", ["0", "01", "65536", "abc", "-1"])
+def test_managed_pixel_reconcile_rejects_invalid_gateway_port(
+    tmp_path,
+    monkeypatch,
+    gateway_port,
+):
+    install_dir = tmp_path / "install"
+    home = tmp_path / "owner-home"
+    install_dir.mkdir()
+    home.mkdir()
+    (install_dir / ".env").write_text(
+        f"PIXEL_GATEWAY_PORT={gateway_port}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(_mod, "INSTALL_DIR", install_dir)
+    monkeypatch.setattr(
+        _mod,
+        "_ods_managed_pixel_identity",
+        lambda: ("pixel-owner", home),
+    )
+    monkeypatch.setattr(
+        _mod.subprocess,
+        "run",
+        lambda *_args, **_kwargs: pytest.fail("an invalid port must fail before subprocess"),
+    )
+
+    with pytest.raises(RuntimeError, match="gateway port is invalid"):
+        _mod._reconcile_ods_managed_pixel_model("safe-model", 65536)
 
 
 def test_managed_pixel_reconcile_rejects_context_below_pixel_contract(monkeypatch):
