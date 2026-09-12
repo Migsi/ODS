@@ -3022,7 +3022,12 @@ def _reconcile_ods_managed_pixel_model(
         source_path = Path(source_url)
         if not source_path.is_absolute() or source_path == Path("/"):
             raise RuntimeError("The configured Pixel source must be the canonical URL or an absolute local checkout")
-    pixel_gateway_port = str(env_values.get("PIXEL_GATEWAY_PORT") or "18789").strip()
+    configured_pixel_gateway_port = env_values.get("PIXEL_GATEWAY_PORT")
+    pixel_gateway_port = (
+        "18789"
+        if configured_pixel_gateway_port is None
+        else str(configured_pixel_gateway_port).strip()
+    )
     if not re.fullmatch(r"[1-9][0-9]{0,4}", pixel_gateway_port) \
             or int(pixel_gateway_port) > 65535:
         raise RuntimeError("The configured Pixel gateway port is invalid")

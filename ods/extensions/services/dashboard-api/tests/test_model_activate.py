@@ -3715,6 +3715,8 @@ def test_managed_pixel_reconcile_is_noop_when_this_install_does_not_own_pixel(
     ("gateway_setting", "expected_gateway_port"),
     [
         ("PIXEL_GATEWAY_PORT=18790\n", "18790"),
+        ('PIXEL_GATEWAY_PORT="18790"\n', "18790"),
+        ("PIXEL_GATEWAY_PORT=65535\n", "65535"),
         ("", "18789"),
     ],
 )
@@ -3773,7 +3775,10 @@ def test_managed_pixel_reconcile_uses_positional_args_and_minimal_environment(
     assert "UNRELATED_SECRET" not in captured["kwargs"]["env"]
 
 
-@pytest.mark.parametrize("gateway_port", ["0", "01", "65536", "abc", "-1"])
+@pytest.mark.parametrize(
+    "gateway_port",
+    ["", "   ", "0", "01", "65536", "123456", "abc", "-1"],
+)
 def test_managed_pixel_reconcile_rejects_invalid_gateway_port(
     tmp_path,
     monkeypatch,
