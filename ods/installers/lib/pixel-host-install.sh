@@ -2090,9 +2090,37 @@ _ods_pixel_reverify_access_after_gateway_restart() {
     _ods_pixel_wait_access_reconcile "$owner" "$home" "$helper" "$attempts" 1
 }
 
+_ods_pixel_model_transition() {
+    local action="$1" owner="$2" home="$3" transaction_id="${4:-}" outcome="${5:-}"
+    local helper=/usr/local/libexec/ods-pixel-access/pixel_model_transition.py
+    [[ -f "$helper" && ! -L "$helper" ]] || return 1
+    case "$action" in
+        begin)
+            [[ -z "$transaction_id" && -z "$outcome" ]] || return 1
+            ods_pixel_run_as_owner "$owner" "$home" python3 -I "$helper" begin
+            ;;
+        finish)
+            [[ "$transaction_id" =~ ^[0-9a-f]{64}$
+                && ( "$outcome" == applied || "$outcome" == rolled-back ) ]] || return 1
+            ods_pixel_run_as_owner "$owner" "$home" python3 -I "$helper" \
+                finish --transaction "$transaction_id" "$outcome"
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+_ods_pixel_reverify_unless_model_held() {
+    local owner="$1" home="$2" transaction_id="${3:-}"
+    if [[ -n "$transaction_id" ]]; then
+        [[ "$transaction_id" =~ ^[0-9a-f]{64}$ ]]
+        return
+    fi
+    _ods_pixel_reverify_access_after_gateway_restart "$owner" "$home"
+}
+
 _ods_pixel_restore_model_reconciliation() {
     local owner="$1" home="$2" pixel_root="$3" answers="$4" backup="$5"
-    local old_contract openclaw_bin
+    local transaction_id="${6:-}" old_contract openclaw_bin
     openclaw_bin="$(_ods_pixel_openclaw_bin "$owner" "$home")" || return 1
     _ods_pixel_atomic_replace_managed_file "$owner" "$home" "$backup/openclaw.json" "$home/.openclaw/openclaw.json" || return 1
     _ods_pixel_atomic_replace_managed_file "$owner" "$home" "$backup/rollback-onboarding.json" "$answers" || return 1
@@ -2102,7 +2130,7 @@ _ods_pixel_restore_model_reconciliation() {
         || ! ods_pixel_run_as_owner "$owner" "$home" "$pixel_root/pixel" plan \
         || ! _ods_pixel_recreate_agent_sandbox "$owner" "$home" "$openclaw_bin" \
         || ! _ods_pixel_restart_gateway_and_verify "$owner" "$home" "$pixel_root" \
-        || ! _ods_pixel_reverify_access_after_gateway_restart "$owner" "$home" \
+        || ! _ods_pixel_reverify_unless_model_held "$owner" "$home" "$transaction_id" \
         || ! _ods_pixel_restart_ingress_and_verify "$owner" "$home" "$answers"; then
         if [[ -f "$backup/runtime-attestation.json" && ! -L "$backup/runtime-attestation.json" ]]; then
             _ods_pixel_atomic_replace_managed_file "$owner" "$home" "$backup/runtime-attestation.json" \
@@ -2121,6 +2149,7 @@ ods_pixel_reconcile_promoted_model() {
     local owner="$1" home="$2" promoted_model="$3" final_state="${4:-ready}"
     local promoted_context="${5:-}" promoted_max_tokens="${6:-}" promoted_reasoning="${7:-}"
     local source_ref source_root pixel_root answers candidate backup contract_sha256 openclaw_bin failed=false
+    local model_transaction="" release_failed=false
     local stable_alias=false staged_alias_candidate=""
     local failure_phase="unknown"
     [[ "$final_state" == ready || "$final_state" == installing ]] || return 1
@@ -2174,6 +2203,11 @@ ods_pixel_reconcile_promoted_model() {
     fi
 
     backup="$(_ods_pixel_model_reconciliation_snapshot "$owner" "$home" "$answers")" || return 1
+    # Update the root-custodied controller before taking the model hold. This
+    # restarts only the access coordinator, not the active Pixel gateway.
+    _ods_pixel_install_access_service "$owner" "$openclaw_bin" || return 1
+    model_transaction="$(_ods_pixel_model_transition begin "$owner" "$home")" || return 1
+    [[ "$model_transaction" =~ ^[0-9a-f]{64}$ ]] || return 1
 
     if ! _ods_pixel_update_onboarding_model "$owner" "$home" "$answers" "$promoted_model" \
         "$promoted_context" "$promoted_max_tokens" "$promoted_reasoning"; then
@@ -2232,7 +2266,7 @@ ods_pixel_reconcile_promoted_model() {
         failure_phase="gateway-restart-verify"
     fi
     if [[ "$failed" == false ]] \
-        && ! _ods_pixel_reverify_access_after_gateway_restart "$owner" "$home"; then
+        && ! _ods_pixel_reverify_unless_model_held "$owner" "$home" "$model_transaction"; then
         failed=true
         failure_phase="access-runtime-reproof"
     fi
@@ -2260,6 +2294,13 @@ ods_pixel_reconcile_promoted_model() {
             fi
         fi
     fi
+    if [[ "$failed" == false ]] \
+        && ! _ods_pixel_model_transition finish "$owner" "$home" \
+            "$model_transaction" applied; then
+        failed=true
+        release_failed=true
+        failure_phase="model-transition-finish"
+    fi
     if [[ "$failed" == false ]]; then
         if [[ -n "$staged_alias_candidate" ]]; then
             ods_pixel_run_as_owner "$owner" "$home" rm -f -- "$staged_alias_candidate" || true
@@ -2271,9 +2312,19 @@ ods_pixel_reconcile_promoted_model() {
     if [[ -n "$staged_alias_candidate" ]]; then
         ods_pixel_run_as_owner "$owner" "$home" rm -f -- "$staged_alias_candidate" || true
     fi
+    if [[ "$release_failed" == true ]]; then
+        # Finish can fail after one gate has released. Never mutate the route
+        # again under an uncertain admission boundary; the root journal blocks
+        # later transitions until the same transaction is explicitly recovered.
+        printf '%s\n' 'error: Pixel model route was verified but transition release failed; recovery-required and automatic rollback suppressed' >&2
+        return 1
+    fi
     printf 'warning: Pixel model reconciliation failed during phase=%s; restoring the previous verified route\n' \
         "$failure_phase" >&2
-    if _ods_pixel_restore_model_reconciliation "$owner" "$home" "$pixel_root" "$answers" "$backup"; then
+    if _ods_pixel_restore_model_reconciliation "$owner" "$home" "$pixel_root" "$answers" "$backup" \
+        "$model_transaction" \
+        && _ods_pixel_model_transition finish "$owner" "$home" \
+            "$model_transaction" rolled-back; then
         printf '%s\n' 'warning: previous Pixel model route restored and verified; rollback=verified' >&2
     else
         printf '%s\n' "error: Pixel model reconciliation and verified rollback both failed; rollback=failed evidence=$backup" >&2
@@ -2331,6 +2382,7 @@ for name in ('access_mode_server.py', 'access_mode_worker.py', 'pixel_access_mod
 write(target / 'pixel_access_bridge.py', (source / 'bin/pixel_access_bridge.py').read_bytes(), 0o644)
 write(target / 'pixel_access_client.py', (source / 'bin/pixel_access_client.py').read_bytes(), 0o644)
 write(target / 'pixel_access_reconcile.py', (source / 'bin/pixel_access_reconcile.py').read_bytes(), 0o644)
+write(target / 'pixel_model_transition.py', (source / 'bin/pixel_model_transition.py').read_bytes(), 0o644)
 write(target / 'pixel_access_protocol.py', (source / 'bin/pixel_access_protocol.py').read_bytes(), 0o644)
 settings_package = target / 'pixel_settings'
 settings_package.mkdir(mode=0o755, exist_ok=True)

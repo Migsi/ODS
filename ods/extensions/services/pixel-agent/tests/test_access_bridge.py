@@ -269,11 +269,21 @@ class BridgeTests(unittest.TestCase):
         self.assertFalse(status["runtime_verified"])
         self.assertIsNone(status["revision"])
 
-    def test_release_failure_does_not_reopen_native_admission(self):
+    def test_edge_release_failure_keeps_external_admission_blocked(self):
         self.runtime.fail = "edge-release"
         with self.assertRaises(bridge.AccessError): self.runtime.change(self.request())
+        self.assertEqual(self.runtime.native_phase, "idle")
+        self.assertEqual(self.runtime.edge_phase, "held")
+        self.assertLess(self.runtime.log.index("native-release"), self.runtime.log.index("edge-release"))
+        self.assertEqual(self.runtime.pending()["phase"], "error")
+
+    def test_native_release_failure_keeps_both_admission_gates_held(self):
+        self.runtime.fail = "release"
+        with self.assertRaises(bridge.AccessError): self.runtime.change(self.request())
         self.assertEqual(self.runtime.native_phase, "held")
-        self.assertNotIn("native-release", self.runtime.log)
+        self.assertEqual(self.runtime.edge_phase, "held")
+        self.assertNotIn("edge-release", self.runtime.log)
+        self.assertEqual(self.runtime.pending()["phase"], "error")
 
     def test_proof_invalidated_by_external_config_change_or_gateway_restart(self):
         self.runtime.change(self.request())

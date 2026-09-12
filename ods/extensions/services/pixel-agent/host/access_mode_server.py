@@ -24,6 +24,7 @@ def protected(path):
 PROGRAM = Path(__file__).resolve().parent
 protected(PROGRAM)
 for name in ("access_mode_server.py", "pixel_access_bridge.py", "pixel_access_client.py", "pixel_access_reconcile.py",
+             "pixel_model_transition.py",
              "access_mode_worker.py", "pixel_access_mode.py", "access_mode_config.py",
              "settings_transaction.py", "pixel_access_protocol.py", "pixel_settings/__init__.py",
              "pixel_settings/contract.py", "pixel_settings/projection.py", "pixel_settings/runtime.py", "pixel_settings/coordinator.py",
@@ -66,11 +67,17 @@ def main():
                 raw = self.rfile.readline(2049)
                 if len(raw) > 2048 or not raw.endswith(b"\n"): raise ValueError()
                 request = control_request(decode_frame(raw.decode("utf-8"), 2048))
+                if request["operation"] == "model-begin":
+                    self.connection.settimeout(1850)
                 adapter = make_adapter()
                 if request == {"operation": "status"}:
                     status, body = 200, adapter.status()
                 elif set(request) == {"operation", "request"} and request["operation"] == "change":
                     status, body = 200, adapter.change(request["request"])
+                elif request == {"operation": "model-begin"}:
+                    status, body = 200, adapter.model_begin()
+                elif set(request) == {"operation", "request"} and request["operation"] == "model-finish":
+                    status, body = 200, adapter.model_finish(request["request"])
                 elif request["operation"].startswith("settings-"):
                     status = 200
                     body = (adapter.settings_status(data_dir_id=request["data_dir_id"])

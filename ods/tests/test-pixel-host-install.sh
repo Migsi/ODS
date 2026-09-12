@@ -2169,8 +2169,15 @@ assert "plugins registry --refresh --json" in text
 assert "ods_pixel_reconcile_promoted_model" in text
 stable_alias = text.index("if _ods_pixel_uses_stable_model_alias")
 reconcile_snapshot = text.index("_ods_pixel_model_reconciliation_snapshot", stable_alias)
+controller_install = text.index("_ods_pixel_install_access_service \"$owner\" \"$openclaw_bin\"", reconcile_snapshot)
+model_begin = text.index("model_transaction=\"$(_ods_pixel_model_transition begin", controller_install)
+model_mutation = text.index("_ods_pixel_update_onboarding_model", model_begin)
 reconcile_restart = text.index("_ods_pixel_restart_gateway_and_verify", reconcile_snapshot)
-assert stable_alias < reconcile_snapshot < reconcile_restart
+model_finish = text.index("_ods_pixel_model_transition finish", reconcile_restart)
+assert stable_alias < reconcile_snapshot < controller_install < model_begin < model_mutation < reconcile_restart < model_finish
+transaction = text[model_begin:model_finish]
+assert "_ods_pixel_reverify_unless_model_held \"$owner\" \"$home\" \"$model_transaction\"" in transaction
+assert "_ods_pixel_reverify_access_after_gateway_restart \"$owner\" \"$home\";" not in transaction
 stable_branch = text[stable_alias:reconcile_snapshot]
 assert "Pixel stable model alias remains active" in stable_branch
 assert "_ods_pixel_restart_gateway_and_verify" not in stable_branch
@@ -2201,8 +2208,13 @@ assert "failure_phase=\"sandbox-recreate\"" in text
 assert "failure_phase=\"contract-hash\"" in text
 assert "failure_phase=\"ready-marker\"" in text
 assert "failure_phase=\"installing-marker\"" in text
+assert "failure_phase=\"model-transition-finish\"" in text
+release_failure = text.index("transition release failed; recovery-required")
+rollback_restore = text.index("_ods_pixel_restore_model_reconciliation", model_finish)
+assert model_finish < release_failure < rollback_restore
 assert chr(39) + "gateway_port" + chr(39) + ": gateway_port" in text
 assert "pixel_access_reconcile.py" in text
+assert "pixel_model_transition.py" in text
 assert "_ods_pixel_reverify_access_after_gateway_restart \"$owner\" \"$home\" true" in text
 assert "rollback=verified" in text
 assert "rollback=failed" in text
