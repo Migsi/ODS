@@ -14,7 +14,7 @@ sys.path.insert(0, str(ROOT / "bin"))
 
 import pixel_access_protocol as protocol  # noqa: E402
 from pixel_access_bridge import AccessError, SystemdAccessBridge  # noqa: E402
-from pixel_model_transition import execute  # noqa: E402
+from pixel_model_transition import execute, main  # noqa: E402
 
 
 HEX_A = "a" * 64
@@ -209,6 +209,13 @@ class ModelTransitionTests(unittest.TestCase):
             self.assertEqual(bridge.native_state["phase"], "held")
             self.assertEqual(bridge.edge_state["phase"], "held")
             self.assertTrue((bridge.state / "transition.json").exists())
+
+    def test_cli_loads_the_root_custodied_client_only_at_runtime(self):
+        request = lambda *args: (200, {"status": "held", "transaction_id": HEX_A})
+        with patch("pixel_model_transition._load_request_access", return_value=request), \
+                patch("builtins.print") as output:
+            self.assertEqual(main(["begin"]), 0)
+        output.assert_called_once_with(HEX_A)
 
     def test_finish_recovers_native_released_error_before_retry(self):
         with tempfile.TemporaryDirectory() as root:

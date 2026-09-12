@@ -1,15 +1,37 @@
 #!/usr/bin/env python3
 """Fixed client for the root-owned Pixel model transition."""
 import re
+import stat
 import sys
+from pathlib import Path
 
-from pixel_access_client import request_access
 
+sys.dont_write_bytecode = True
+PROGRAM = Path(__file__).resolve().parent
 
 HEX = re.compile(r"[a-f0-9]{64}\Z")
 
 
-def execute(action, transaction_id=None, outcome=None, *, request=request_access):
+def protected(path):
+    info = path.lstat()
+    if stat.S_ISLNK(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
+        raise RuntimeError("Pixel model transition program custody unavailable")
+
+
+def _load_request_access():
+    # Python isolated mode deliberately excludes the script directory from
+    # sys.path. Admit only the installed, root-protected helper directory so a
+    # checkout or user-writable module can never satisfy this privileged client.
+    for entry in (PROGRAM, *PROGRAM.parents, PROGRAM / "pixel_access_client.py"):
+        protected(entry)
+    sys.path.insert(0, str(PROGRAM))
+    from pixel_access_client import request_access  # noqa: E402
+    return request_access
+
+
+def execute(action, transaction_id=None, outcome=None, *, request=None):
+    if request is None:
+        request = _load_request_access()
     if action == "begin" and transaction_id is None and outcome is None:
         status, body = request("model-begin")
         if (status != 200 or set(body) != {"status", "transaction_id"}
