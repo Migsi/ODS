@@ -90,6 +90,10 @@ snapshot, receipt, directory, or output file.
 
 This assessment performs no mutation and does not itself authorize an extension
 or core update. For Assistant First source checkouts, `ods-update.sh update`
+first requires a clean tracked index and worktree, then binds the exact installed
+HEAD, symbolic branch or detached state, configured upstream, and canonical
+lockfile bytes. Untracked and ignored runtime data do not fail that source
+precondition. The updater
 fetches the configured `origin/*` upstream branch into a private disposable Git
 repository. An unconfigured or detached checkout falls back to `main`, then
 `master`; a configured branch never silently crosses channels. The updater
@@ -97,14 +101,23 @@ materializes only the installed source subtree,
 runs this gate against the exact fetched object, and stops before a rollback
 snapshot, installed Git-object import, checkout, migration, image, or service
 change unless the result is ready. A ready candidate is imported from the
-disposable repository after the snapshot and applied with a verified
-fast-forward; there is no second network fetch that could change the candidate.
-Full, Core, and Custom retain their established source-update path.
+disposable repository only after the snapshot and an immediate revalidation of
+the bound source and desired state. Drift fails before candidate-object import
+or runtime mutation. The exact candidate is applied with a verified
+fast-forward; there is no second network fetch that could change it. If apply
+fails without moving HEAD, the updater does not cycle services. If a later
+migration or health check fails after HEAD moved, rollback validates and
+restores the original source revision before restoring the snapshot and
+restarting the old graph. Full, Core, and Custom retain their established
+source-update path.
 
 A result requiring extension changes still stops for a separately generated and
-approved composite plan. Exact composite upgrade execution, mutation quiescence,
-combined core/desired-state commit, candidate health qualification, and
-coordinated rollback remain later Phase 5 gates.
+approved composite plan. A cross-process guard that excludes extension mutation
+throughout the complete source-update window is still required; the immediate
+revalidation above detects drift but does not eliminate the final scheduling
+window by itself. Canonical empty-lockfile bootstrap, exact composite upgrade
+execution, combined core/desired-state commit, candidate health qualification,
+adoption, and strict offline artifact custody remain later Phase 5 gates.
 
 ## Evidence boundary
 

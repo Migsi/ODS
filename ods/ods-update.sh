@@ -203,6 +203,14 @@ UPDATE_CANDIDATE_BRANCH=""
 UPDATE_CANDIDATE_PREFLIGHT=""
 UPDATE_CANDIDATE_PREFLIGHT_HASH=""
 
+# Assistant First source-state bindings survive disposable candidate cleanup so
+# a later migration or health failure can restore the exact pre-update source.
+UPDATE_SOURCE_ORIGINAL_HEAD=""
+UPDATE_SOURCE_ORIGINAL_BRANCH=""
+UPDATE_SOURCE_ORIGINAL_UPSTREAM=""
+UPDATE_SOURCE_LOCKFILE_HASH=""
+UPDATE_SOURCE_APPLIED_HEAD=""
+
 _cleanup_update_candidate() {
     local root="${UPDATE_CANDIDATE_ROOT:-}"
     local temp_base="${UPDATE_CANDIDATE_TEMP_BASE:-}"
@@ -225,6 +233,138 @@ _cleanup_update_candidate() {
             log_warn "Refusing to remove an unexpected candidate workspace."
             ;;
     esac
+}
+
+_update_file_sha256() {
+    local path="$1" digest=""
+    [[ -f "$path" ]] || return 1
+    if command -v sha256sum >/dev/null 2>&1; then
+        digest=$(sha256sum "$path" 2>/dev/null | awk '{print $1}')
+    elif command -v shasum >/dev/null 2>&1; then
+        digest=$(shasum -a 256 "$path" 2>/dev/null | awk '{print $1}')
+    else
+        return 1
+    fi
+    [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || return 1
+    printf '%s\n' "$digest"
+}
+
+_update_source_branch() {
+    local branch=""
+    branch=$(git -C "$INSTALL_DIR" symbolic-ref --quiet HEAD \
+        2>/dev/null || true)
+    if [[ -n "$branch" ]]; then
+        printf 'branch:%s\n' "$branch"
+    else
+        printf '%s\n' detached
+    fi
+}
+
+_update_source_upstream() {
+    local upstream=""
+    upstream=$(git -C "$INSTALL_DIR" rev-parse --abbrev-ref \
+        --symbolic-full-name '@{upstream}' 2>/dev/null || true)
+    if [[ -n "$upstream" ]]; then
+        printf 'upstream:%s\n' "$upstream"
+    else
+        printf '%s\n' none
+    fi
+}
+
+_update_tracked_tree_clean() {
+    git -C "$INSTALL_DIR" diff --quiet --ignore-submodules -- \
+        && git -C "$INSTALL_DIR" diff --cached --quiet --ignore-submodules --
+}
+
+_capture_assistant_first_source_state() {
+    local head_revision lockfile_path
+
+    if ! _update_tracked_tree_clean; then
+        log_error "Assistant First source updates require a clean tracked checkout."
+        log_info "Commit or restore staged and unstaged tracked changes before retrying."
+        return 1
+    fi
+
+    head_revision=$(git -C "$INSTALL_DIR" rev-parse --verify 'HEAD^{commit}' \
+        2>/dev/null || true)
+    if [[ ! "$head_revision" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]]; then
+        log_error "Could not bind the installed source revision."
+        return 1
+    fi
+
+    lockfile_path="${INSTALL_DIR}/data/assistant-first/desired-state/extensions.lock.json"
+    UPDATE_SOURCE_LOCKFILE_HASH=$(_update_file_sha256 "$lockfile_path") || {
+        log_error "Could not bind the canonical Assistant First lockfile."
+        return 1
+    }
+    UPDATE_SOURCE_ORIGINAL_HEAD="$head_revision"
+    UPDATE_SOURCE_ORIGINAL_BRANCH=$(_update_source_branch)
+    UPDATE_SOURCE_ORIGINAL_UPSTREAM=$(_update_source_upstream)
+    UPDATE_SOURCE_APPLIED_HEAD=""
+}
+
+_verify_assistant_first_source_state() {
+    local current_head current_lockfile_hash lockfile_path
+
+    current_head=$(git -C "$INSTALL_DIR" rev-parse --verify 'HEAD^{commit}' \
+        2>/dev/null || true)
+    if [[ "$current_head" != "$UPDATE_SOURCE_ORIGINAL_HEAD" ]] \
+       || [[ "$(_update_source_branch)" != "$UPDATE_SOURCE_ORIGINAL_BRANCH" ]] \
+       || [[ "$(_update_source_upstream)" != "$UPDATE_SOURCE_ORIGINAL_UPSTREAM" ]]; then
+        log_error "The installed source checkout changed after update preflight."
+        log_info "No candidate object or source change was applied. Retry from a stable checkout."
+        return 1
+    fi
+    if ! _update_tracked_tree_clean; then
+        log_error "Tracked source files changed after update preflight."
+        log_info "No candidate object or source change was applied. Retry from a clean checkout."
+        return 1
+    fi
+
+    lockfile_path="${INSTALL_DIR}/data/assistant-first/desired-state/extensions.lock.json"
+    current_lockfile_hash=$(_update_file_sha256 "$lockfile_path" 2>/dev/null || true)
+    if [[ "$current_lockfile_hash" != "$UPDATE_SOURCE_LOCKFILE_HASH" ]]; then
+        log_error "Assistant First desired state changed after update preflight."
+        log_info "No candidate object or source change was applied. Retry after the extension operation finishes."
+        return 1
+    fi
+}
+
+_restore_assistant_first_source() {
+    local revision="$1" current_head restored_head
+    if [[ ! "$revision" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]] \
+       || ! git -C "$INSTALL_DIR" cat-file -e "${revision}^{commit}" 2>/dev/null; then
+        log_error "CRITICAL: The recorded source rollback revision is invalid."
+        return 1
+    fi
+    current_head=$(git -C "$INSTALL_DIR" rev-parse --verify 'HEAD^{commit}' \
+        2>/dev/null || true)
+    if [[ "$current_head" != "$revision" ]] \
+       && { [[ -z "$UPDATE_SOURCE_APPLIED_HEAD" ]] \
+            || [[ "$current_head" != "$UPDATE_SOURCE_APPLIED_HEAD" ]]; }; then
+        log_error "CRITICAL: Installed HEAD no longer matches the applied update candidate."
+        log_info "Refusing to erase an unexpected source revision; manual recovery is required."
+        return 1
+    fi
+    if ! git -C "$INSTALL_DIR" reset --hard "$revision" >/dev/null 2>&1; then
+        log_error "CRITICAL: Could not restore source revision ${revision}."
+        return 1
+    fi
+    restored_head=$(git -C "$INSTALL_DIR" rev-parse --verify 'HEAD^{commit}' \
+        2>/dev/null || true)
+    if [[ "$restored_head" != "$revision" ]] || ! _update_tracked_tree_clean; then
+        log_error "CRITICAL: Source rollback verification failed."
+        return 1
+    fi
+    log_ok "Restored source revision ${revision}."
+}
+
+_clear_assistant_first_source_state() {
+    UPDATE_SOURCE_ORIGINAL_HEAD=""
+    UPDATE_SOURCE_ORIGINAL_BRANCH=""
+    UPDATE_SOURCE_ORIGINAL_UPSTREAM=""
+    UPDATE_SOURCE_LOCKFILE_HASH=""
+    UPDATE_SOURCE_APPLIED_HEAD=""
 }
 
 _assistant_first_source_branch() {
@@ -563,15 +703,24 @@ wait_for_healthy() {
     return 1
 }
 
-# _update_rollback <reason> <snap_dir> [compose_flags]
-#   Restores the given snapshot and restarts services.
+# _update_rollback <reason> <snap_dir> [compose_flags] [source_revision]
+#   Restores an optional validated source revision, then the snapshot, and
+#   restarts services. Legacy callers omit source_revision and are unchanged.
 #   Called when cmd_update encounters a non-zero exit at any step.
 _update_rollback() {
     local reason="$1"
     local snap_dir_arg="$2"
     local compose_flags_arg="${3:-}"
+    local source_revision="${4:-}"
 
     log_error "${reason}"
+    if [[ -n "$source_revision" ]] \
+       && ! _restore_assistant_first_source "$source_revision"; then
+        log_error "CRITICAL: Source restore failed. Manual recovery required."
+        log_error "  Source   : ${source_revision}"
+        log_error "  Snapshot : ${snap_dir_arg}"
+        return 1
+    fi
     log_warn "Auto-restoring rollback snapshot and restarting services..."
 
     if ! _restore_snapshot "$snap_dir_arg"; then
@@ -811,12 +960,17 @@ cmd_update() {
     log_info "Starting ODS update..."
 
     local current_version assistant_first_update=false
+    local assistant_first_rollback_source=""
     current_version=$(get_current_version)
 
     if ! ensure_source_checkout_for_update; then
         return 1
     fi
     _load_update_snapshot_contract || return 1
+
+    if is_assistant_first_install; then
+        _capture_assistant_first_source_state || return 1
+    fi
 
     # Assistant First resolves, materializes, and assesses an exact candidate in
     # a private disposable repository. Nothing below this point has changed the
@@ -844,12 +998,33 @@ cmd_update() {
     # ── Step 2: apply the already assessed source candidate ───────────────────
     cd "$INSTALL_DIR"
     if $assistant_first_update; then
+        if ! _verify_assistant_first_source_state; then
+            _cleanup_update_candidate
+            return 1
+        fi
         log_info "Applying exact source candidate ${UPDATE_CANDIDATE_REVISION}..."
         if ! _apply_assistant_first_update_candidate; then
+            local failed_candidate_revision failed_head
+            failed_candidate_revision="$UPDATE_CANDIDATE_REVISION"
+            failed_head=$(git -C "$INSTALL_DIR" rev-parse --verify 'HEAD^{commit}' \
+                2>/dev/null || true)
             _cleanup_update_candidate
-            _update_rollback "Exact candidate checkout failed." \
-                "$snap_dir" "$compose_flags"
+            if [[ "$failed_head" == "$failed_candidate_revision" ]]; then
+                UPDATE_SOURCE_APPLIED_HEAD="$failed_head"
+                _update_rollback "Exact candidate checkout failed." \
+                    "$snap_dir" "$compose_flags" "$UPDATE_SOURCE_ORIGINAL_HEAD"
+            elif [[ "$failed_head" != "$UPDATE_SOURCE_ORIGINAL_HEAD" ]]; then
+                log_error "Exact candidate checkout failed after unexpected source drift."
+                log_info "Refusing to reset an unrecognized revision; manual recovery is required."
+            else
+                log_error "Exact candidate checkout failed before changing installed source."
+                log_info "No service restart or snapshot restore was required."
+            fi
             return 1
+        fi
+        if [[ "$UPDATE_CANDIDATE_REVISION" != "$UPDATE_SOURCE_ORIGINAL_HEAD" ]]; then
+            UPDATE_SOURCE_APPLIED_HEAD="$UPDATE_CANDIDATE_REVISION"
+            assistant_first_rollback_source="$UPDATE_SOURCE_ORIGINAL_HEAD"
         fi
         _cleanup_update_candidate
     else
@@ -871,7 +1046,8 @@ cmd_update() {
                 log_info "Running: $(basename "$migration")"
                 if ! bash "$migration"; then
                     _update_rollback "Migration failed: $(basename "$migration")." \
-                        "$snap_dir" "$compose_flags"
+                        "$snap_dir" "$compose_flags" \
+                        "$assistant_first_rollback_source"
                     return 1
                 fi
             fi
@@ -907,7 +1083,7 @@ cmd_update() {
     if ! wait_for_healthy; then
         _update_rollback \
             "Services failed to become healthy after update (timeout: ${HEALTH_TIMEOUT}s)." \
-            "$snap_dir" "$compose_flags"
+            "$snap_dir" "$compose_flags" "$assistant_first_rollback_source"
         return 1
     fi
 
@@ -925,6 +1101,8 @@ cmd_update() {
         '.version = $v | .last_update = $ts | .last_rollback_point = $snap' \
         > "$tmp_version_file"
     mv -f "$tmp_version_file" "$VERSION_FILE"
+
+    $assistant_first_update && _clear_assistant_first_source_state
 
     log_ok "Update complete! Version: ${new_version}"
     log_info "Rollback point retained at: ${snap_dir}"
