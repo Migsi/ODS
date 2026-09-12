@@ -53,6 +53,76 @@ class OwnerLauncherTests(unittest.TestCase):
             launch.assert_not_called()
 
 
+class HostAgentDiscoveryTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.root = Path(self.directory.name)
+        self.adapter = bridge.SystemdAccessBridge(self.root, "k" * 64)
+
+    def tearDown(self):
+        self.directory.cleanup()
+
+    @contextlib.contextmanager
+    def root_custody(self):
+        info = types.SimpleNamespace(st_mode=0o100755, st_uid=0)
+        with patch.object(bridge.platform, "system", return_value="Linux"), \
+                patch.object(bridge.os, "geteuid", return_value=0), \
+                patch.object(bridge.Path, "is_dir", return_value=True), \
+                patch.object(bridge.Path, "lstat", return_value=info):
+            yield
+
+    def assert_unavailable_without_proc_read(self, properties):
+        with self.root_custody(), \
+                patch.object(self.adapter, "command", return_value=properties), \
+                patch.object(bridge.Path, "read_bytes", side_effect=AssertionError("unexpected /proc read")):
+            status = self.adapter.status()
+        self.assertFalse(status["available"])
+        self.assertFalse(status["runtime_verified"])
+        self.assertEqual(status["reason"], "host-agent-unavailable")
+
+    def test_missing_host_agent_is_classified_before_proc_zero(self):
+        self.assert_unavailable_without_proc_read(
+            "MainPID=0\nUser=\nLoadState=not-found\nActiveState=failed"
+        )
+
+    def test_inactive_root_host_agent_is_classified_before_proc_zero(self):
+        self.assert_unavailable_without_proc_read(
+            "MainPID=0\nUser=\nLoadState=loaded\nActiveState=failed"
+        )
+
+    def test_malformed_root_host_agent_pid_is_classified(self):
+        self.assert_unavailable_without_proc_read(
+            "MainPID=invalid\nUser=root\nLoadState=loaded\nActiveState=active"
+        )
+
+    def test_root_host_agent_exit_during_proc_inspection_is_classified(self):
+        properties = "MainPID=987654\nUser=root\nLoadState=loaded\nActiveState=active"
+        with self.root_custody(), \
+                patch.object(self.adapter, "command", return_value=properties), \
+                patch.object(bridge.Path, "read_bytes", side_effect=FileNotFoundError):
+            status = self.adapter.status()
+        self.assertFalse(status["available"])
+        self.assertEqual(status["reason"], "host-agent-unavailable")
+
+    def test_empty_root_host_agent_cmdline_is_classified(self):
+        properties = "MainPID=987654\nUser=root\nLoadState=loaded\nActiveState=active"
+        with self.root_custody(), \
+                patch.object(self.adapter, "command", return_value=properties), \
+                patch.object(bridge.Path, "read_bytes", return_value=b""):
+            status = self.adapter.status()
+        self.assertFalse(status["available"])
+        self.assertEqual(status["reason"], "host-agent-unavailable")
+
+    def test_live_root_host_agent_still_requires_isolated_execution(self):
+        properties = "MainPID=987654\nUser=root\nLoadState=loaded\nActiveState=active"
+        with self.root_custody(), \
+                patch.object(self.adapter, "command", return_value=properties), \
+                patch.object(bridge.Path, "read_bytes", return_value=b"python3\0/opt/ods-host-agent.py\0"):
+            status = self.adapter.status()
+        self.assertFalse(status["available"])
+        self.assertEqual(status["reason"], "root-host-agent-isolation-required")
+
+
 class FakeBridge(bridge.SystemdAccessBridge):
     """Fake the installed services, retaining the real coordinator and journals."""
     def __init__(self, root):

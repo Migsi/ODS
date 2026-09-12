@@ -338,10 +338,34 @@ class SystemdAccessBridge:
                 raise AccessError("root-program-custody-required")
         # A root host agent must also execute protected code. Normal installs
         # run it as the owner; historical root overrides need an explicit repair.
-        agent_user = self.command(["systemctl", "show", "ods-host-agent.service", "--property=User", "--value"])
+        agent_state = self.command([
+            "systemctl", "show", "ods-host-agent.service",
+            "--property=LoadState,ActiveState,MainPID,User",
+        ])
+        agent_fields = {}
+        for line in agent_state.splitlines():
+            key, separator, value = line.partition("=")
+            if separator:
+                agent_fields[key] = value
+        if agent_fields.get("LoadState") != "loaded":
+            raise AccessError("host-agent-unavailable")
+        agent_user = agent_fields.get("User", "")
         if agent_user in ("", "root", "0"):
-            pid = int(self.command(["systemctl", "show", "ods-host-agent.service", "--property=MainPID", "--value"]))
-            args = Path("/proc/%d/cmdline" % pid).read_bytes().split(b"\0")
+            try:
+                pid = int(agent_fields.get("MainPID", ""))
+            except (TypeError, ValueError):
+                raise AccessError("host-agent-unavailable") from None
+            if agent_fields.get("ActiveState") != "active" or pid <= 0:
+                raise AccessError("host-agent-unavailable")
+            try:
+                args = Path("/proc/%d/cmdline" % pid).read_bytes().split(b"\0")
+            except OSError:
+                # The unit can stop between systemctl inspection and /proc.
+                # Treat that race as unavailable, never as an unclassified
+                # inspection crash and never continue with stale identity.
+                raise AccessError("host-agent-unavailable") from None
+            if not any(args):
+                raise AccessError("host-agent-unavailable")
             if b"-I" not in args: raise AccessError("root-host-agent-isolation-required")
             scripts = [Path(os.fsdecode(arg)) for arg in args if arg.endswith(b"ods-host-agent.py")]
             if len(scripts) != 1 or not scripts[0].is_absolute(): raise AccessError("root-host-agent-custody-required")
