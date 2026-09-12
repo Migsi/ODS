@@ -360,7 +360,11 @@ backup_user_data() {
             local dest_dir="$backup_dir/$(dirname "$path")"
             local -a extra_args=()
             if [[ "$path" == "data/user-extensions" ]]; then
-                extra_args+=(--exclude=/.tmp/)
+                # The source is passed without a trailing slash, so rsync's
+                # transfer root includes the user-extensions directory name.
+                # Anchor the filter to that root to exclude only its staging
+                # directory while retaining any extension-owned nested path.
+                extra_args+=(--exclude=/user-extensions/.tmp/)
             fi
             mkdir -p "$dest_dir"
             rsync_with_progress "$full_path" "$dest_dir/" "Backing up $path" \
