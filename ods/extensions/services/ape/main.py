@@ -928,7 +928,12 @@ async def verify(req: VerifyRequest, request: Request, api_key: str = Depends(ve
         "client": client_host,
     }
     if approval_token:
-        entry["approval_token"] = approval_token
+        # Never persist the usable token. audit.jsonl sits under data/ape (a
+        # path `ods backup` captures) and GET /audit echoes entries verbatim,
+        # so a raw token here is a replayable credential for the approval gate
+        # that /approve exists to enforce. Record only a non-usable prefix —
+        # the same form /approve already logs — and correlate via "id".
+        entry["approval_token_prefix"] = approval_token[:12] + "..."
     if grant_used is not None:
         # Mark the approved allow so the audit trail shows it bypassed an
         # exhausted window via a consumed one-shot grant.

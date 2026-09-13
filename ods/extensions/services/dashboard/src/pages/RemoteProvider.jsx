@@ -320,7 +320,7 @@ export default function RemoteProvider({ compact = false }) {
   const [testResult, setTestResult] = useState(null)
   const [testError, setTestError] = useState(null)
   const [form, setForm] = useState(INITIAL_FORM)
-  const formDirtyRef = useRef(false)
+  const formEdit = useRef({ dirty: false, revision: 0 })
   const [planning, setPlanning] = useState(false)
   const [applyingAction, setApplyingAction] = useState(null)
   const [planResult, setPlanResult] = useState(null)
@@ -338,7 +338,7 @@ export default function RemoteProvider({ compact = false }) {
       const payload = await fetchJson('/api/remote-provider/status')
       setStatusData(payload)
       const provider = payload?.routeState?.provider
-      if (!formDirtyRef.current && provider) {
+      if (!formEdit.current.dirty && provider) {
         setForm(current => ({
           ...current,
           baseUrl: provider.baseUrl || '',
@@ -392,8 +392,10 @@ export default function RemoteProvider({ compact = false }) {
     void loadPeerModels()
   }, [loadPeerModels, statusData?.capabilities?.odsPeerLifecycle, statusData])
 
+
   const updateForm = (key, value) => {
-    formDirtyRef.current = true
+    formEdit.current.dirty = true
+    formEdit.current.revision += 1
     setForm(current => ({ ...current, [key]: value }))
   }
 
@@ -435,12 +437,13 @@ export default function RemoteProvider({ compact = false }) {
     setTestResult(null)
     setTestError(null)
     try {
+      const submittedRevision = formEdit.current.revision
       const payload = action === 'configure' ? configurePayload(form) : { action }
       const result = await fetchJson('/api/remote-provider/apply', jsonOptions(payload), LIFECYCLE_TIMEOUT_MS)
       setLifecycleResult(result)
-      if (action === 'configure') {
+      if (action === 'configure' && formEdit.current.revision === submittedRevision) {
         setForm(current => ({ ...current, apiKey: '' }))
-        formDirtyRef.current = false
+        formEdit.current.dirty = false
       }
       await loadStatus({ quiet: true })
     } catch (err) {
