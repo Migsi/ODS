@@ -1,23 +1,8 @@
-"""Comprehensive tests for extension_application_record_store.
-
-Covers:
-- Happy create/publish, read, active, compare_replace, compare_delete
-- Exact duplicate/replay distinction
-- Duplicate-key and noncanonical JSON rejection
-- Oversize, short-write, fsync, replace, response-loss failures
-- Stale CAS, absent CAS
-- Symlink/FIFO/device/hardlink/mode/owner/root-swap/name-swap attacks
-- Input mutation during call
-- Concurrent cross-process lock contention
-- Both umask 002 and umask 077
-- Windows import fails with controlled platform code
-- No production import/wiring
-"""
+"""Adversarial tests for the dormant active-application record store."""
 
 from __future__ import annotations
 
 import ast
-import errno
 import hashlib
 import json
 import multiprocessing
@@ -25,19 +10,28 @@ import os
 import stat
 import sys
 import tempfile
-import unittest
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
+
+import pytest
 
 BIN_DIR = Path(__file__).resolve().parents[4] / "bin"
 ODS_ROOT = Path(__file__).resolve().parents[4]
 if str(BIN_DIR) not in sys.path:
     sys.path.insert(0, str(BIN_DIR))
 
+import extension_application_identity as app_identity  # noqa: E402
+import extension_application_observation as observation  # noqa: E402
+import extension_application_record_store as store_mod  # noqa: E402
+import extension_lifecycle_plan as lifecycle_plan  # noqa: E402
+import extension_lifecycle_work as lifecycle_work  # noqa: E402
+
+
 SUPPORTED = (
     os.name == "posix"
+    and store_mod.fcntl is not None
     and hasattr(os, "O_DIRECTORY")
     and hasattr(os, "O_NOFOLLOW")
     and hasattr(os, "O_NONBLOCK")
@@ -46,34 +40,29 @@ SUPPORTED = (
     and os.stat in os.supports_follow_symlinks
     and os.unlink in os.supports_dir_fd
 )
-if SUPPORTED:
-    import extension_application_record_store as store_mod
-    import extension_lifecycle_plan as lifecycle_plan
-    import extension_lifecycle_work as lifecycle_work
-else:
-    store_mod = None  # type: ignore[assignment]
-
-# ---------------------------------------------------------------------------
-# Constants / fixtures (aligned with test_extension_application_observation)
-# ---------------------------------------------------------------------------
 
 TRANSACTION_ID = "txn-" + "1" * 24
 PLAN_HASH = "2" * 64
 DEFINITION_SHA = "sha256:" + "3" * 64
 COMPOSE_SHA = "sha256:" + "4" * 64
+CONFIG_SHA = "sha256:" + "e" * 64
+OTHER_CONFIG_SHA = "sha256:" + "f" * 64
 SERVICE_ID = "documents"
 VERSION = "1.2.3"
-ACTION = "install"
-CONFIG_SHA = "sha256:" + "e" * 64
-CONTAINER_NAMES = ("documents-api", "documents-worker")
+CONTAINERS = ("documents-api", "documents-worker")
 
 
-def _definition(service_id: str, compose: str | None = COMPOSE_SHA) -> dict:
+def _definition(
+    service_id: str,
+    *,
+    version: str = VERSION,
+    compose: str | None = COMPOSE_SHA,
+) -> dict:
     return {
         "id": service_id,
         "serviceType": "docker",
         "manifestSchemaVersion": "ods.services.v2",
-        "version": VERSION,
+        "version": version,
         "dataSchemaVersion": "1",
         "odsCompatibility": {"minimum": "2.0.0", "maximum": "3.0.0"},
         "definitionSha256": DEFINITION_SHA,
@@ -90,7 +79,7 @@ def _definition(service_id: str, compose: str | None = COMPOSE_SHA) -> dict:
         "artifacts": {
             "images": [
                 {
-                    "reference": f"example.invalid/{service_id}:{VERSION}",
+                    "reference": f"example.invalid/{service_id}:{version}",
                     "digest": "sha256:" + "5" * 64,
                     "downloadBytes": 123,
                 }
@@ -105,36 +94,49 @@ def _definition(service_id: str, compose: str | None = COMPOSE_SHA) -> dict:
     }
 
 
-def _transaction(state: str, definitions: list[dict]) -> dict:
+def _transaction(
+    definition: dict,
+    action: str,
+    *,
+    transaction_id: str = TRANSACTION_ID,
+    plan_hash: str = PLAN_HASH,
+) -> dict:
     return {
-        "transactionId": TRANSACTION_ID,
-        "state": state,
+        "transactionId": transaction_id,
+        "state": "applying",
         "approval": {
-            "transactionId": TRANSACTION_ID,
-            "planHash": PLAN_HASH,
+            "transactionId": transaction_id,
+            "planHash": plan_hash,
             "approvedBy": "owner",
         },
         "envelope": {
-            "planHash": PLAN_HASH,
+            "planHash": plan_hash,
             "plan": {
-                "selectedServices": [d["id"] for d in definitions],
+                "selectedServices": [definition["id"]],
                 "operations": [
-                    {"serviceId": d["id"], "action": ACTION} for d in definitions
+                    {"serviceId": definition["id"], "action": action}
                 ],
-                "definitions": definitions,
+                "definitions": [definition],
             },
         },
     }
 
 
-def _command(operation_key: str, service_ids: list[str], payload: dict):
+def _command(
+    service_id: str,
+    action: str,
+    *,
+    version: str = VERSION,
+    transaction_id: str = TRANSACTION_ID,
+    plan_hash: str = PLAN_HASH,
+) -> lifecycle_work.LifecycleWorkCommand:
     unsigned = {
         "schema": lifecycle_work.REQUEST_SCHEMA,
-        "transactionId": TRANSACTION_ID,
-        "planHash": PLAN_HASH,
-        "operationKey": operation_key,
-        "serviceIds": service_ids,
-        "payload": payload,
+        "transactionId": transaction_id,
+        "planHash": plan_hash,
+        "operationKey": f"apply:{service_id}",
+        "serviceIds": [service_id],
+        "payload": {"operation": {"serviceId": service_id, "action": action}},
     }
     request = {
         **unsigned,
@@ -147,377 +149,513 @@ def _command(operation_key: str, service_ids: list[str], payload: dict):
             ).encode("utf-8")
         ).hexdigest(),
     }
-    return lifecycle_work.parse_lifecycle_work_request(request)
+    parsed = lifecycle_work.parse_lifecycle_work_request(request)
+    definition = _definition(service_id, version=version)
+    return lifecycle_plan.bind_lifecycle_plan(
+        parsed,
+        _transaction(
+            definition,
+            action,
+            transaction_id=transaction_id,
+            plan_hash=plan_hash,
+        ),
+    )
 
 
-def _bound_command(
-    service_id: str = SERVICE_ID,
-    action: str = ACTION,
+def _record_dict(
+    service_id: str,
+    *,
+    action: str = "install",
     version: str = VERSION,
-    compose: str | None = COMPOSE_SHA,
-) -> lifecycle_work.LifecycleWorkCommand:
-    definitions = [_definition(service_id, compose)]
-    tx = _transaction("applying", definitions)
-    payload = {"operation": {"serviceId": service_id, "action": action}}
-    cmd = _command(f"apply:{service_id}", [service_id], payload)
-    return lifecycle_plan.bind_lifecycle_plan(cmd, tx)
+    config_sha256: str = CONFIG_SHA,
+    containers: tuple[str, ...] | None = None,
+) -> dict:
+    command = _command(service_id, action, version=version)
+    identity = app_identity.produce_application_identity(command)
+    raw = observation.produce_active_record(
+        identity,
+        config_sha256,
+        containers or (f"{service_id}-api",),
+    )
+    return observation.parse_active_record(raw)
 
 
-# ---------------------------------------------------------------------------
-# Windows import test
-# ---------------------------------------------------------------------------
+def _canonical(value: object) -> bytes:
+    return (
+        json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        )
+        + "\n"
+    ).encode("utf-8")
 
 
-class WindowsImportTests(unittest.TestCase):
-    """Windows import must fail with controlled platform code, not crash."""
+def _publish_process(root: str, service_id: str, config: str, gate, output) -> None:
+    try:
+        target = store_mod.ApplicationRecordStore(root)
+        command = _command(service_id, "install")
+        gate.wait(10)
+        result = target.publish(command, config, (f"{service_id}-api",))
+        output.put(("ok", result.outcome, result.record.record_sha256))
+    except store_mod.ApplicationRecordStoreError as error:
+        output.put(("error", error.code))
+    except BaseException as error:  # pragma: no cover - diagnostic boundary
+        output.put(("unexpected", type(error).__name__))
 
-    def test_windows_import_platform_check(self) -> None:
-        if SUPPORTED:
-            self.skipTest("POSIX platform; cannot simulate Windows import here")
-        self.assertIsNone(store_mod)
+
+def _assert_code(code: str, call) -> None:
+    with pytest.raises(store_mod.ApplicationRecordStoreError) as caught:
+        call()
+    assert caught.value.code == code
+    assert str(caught.value) == code
 
 
-# ---------------------------------------------------------------------------
-# POSIX store tests
-# ---------------------------------------------------------------------------
+def test_platform_failure_is_controlled_and_precedes_filesystem_access():
+    with (
+        mock.patch.object(store_mod.os, "name", "nt"),
+        mock.patch.object(store_mod, "_open_root") as opened,
+    ):
+        _assert_code(
+            "application-record-store-platform-unsupported",
+            lambda: store_mod.ApplicationRecordStore("C:/not-opened"),
+        )
+    opened.assert_not_called()
 
 
-@unittest.skipUnless(SUPPORTED, "requires POSIX descriptor-relative filesystem APIs")
-class ApplicationRecordStoreTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self.temp = tempfile.TemporaryDirectory()
-        self.root = Path(self.temp.name) / "application-state"
-        self.root.mkdir(mode=0o700)
-        self.root.chmod(0o700)
-        self.store = store_mod.ApplicationRecordStore(self.root)
-        self.command = _bound_command()
-        self.config_sha = CONFIG_SHA
-        self.containers: tuple[str, ...] = CONTAINER_NAMES
+@pytest.mark.skipif(not SUPPORTED, reason="requires POSIX descriptor APIs")
+class TestApplicationRecordStore:
+    @pytest.fixture(autouse=True)
+    def _store(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            self.root = Path(temporary) / "application-state"
+            self.root.mkdir(mode=0o700)
+            self.root.chmod(0o700)
+            self.store = store_mod.ApplicationRecordStore(self.root)
+            self.snapshot_path = self.root / store_mod.SNAPSHOT_NAME
+            yield
 
-    def tearDown(self) -> None:
-        self.temp.cleanup()
-
-    @property
-    def snapshot_path(self) -> Path:
-        return self.root / store_mod.SNAPSHOT_NAME
-
-    def assert_code(self, code: str, call) -> None:
-        with self.assertRaises(store_mod.ApplicationRecordStoreError) as caught:
-            call()
-        self.assertEqual(caught.exception.code, code)
-        self.assertEqual(str(caught.exception), code)
-
-    # -- Basic happy path --
-
-    def test_create_then_read(self) -> None:
-        result = self.store.publish(self.command, self.config_sha, self.containers)
-        self.assertFalse(result.duplicate)
-        self.assertEqual(result.entry.service_id, "documents")
-
-        read = self.store.read("documents")
-        self.assertTrue(read.found)
-        self.assertIsNotNone(read.entry)
-        self.assertEqual(read.entry.record_sha256, result.entry.record_sha256)
-
-    def test_create_exact_replay_is_duplicate(self) -> None:
-        first = self.store.publish(self.command, self.config_sha, self.containers)
-        self.assertFalse(first.duplicate)
-        replay = self.store.publish(self.command, self.config_sha, self.containers)
-        self.assertTrue(replay.duplicate)
-        self.assertEqual(replay.entry.record_sha256, first.entry.record_sha256)
-
-    def test_read_absent_service(self) -> None:
-        read = self.store.read("nonexistent")
-        self.assertFalse(read.found)
-        self.assertIsNone(read.entry)
-
-    def test_active_returns_sorted(self) -> None:
-        cmd_b = _bound_command("beta-service")
-        cmd_a = _bound_command("alpha-service")
-        cmd_c = _bound_command("gamma-service")
-
-        self.store.publish(cmd_b, self.config_sha, ("beta-api",))
-        self.store.publish(cmd_a, self.config_sha, ("alpha-api",))
-        self.store.publish(cmd_c, self.config_sha, ("gamma-api",))
-
-        active = self.store.active()
-        self.assertEqual(len(active), 3)
-        self.assertEqual(
-            [e.service_id for e in active],
-            ["alpha-service", "beta-service", "gamma-service"],
+    def _publish(
+        self,
+        *,
+        service_id: str = SERVICE_ID,
+        action: str = "install",
+        version: str = VERSION,
+        config: str = CONFIG_SHA,
+        containers: tuple[str, ...] = CONTAINERS,
+        previous: str | None = None,
+    ) -> store_mod.PublishResult:
+        return self.store.publish(
+            _command(service_id, action, version=version),
+            config,
+            containers,
+            previous,
         )
 
-    # -- Compare-and-replace --
+    def test_create_persists_exact_canonical_full_record(self):
+        result = self._publish()
+        assert result.outcome == "created"
+        assert isinstance(result.record, store_mod.ApplicationRecord)
+        assert result.record.service_id == SERVICE_ID
+        assert result.record.expected_containers == CONTAINERS
+        assert result.record.config_sha256 == CONFIG_SHA
+        assert stat.S_IMODE(self.snapshot_path.stat().st_mode) == 0o600
+        assert self.snapshot_path.stat().st_nlink == 1
 
-    def test_compare_replace_happy(self) -> None:
-        first = self.store.publish(self.command, self.config_sha, self.containers)
-        new_command = _bound_command("documents", "update", "2.0.0")
-        new_config = "sha256:" + "f" * 64
+        payload = json.loads(self.snapshot_path.read_text(encoding="utf-8"))
+        assert payload["schema"] == store_mod.STORE_SCHEMA
+        assert payload["records"] == [
+            observation.parse_active_record(
+                observation.produce_active_record(
+                    app_identity.produce_application_identity(
+                        _command(SERVICE_ID, "install")
+                    ),
+                    CONFIG_SHA,
+                    CONTAINERS,
+                )
+            )
+        ]
+        assert self.store.snapshot(SERVICE_ID) == result.record
 
-        result = self.store.compare_replace(
-            new_command, new_config, self.containers, first.entry.record_sha256
-        )
-        self.assertFalse(result.duplicate)
-        read = self.store.read("documents")
-        self.assertTrue(read.found)
-        self.assertEqual(read.entry.record_sha256, result.entry.record_sha256)
-        self.assertNotEqual(read.entry.record_sha256, first.entry.record_sha256)
+    def test_public_records_are_frozen_and_nested_values_are_immutable(self):
+        record = self._publish().record
+        with pytest.raises(FrozenInstanceError):
+            record.service_id = "changed"  # type: ignore[misc]
+        assert isinstance(record.expected_containers, tuple)
+        with pytest.raises(TypeError):
+            record.expected_containers[0] = "changed"  # type: ignore[index]
+        assert self.store.snapshot(SERVICE_ID) == record
 
-    def test_compare_replace_stale(self) -> None:
-        self.store.publish(self.command, self.config_sha, self.containers)
-        stale_sha = "0" * 64
-        new_command = _bound_command("documents", "update", "2.0.0")
-        self.assert_code(
-            "store-cas-stale",
-            lambda: self.store.compare_replace(
-                new_command, self.config_sha, self.containers, stale_sha
-            ),
-        )
+    def test_active_records_are_sorted_and_absent_snapshot_is_empty(self):
+        assert self.store.active() == ()
+        assert self.store.snapshot("missing") is None
+        self._publish(service_id="zeta", containers=("zeta-api",))
+        self._publish(service_id="alpha", containers=("alpha-api",))
+        assert [record.service_id for record in self.store.active()] == [
+            "alpha",
+            "zeta",
+        ]
 
-    def test_compare_replace_absent(self) -> None:
-        new_command = _bound_command("documents", "update", "2.0.0")
-        self.assert_code(
-            "store-cas-absent",
-            lambda: self.store.compare_replace(
-                new_command, self.config_sha, self.containers, "1" * 64
-            ),
-        )
+    @pytest.mark.parametrize("action", ["install", "enable", "repair", "update"])
+    def test_every_apply_action_can_be_persisted(self, action: str):
+        result = self._publish(action=action)
+        assert result.record.action == action
 
-    def test_compare_replace_exact_replay(self) -> None:
-        first = self.store.publish(self.command, self.config_sha, self.containers)
-        result = self.store.compare_replace(
-            self.command, self.config_sha, self.containers, first.entry.record_sha256
-        )
-        self.assertTrue(result.duplicate)
-        self.assertEqual(result.entry.record_sha256, first.entry.record_sha256)
-
-    # -- Compare-and-delete --
-
-    def test_compare_delete_happy(self) -> None:
-        first = self.store.publish(self.command, self.config_sha, self.containers)
-        result = self.store.compare_delete(
-            "documents", first.entry.record_sha256
-        )
-        self.assertTrue(result.deleted)
-        self.assertIsNotNone(result.prior)
-        self.assertEqual(result.prior.record_sha256, first.entry.record_sha256)
-
-        read = self.store.read("documents")
-        self.assertFalse(read.found)
-
-    def test_compare_delete_stale(self) -> None:
-        self.store.publish(self.command, self.config_sha, self.containers)
-        self.assert_code(
-            "store-cas-stale",
-            lambda: self.store.compare_delete("documents", "0" * 64),
-        )
-
-    def test_compare_delete_absent(self) -> None:
-        self.assert_code(
-            "store-cas-absent",
-            lambda: self.store.compare_delete("documents", "0" * 64),
-        )
-
-    # -- Conflict --
-
-    def test_publish_conflict_different_record(self) -> None:
-        self.store.publish(self.command, self.config_sha, self.containers)
-        new_command = _bound_command("documents", "update", "2.0.0")
-        self.assert_code(
-            "store-publish-conflict",
-            lambda: self.store.publish(new_command, self.config_sha, self.containers),
-        )
-
-    # -- Umask tests --
-
-    def test_mode_is_0600_under_permissive_umask(self) -> None:
-        old_umask = os.umask(0o002)
-        try:
-            self.store.publish(self.command, self.config_sha, self.containers)
-            mode = stat.S_IMODE(self.snapshot_path.stat().st_mode)
-            self.assertEqual(mode, 0o600)
-        finally:
-            os.umask(old_umask)
-
-    def test_mode_is_0600_under_restrictive_umask(self) -> None:
-        old_umask = os.umask(0o077)
-        try:
-            self.store.publish(self.command, self.config_sha, self.containers)
-            mode = stat.S_IMODE(self.snapshot_path.stat().st_mode)
-            self.assertEqual(mode, 0o600)
-        finally:
-            os.umask(old_umask)
-
-    # -- Symlink/FIFO/device attacks --
-
-    def test_symlink_snapshot_rejected(self) -> None:
-        self.store.publish(self.command, self.config_sha, self.containers)
-        real_data = self.snapshot_path.read_bytes()
-        self.snapshot_path.unlink()
-        fake = self.root / "fake.json"
-        fake.write_bytes(real_data)
-        self.snapshot_path.symlink_to(fake)
-        self.assert_code("store-corrupt-snapshot-file", self.store.active)
-        self.snapshot_path.unlink(missing_ok=True)
-
-    def test_fifo_snapshot_rejected(self) -> None:
-        self.store.publish(self.command, self.config_sha, self.containers)
-        self.snapshot_path.unlink()
-        os.mkfifo(str(self.snapshot_path))
-        self.assert_code("store-corrupt-snapshot-file", self.store.active)
-
-    def test_device_snapshot_rejected(self) -> None:
-        self.store.publish(self.command, self.config_sha, self.containers)
-        self.snapshot_path.unlink()
-        try:
-            dev_fd = os.mknod(str(self.snapshot_path), stat.S_IFCHR | 0o600, 0)
-            os.close(dev_fd)
-        except OSError:
-            self.skipTest("mknod not permitted (likely container)")
-        self.assert_code("store-corrupt-snapshot-file", self.store.active)
-
-    def test_hardlink_snapshot_rejected(self) -> None:
-        self.store.publish(self.command, self.config_sha, self.containers)
-        extra_link = self.root / "extra-link.json"
-        os.link(str(self.snapshot_path), str(extra_link))
-        self.assert_code("store-corrupt-snapshot-nlink", self.store.active)
-
-    # -- Mode/owner attacks --
-
-    def test_wrong_mode_snapshot_rejected(self) -> None:
-        self.store.publish(self.command, self.config_sha, self.containers)
-        self.snapshot_path.chmod(0o755)
-        self.assert_code("store-corrupt-snapshot-mode", self.store.active)
-
-    def test_wrong_owner_snapshot_rejected(self) -> None:
-        if os.geteuid() != 0:
-            self.skipTest("requires root to chown to another uid")
-        self.store.publish(self.command, self.config_sha, self.containers)
-        try:
-            os.chown(str(self.snapshot_path), 65534, -1)
-        except OSError:
-            try:
-                os.chown(str(self.snapshot_path), 1, -1)
-            except OSError:
-                self.skipTest("cannot chown to alternative uid")
-        self.assert_code("store-corrupt-snapshot-owner", self.store.active)
-
-    # -- Root-swap / name-swap --
-
-    def test_root_replaced_with_symlink(self) -> None:
-        self.store.publish(self.command, self.config_sha, self.containers)
-        try:
-            self.root.rmdir()
-        except OSError:
-            pass
-        decoy = Path(self.temp.name) / "decoy"
-        decoy.mkdir(mode=0o700)
-        self.root.symlink_to(decoy)
-        self.assert_code("store-root-invalid", self.store.active)
-
-    def test_root_removed(self) -> None:
-        self.store.publish(self.command, self.config_sha, self.containers)
-        for f in self.root.iterdir():
-            if f.is_file():
-                f.unlink()
-        self.root.rmdir()
-        self.assert_code("store-root-missing", self.store.active)
-
-    # -- Input mutation --
-
-    def test_input_mutation_does_not_affect_store(self) -> None:
-        result = self.store.publish(self.command, self.config_sha, self.containers)
-        active = self.store.active()
-        self.assertEqual(len(active), 1)
-        self.assertEqual(active[0].record_sha256, result.entry.record_sha256)
-
-    # -- Noncanonical JSON --
-
-    def test_noncanonical_snapshot_rejected(self) -> None:
-        self.store.publish(self.command, self.config_sha, self.containers)
-        raw = self.snapshot_path.read_bytes()
-        self.snapshot_path.write_bytes(raw.rstrip(b"\n"))
-        self.assert_code("store-noncanonical", self.store.active)
-
-    def test_duplicate_key_snapshot_rejected(self) -> None:
-        self.store.publish(self.command, self.config_sha, self.containers)
-        self.snapshot_path.write_bytes(
-            b'{"schema":"ods.extension-application-records.v1",'
-            b'"schema":"duplicate","records":[]}\n'
-        )
-        self.assert_code("store-json-invalid", self.store.active)
-
-    # -- Oversize --
-
-    def test_oversize_snapshot_rejected(self) -> None:
-        self.store.publish(self.command, self.config_sha, self.containers)
-        big = b"x" * (store_mod.MAX_FILE_BYTES + 1)
-        self.snapshot_path.write_bytes(big)
-        self.assert_code("store-oversize", self.store.active)
-
-    # -- Short write / fsync / replace failures --
-
-    def test_short_write_fails(self) -> None:
-        self.store.publish(self.command, self.config_sha, self.containers)
+    def test_exact_replay_with_and_without_matching_previous_does_not_rewrite(self):
+        created = self._publish()
         before = self.snapshot_path.read_bytes()
+        before_stat = self.snapshot_path.stat()
+        replay = self._publish()
+        matching = self._publish(previous=created.record.record_sha256)
+        after_stat = self.snapshot_path.stat()
+        assert replay.outcome == matching.outcome == "replayed"
+        assert self.snapshot_path.read_bytes() == before
+        assert (after_stat.st_ino, after_stat.st_mtime_ns) == (
+            before_stat.st_ino,
+            before_stat.st_mtime_ns,
+        )
 
-        write_calls: list[int] = []
+    def test_exact_replay_with_wrong_previous_conflicts_without_write(self):
+        self._publish()
+        before = self.snapshot_path.read_bytes()
+        _assert_code(
+            "application-record-store-conflict",
+            lambda: self._publish(previous="0" * 64),
+        )
+        assert self.snapshot_path.read_bytes() == before
 
-        def fake_write(fd, data, *args, **kwargs):
-            write_calls.append(len(data))
-            if len(write_calls) == 1:
-                return len(data)
+    def test_absent_with_previous_conflicts_before_snapshot_creation(self):
+        _assert_code(
+            "application-record-store-conflict",
+            lambda: self._publish(previous="0" * 64),
+        )
+        assert not self.snapshot_path.exists()
+
+    def test_divergent_without_or_with_stale_previous_conflicts(self):
+        created = self._publish()
+        before = self.snapshot_path.read_bytes()
+        _assert_code(
+            "application-record-store-conflict",
+            lambda: self._publish(
+                action="update", version="2.0.0", config=OTHER_CONFIG_SHA
+            ),
+        )
+        _assert_code(
+            "application-record-store-conflict",
+            lambda: self._publish(
+                action="update",
+                version="2.0.0",
+                config=OTHER_CONFIG_SHA,
+                previous="0" * 64,
+            ),
+        )
+        assert self.snapshot_path.read_bytes() == before
+        assert self.store.snapshot(SERVICE_ID) == created.record
+
+    def test_matching_previous_replaces_exactly_once(self):
+        created = self._publish()
+        replaced = self._publish(
+            action="update",
+            version="2.0.0",
+            config=OTHER_CONFIG_SHA,
+            previous=created.record.record_sha256,
+        )
+        assert replaced.outcome == "replaced"
+        assert replaced.record.action == "update"
+        assert replaced.record.version == "2.0.0"
+        assert self.store.snapshot(SERVICE_ID) == replaced.record
+        assert self._publish(
+            action="update",
+            version="2.0.0",
+            config=OTHER_CONFIG_SHA,
+            previous=replaced.record.record_sha256,
+        ).outcome == "replayed"
+
+    def test_remove_absent_never_claims_deletion_or_creates_state(self):
+        result = self.store.remove(SERVICE_ID, "0" * 64)
+        assert result == store_mod.RemoveResult(outcome="absent", prior=None)
+        assert not self.snapshot_path.exists()
+
+    def test_remove_is_exact_cas_and_replay_observes_absence(self):
+        created = self._publish()
+        before = self.snapshot_path.read_bytes()
+        _assert_code(
+            "application-record-store-conflict",
+            lambda: self.store.remove(SERVICE_ID, "0" * 64),
+        )
+        assert self.snapshot_path.read_bytes() == before
+        removed = self.store.remove(SERVICE_ID, created.record.record_sha256)
+        assert removed.outcome == "removed"
+        assert removed.prior == created.record
+        assert self.store.snapshot(SERVICE_ID) is None
+        replay = self.store.remove(SERVICE_ID, created.record.record_sha256)
+        assert replay.outcome == "absent"
+        assert replay.prior is None
+        assert json.loads(self.snapshot_path.read_text())["records"] == []
+
+    @pytest.mark.parametrize("ambient", [0o002, 0o077])
+    def test_snapshot_mode_is_exact_under_supported_umasks(self, ambient: int):
+        previous = os.umask(ambient)
+        try:
+            self._publish()
+        finally:
+            os.umask(previous)
+        assert stat.S_IMODE(self.snapshot_path.stat().st_mode) == 0o600
+
+    @pytest.mark.parametrize(
+        "bad",
+        [None, True, "", "A", "unsafe/path", "a" * 129],
+    )
+    def test_service_id_validation_is_bounded_and_value_free(self, bad):
+        _assert_code(
+            "application-record-store-binding-invalid",
+            lambda: self.store.snapshot(bad),
+        )
+        assert str(bad) not in str(
+            store_mod.ApplicationRecordStoreError(
+                "application-record-store-binding-invalid"
+            )
+        )
+
+    def test_record_inputs_are_validated_before_root_reopen_or_temp_allocation(self):
+        with mock.patch.object(store_mod, "_open_root") as opened:
+            _assert_code(
+                "application-record-store-record-invalid",
+                lambda: self.store.publish(
+                    _command(SERVICE_ID, "install"), "secret-invalid", CONTAINERS
+                ),
+            )
+        opened.assert_not_called()
+        assert list(self.root.iterdir()) == []
+
+    def test_previous_hash_is_validated_before_root_reopen(self):
+        with mock.patch.object(store_mod, "_open_root") as opened:
+            _assert_code(
+                "application-record-store-binding-invalid",
+                lambda: self._publish(previous="invalid-secret"),
+            )
+        opened.assert_not_called()
+
+    def test_invalid_candidate_is_rejected_before_temp_allocation(self):
+        beta = _record_dict("beta")
+        alpha = _record_dict("alpha")
+        root_fd = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            with mock.patch.object(store_mod.os, "open") as opened:
+                _assert_code(
+                    "application-record-store-order",
+                    lambda: store_mod._write_snapshot(root_fd, [beta, alpha]),
+                )
+            opened.assert_not_called()
+        finally:
+            os.close(root_fd)
+
+    @pytest.mark.parametrize(
+        "root_value",
+        ["relative", "/", "/tmp/../tmp/application-state", "//tmp/state"],
+    )
+    def test_root_value_is_strict(self, root_value: str):
+        _assert_code(
+            "application-record-store-root-invalid",
+            lambda: store_mod.ApplicationRecordStore(root_value),
+        )
+
+    def test_missing_wrong_mode_and_symlinked_roots_fail_closed(self):
+        missing = self.root.parent / "missing"
+        _assert_code(
+            "application-record-store-root-missing",
+            lambda: store_mod.ApplicationRecordStore(missing),
+        )
+        self.root.chmod(0o755)
+        _assert_code(
+            "application-record-store-root-custody",
+            lambda: store_mod.ApplicationRecordStore(self.root),
+        )
+        self.root.chmod(0o700)
+        self.root.rmdir()
+        target = self.root.parent / "target"
+        target.mkdir(mode=0o700)
+        self.root.symlink_to(target, target_is_directory=True)
+        _assert_code(
+            "application-record-store-root-invalid",
+            lambda: store_mod.ApplicationRecordStore(self.root),
+        )
+
+    def test_root_swap_after_construction_fails_closed(self):
+        self._publish()
+        self.snapshot_path.unlink()
+        self.root.rmdir()
+        target = self.root.parent / "replacement"
+        target.mkdir(mode=0o700)
+        self.root.symlink_to(target, target_is_directory=True)
+        _assert_code(
+            "application-record-store-root-invalid", self.store.active
+        )
+
+    @pytest.mark.parametrize("kind", ["symlink", "fifo", "hardlink", "mode"])
+    def test_snapshot_custody_attacks_fail_closed(self, kind: str):
+        self._publish()
+        if kind == "symlink":
+            content = self.snapshot_path.read_bytes()
+            self.snapshot_path.unlink()
+            target = self.root / "target"
+            target.write_bytes(content)
+            self.snapshot_path.symlink_to(target)
+        elif kind == "fifo":
+            self.snapshot_path.unlink()
+            os.mkfifo(self.snapshot_path)
+        elif kind == "hardlink":
+            os.link(self.snapshot_path, self.root / "extra")
+        else:
+            self.snapshot_path.chmod(0o644)
+        _assert_code("application-record-store-custody", self.store.active)
+
+    def test_device_snapshot_is_rejected_when_creation_is_permitted(self):
+        self._publish()
+        self.snapshot_path.unlink()
+        try:
+            os.mknod(self.snapshot_path, stat.S_IFCHR | 0o600, os.makedev(1, 3))
+        except (OSError, PermissionError):
+            pytest.skip("device creation is not permitted")
+        _assert_code("application-record-store-custody", self.store.active)
+
+    def test_noncanonical_duplicate_key_order_and_tampered_record_fail_closed(self):
+        created = self._publish()
+        valid = json.loads(self.snapshot_path.read_text())
+        cases = [
+            _canonical(valid).rstrip(b"\n"),
+            (
+                b'{"records":[],"schema":"'
+                + store_mod.STORE_SCHEMA.encode()
+                + b'","schema":"duplicate"}\n'
+            ),
+            _canonical(
+                {
+                    "schema": store_mod.STORE_SCHEMA,
+                    "records": [_record_dict("zeta"), _record_dict("alpha")],
+                }
+            ),
+            _canonical(
+                {
+                    "schema": store_mod.STORE_SCHEMA,
+                    "records": [valid["records"][0], valid["records"][0]],
+                }
+            ),
+        ]
+        tampered = dict(valid["records"][0])
+        tampered["record_sha256"] = "0" * 64
+        cases.append(
+            _canonical({"schema": store_mod.STORE_SCHEMA, "records": [tampered]})
+        )
+        for raw in cases:
+            self.snapshot_path.write_bytes(raw)
+            with pytest.raises(store_mod.ApplicationRecordStoreError):
+                self.store.active()
+        assert created.record.service_id == SERVICE_ID
+
+    def test_oversize_snapshot_fails_before_json_parse(self):
+        self.snapshot_path.write_bytes(b"x" * (store_mod.MAX_FILE_BYTES + 1))
+        _assert_code("application-record-store-size", self.store.active)
+
+    def test_partial_write_and_file_fsync_failure_preserve_prior_snapshot(self):
+        self._publish()
+        before = self.snapshot_path.read_bytes()
+        real_write = store_mod.os.write
+        calls = 0
+
+        def partial_then_zero(descriptor: int, content: bytes) -> int:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return real_write(descriptor, content[: max(1, len(content) // 2)])
             return 0
 
-        with mock.patch.object(store_mod.os, "write", side_effect=fake_write):
-            self.assert_code(
-                "store-snapshot-io-error",
-                lambda: self.store.publish(
-                    _bound_command("new-svc"), self.config_sha, ("new-api",)
+        with mock.patch.object(store_mod.os, "write", side_effect=partial_then_zero):
+            _assert_code(
+                "application-record-store-write-failed",
+                lambda: self._publish(
+                    service_id="voice", containers=("voice-api",)
                 ),
             )
-        self.assertEqual(self.snapshot_path.read_bytes(), before)
+        assert self.snapshot_path.read_bytes() == before
 
-    def test_fsync_failure_preserves_old_state(self) -> None:
-        self.store.publish(self.command, self.config_sha, self.containers)
+        real_fsync = store_mod.os.fsync
+
+        def fail_regular_file(descriptor: int) -> None:
+            if stat.S_ISREG(os.fstat(descriptor).st_mode):
+                raise OSError("injected")
+            real_fsync(descriptor)
+
+        with mock.patch.object(store_mod.os, "fsync", side_effect=fail_regular_file):
+            _assert_code(
+                "application-record-store-write-failed",
+                lambda: self._publish(
+                    service_id="voice", containers=("voice-api",)
+                ),
+            )
+        assert self.snapshot_path.read_bytes() == before
+
+    def test_definite_replace_failure_preserves_prior_snapshot(self):
+        self._publish()
         before = self.snapshot_path.read_bytes()
-
-        def fake_fsync(fd):
-            raise OSError(errno.EIO, "I/O error")
-
-        with mock.patch.object(store_mod.os, "fsync", side_effect=fake_fsync):
-            self.assert_code(
-                "store-snapshot-io-error",
-                lambda: self.store.publish(
-                    _bound_command("new-svc"), self.config_sha, ("new-api",)
+        with mock.patch.object(
+            store_mod.os, "replace", side_effect=OSError("injected")
+        ):
+            _assert_code(
+                "application-record-store-write-failed",
+                lambda: self._publish(
+                    service_id="voice", containers=("voice-api",)
                 ),
             )
-        self.assertEqual(self.snapshot_path.read_bytes(), before)
+        assert self.snapshot_path.read_bytes() == before
 
-    def test_replace_failure_preserves_old_state(self) -> None:
-        self.store.publish(self.command, self.config_sha, self.containers)
+    def test_replace_that_completes_then_raises_is_reconciled(self):
+        self._publish()
+        real_replace = store_mod.os.replace
+
+        def replace_then_raise(*args, **kwargs):
+            real_replace(*args, **kwargs)
+            raise OSError("lost response")
+
+        with mock.patch.object(
+            store_mod.os, "replace", side_effect=replace_then_raise
+        ):
+            result = self._publish(
+                service_id="voice", containers=("voice-api",)
+            )
+        assert result.outcome == "created"
+        assert self.store.snapshot("voice") == result.record
+
+    def test_persistent_directory_fsync_failure_is_ambiguous_not_success(self):
+        self._publish()
+        real_fsync = store_mod.os.fsync
+
+        def fail_directory(descriptor: int) -> None:
+            if stat.S_ISDIR(os.fstat(descriptor).st_mode):
+                raise OSError("injected")
+            real_fsync(descriptor)
+
+        with mock.patch.object(store_mod.os, "fsync", side_effect=fail_directory):
+            _assert_code(
+                "application-record-store-write-ambiguous",
+                lambda: self._publish(
+                    service_id="voice", containers=("voice-api",)
+                ),
+            )
+        # Current state may contain the complete intended snapshot, but the
+        # failed call never claimed a durable success.
+        assert self.store.snapshot("voice") is not None
+
+    def test_temp_name_identity_swap_never_replaces_prior_snapshot(self):
+        self._publish()
         before = self.snapshot_path.read_bytes()
-
-        def fake_replace(*args, **kwargs):
-            raise OSError(errno.EIO, "replace failed")
-
-        with mock.patch.object(store_mod.os, "replace", side_effect=fake_replace):
-            self.assert_code(
-                "store-snapshot-io-error",
-                lambda: self.store.publish(
-                    _bound_command("new-svc"), self.config_sha, ("new-api",)
-                ),
-            )
-        self.assertEqual(self.snapshot_path.read_bytes(), before)
-
-    def test_response_loss_after_replace(self) -> None:
-        self.store.publish(self.command, self.config_sha, self.containers)
-
         real_stat = store_mod.os.stat
 
-        def mismatching_stat(path, *args, **kwargs):
+        def mismatched_temp(path, *args, **kwargs):
             result = real_stat(path, *args, **kwargs)
-            if isinstance(path, str) and path.startswith(store_mod.TEMP_PREFIX):
+            if isinstance(path, str) and path.startswith(store_mod._TEMP_PREFIX):
                 return SimpleNamespace(
                     st_dev=result.st_dev,
                     st_ino=result.st_ino + 1,
@@ -530,171 +668,99 @@ class ApplicationRecordStoreTests(unittest.TestCase):
                 )
             return result
 
-        with mock.patch.object(store_mod.os, "stat", side_effect=mismatching_stat):
-            self.assert_code(
-                "store-snapshot-integrity",
-                lambda: self.store.publish(
-                    _bound_command("new-svc"), self.config_sha, ("new-api",)
+        with mock.patch.object(store_mod.os, "stat", side_effect=mismatched_temp):
+            _assert_code(
+                "application-record-store-write-failed",
+                lambda: self._publish(
+                    service_id="voice", containers=("voice-api",)
                 ),
             )
+        assert self.snapshot_path.read_bytes() == before
 
-    # -- Concurrency --
-
-    def _concurrent_publish_worker(
-        self, root: str, marker: str, start, queue
-    ) -> None:
-        try:
-            s = store_mod.ApplicationRecordStore(root)
-            cmd = _bound_command(f"svc-{marker}", "install", "1.0.0")
-            start.wait()
-            result = s.publish(cmd, CONFIG_SHA, (f"svc-{marker}-api",))
-            queue.put(("ok", result.entry.service_id))
-        except store_mod.ApplicationRecordStoreError as exc:
-            queue.put(("error", exc.code))
-        except Exception as exc:  # noqa: BLE001
-            queue.put(("exception", str(exc)))
-
-    def test_concurrent_publishes_both_succeed_different_services(self) -> None:
+    @pytest.mark.parametrize("same_service", [False, True])
+    def test_cross_process_publish_serialization(self, same_service: bool):
         context = multiprocessing.get_context("fork")
-        start = context.Event()
-        queue = context.Queue()
-        workers = [
+        gate = context.Event()
+        output = context.Queue()
+        service_ids = ("shared", "shared") if same_service else ("alpha", "beta")
+        configs = (CONFIG_SHA, OTHER_CONFIG_SHA)
+        processes = [
             context.Process(
-                target=self._concurrent_publish_worker,
-                args=(str(self.root), marker, start, queue),
+                target=_publish_process,
+                args=(str(self.root), service_id, config, gate, output),
             )
-            for marker in ("a", "b")
+            for service_id, config in zip(service_ids, configs, strict=True)
         ]
-        for w in workers:
-            w.start()
-        start.set()
-        results = [queue.get(timeout=15) for _ in workers]
-        for w in workers:
-            w.join(timeout=15)
-            self.assertEqual(w.exitcode, 0)
-        self.assertEqual([kind for kind, _ in results], ["ok", "ok"])
-        active = self.store.active()
-        self.assertEqual(len(active), 2)
-
-    # -- Frozen output types --
-
-    def test_entries_are_frozen(self) -> None:
-        self.store.publish(self.command, self.config_sha, self.containers)
-        read = self.store.read("documents")
-        self.assertTrue(read.found)
-        with self.assertRaises(FrozenInstanceError):
-            read.entry.service_id = "hacked"  # type: ignore[misc]
-
-    def test_read_result_is_frozen(self) -> None:
-        read = self.store.read("documents")
-        with self.assertRaises(FrozenInstanceError):
-            read.found = True  # type: ignore[misc]
-
-    # -- Custody validation --
-
-    def test_root_wrong_mode_fails(self) -> None:
-        self.root.chmod(0o755)
-        self.assert_code(
-            "store-root-custody-violation",
-            lambda: store_mod.ApplicationRecordStore(self.root),
-        )
-        self.root.chmod(0o700)
-
-    def test_root_wrong_owner_fails(self) -> None:
-        if os.geteuid() != 0:
-            self.skipTest("requires root to chown root")
+        for process in processes:
+            process.start()
+        gate.set()
+        for process in processes:
+            process.join(15)
         try:
-            os.chown(str(self.root), 65534, -1)
-        except OSError:
-            try:
-                os.chown(str(self.root), 1, -1)
-            except OSError:
-                self.skipTest("cannot chown to alternative uid")
-        self.assert_code(
-            "store-root-custody-violation",
-            lambda: store_mod.ApplicationRecordStore(self.root),
-        )
+            assert all(not process.is_alive() for process in processes)
+            assert all(process.exitcode == 0 for process in processes)
+            results = [output.get(timeout=5) for _ in processes]
+        finally:
+            for process in processes:
+                if process.is_alive():
+                    process.terminate()
+                    process.join(5)
+            output.close()
+            output.join_thread()
+        if same_service:
+            assert sorted(result[0] for result in results) == ["error", "ok"]
+            assert any(
+                result == ("error", "application-record-store-conflict")
+                for result in results
+            )
+            assert len(self.store.active()) == 1
+        else:
+            assert all(result[:2] == ("ok", "created") for result in results)
+            assert [record.service_id for record in self.store.active()] == [
+                "alpha",
+                "beta",
+            ]
 
-    # -- Invalid inputs --
+    def test_tampered_frozen_command_is_reproved_before_lock(self):
+        command = _command(SERVICE_ID, "install")
+        object.__setattr__(command, "operation_key", "apply:other")
+        with mock.patch.object(store_mod, "_open_root") as opened:
+            _assert_code(
+                "application-record-store-record-invalid",
+                lambda: self.store.publish(command, CONFIG_SHA, CONTAINERS),
+            )
+        opened.assert_not_called()
 
-    def test_invalid_service_id(self) -> None:
-        self.assert_code(
-            "store-binding-invalid",
-            lambda: self.store.read("INVALID/SERVICE"),
-        )
-
-    def test_invalid_record_sha256(self) -> None:
-        self.assert_code(
-            "store-binding-invalid",
-            lambda: self.store.compare_delete("documents", "not-a-sha"),
-        )
-
-    def test_invalid_command_type(self) -> None:
-        self.assert_code(
-            "store-binding-invalid",
-            lambda: self.store.publish(
-                "not-a-command", self.config_sha, self.containers
-            ),
-        )
-
-    def test_invalid_config_sha(self) -> None:
-        self.assert_code(
-            "store-binding-invalid",
-            lambda: self.store.publish(self.command, "bad-sha", self.containers),
-        )
-
-    def test_empty_containers(self) -> None:
-        self.assert_code(
-            "store-binding-invalid",
-            lambda: self.store.publish(self.command, self.config_sha, ()),
-        )
-
-    def test_containers_not_tuple(self) -> None:
-        self.assert_code(
-            "store-binding-invalid",
-            lambda: self.store.publish(
-                self.command, self.config_sha, list(self.containers)
-            ),
-        )
-
-    # -- Public surface --
-
-    def test_values_frozen_and_public_surface_complete(self) -> None:
-        self.assertIn("ApplicationRecordStore", store_mod.__all__)
-        self.assertIn("ApplicationRecordStoreError", store_mod.__all__)
-        self.assertIn("ActiveRecordEntry", store_mod.__all__)
-        self.assertIn("ReadResult", store_mod.__all__)
-        self.assertIn("CreateResult", store_mod.__all__)
-        self.assertIn("CompareReplaceResult", store_mod.__all__)
-        self.assertIn("CompareDeleteResult", store_mod.__all__)
-
-    def test_store_has_no_production_importer_yet(self) -> None:
-        offenders: list[str] = []
-        roots = [
-            ODS_ROOT / "bin",
-            ODS_ROOT / "extensions" / "services" / "dashboard-api",
-        ]
-        for root in roots:
-            for path in root.rglob("*.py"):
-                if (
-                    path.name == "extension_application_record_store.py"
-                    or "tests" in path.parts
+    def test_public_surface_is_narrow_and_store_remains_dormant(self):
+        assert set(store_mod.__all__) == {
+            "ApplicationRecord",
+            "ApplicationRecordStore",
+            "ApplicationRecordStoreError",
+            "MAX_FILE_BYTES",
+            "MAX_RECORDS",
+            "PublishResult",
+            "RemoveResult",
+            "SNAPSHOT_NAME",
+            "STORE_SCHEMA",
+        }
+        module = ODS_ROOT / "bin" / "extension_application_record_store.py"
+        importers = []
+        for path in ODS_ROOT.rglob("*.py"):
+            if path.resolve() == module.resolve() or "tests" in path.parts:
+                continue
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import) and any(
+                    alias.name == "extension_application_record_store"
+                    for alias in node.names
                 ):
-                    continue
-                tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-                for node in ast.walk(tree):
-                    if isinstance(node, ast.Import) and any(
-                        alias.name == "extension_application_record_store"
-                        for alias in node.names
-                    ):
-                        offenders.append(str(path.relative_to(ODS_ROOT)))
-                    if (
-                        isinstance(node, ast.ImportFrom)
-                        and node.module == "extension_application_record_store"
-                    ):
-                        offenders.append(str(path.relative_to(ODS_ROOT)))
-        self.assertEqual(set(offenders), set())
-
-
-if __name__ == "__main__":
-    unittest.main()
+                    importers.append(path.relative_to(ODS_ROOT).as_posix())
+                elif (
+                    isinstance(node, ast.ImportFrom)
+                    and node.module == "extension_application_record_store"
+                ):
+                    importers.append(path.relative_to(ODS_ROOT).as_posix())
+        assert importers == []
+        source = module.read_text(encoding="utf-8")
+        assert "subprocess" not in source
+        assert "getenv" not in source

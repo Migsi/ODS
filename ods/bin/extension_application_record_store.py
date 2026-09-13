@@ -1,26 +1,15 @@
-"""Fixed-root owner-private active-application record store.
+"""Durable fixed-root active-application records for Assistant First.
 
-Persists the canonical active-record objects produced and parsed by
-``extension_application_observation``.  One canonical snapshot file lives in
-``data/assistant-first/application-state``.  Cross-process exclusive root lock
-prevents concurrent mutation.  The store is intentionally dormant: it does
-not wire Docker, Compose, host probes, the Dashboard transaction executor,
-installation, or runtime service mutation.
-
-This module performs no network, subprocess, Docker, or environment operations.
-It is Linux/POSIX-only with controlled platform-unsupported failure on import.
-
-Custody model mirrors ``extension_resource_reservation_store``: the absolute
-root value is validated without following it, every component is traversed
-from the anchor with descriptor-relative ``O_DIRECTORY|O_NOFOLLOW`` opens,
-custody is re-proven on every public call, and no ``Path.resolve``, ``stat``,
-or path-open is ever used on the root or the state file.
+This POSIX-only store persists the canonical records produced by
+``extension_application_observation``. It owns no Docker, Compose, process,
+network, configuration, or transaction-executor authority. Its root must be
+created by the installer and is re-opened, re-validated, and locked for every
+operation.
 """
 
 from __future__ import annotations
 
 import errno
-import fcntl
 import json
 import os
 import re
@@ -29,236 +18,224 @@ import stat
 from dataclasses import dataclass
 from typing import Any
 
-from extension_application_identity import (
-    ApplicationIdentityError,
-    produce_application_identity,
-)
+try:  # Import must remain safe on unqualified non-POSIX hosts.
+    import fcntl
+except ImportError:  # pragma: no cover - exercised on Windows CI
+    fcntl = None  # type: ignore[assignment]
+
+from extension_application_identity import produce_application_identity
 from extension_application_observation import (
-    _no_duplicate_keys,
     parse_active_record,
     produce_active_record,
 )
-from extension_lifecycle_work import (
-    LifecycleWorkCommand,
-    LifecycleWorkError,
-)
+from extension_lifecycle_work import LifecycleWorkCommand, LifecycleWorkError
 
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
 
 STORE_SCHEMA = "ods.extension-application-records.v1"
-MAX_RECORDS = 256
-MAX_FILE_BYTES = 4 * 1024 * 1024  # 4 MiB
-
 SNAPSHOT_NAME = "application-state.json"
-TEMP_PREFIX = "tmp-"
-TEMP_SUFFIX = ".app-state-tmp"
+MAX_RECORDS = 256
+MAX_FILE_BYTES = 2 * 1024 * 1024
 
 _ROOT_MODE = 0o700
 _FILE_MODE = 0o600
-
-# ---------------------------------------------------------------------------
-# Platform guard (import-time)
-# ---------------------------------------------------------------------------
+_TEMP_PREFIX = "tmp-"
+_TEMP_SUFFIX = ".application-state"
+_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
+_SERVICE_RE = re.compile(r"^[a-z0-9]+(?:[._-][a-z0-9]+)*$")
 
 
 class ApplicationRecordStoreError(LifecycleWorkError):
-    """Store error with a stable public code. Value-free."""
-
-    def __init__(self, code: str) -> None:
-        super().__init__(code)
-        self.code = code
-
-    def __repr__(self) -> str:
-        return f"ApplicationRecordStoreError({self.code!r})"
-
-
-def _platform_supported() -> bool:
-    return (
-        os.name == "posix"
-        and hasattr(os, "O_DIRECTORY")
-        and hasattr(os, "O_NOFOLLOW")
-        and hasattr(os, "O_NONBLOCK")
-        and os.open in os.supports_dir_fd
-        and os.stat in os.supports_dir_fd
-        and os.stat in os.supports_follow_symlinks
-        and os.unlink in os.supports_dir_fd
-    )
+    """One stable, value-free store failure."""
 
 
 def _fail(code: str) -> None:
     raise ApplicationRecordStoreError(code) from None
 
 
-# ---------------------------------------------------------------------------
-# Frozen output types
-# ---------------------------------------------------------------------------
-
-
 @dataclass(frozen=True)
-class ActiveRecordEntry:
-    """One persisted active record, keyed by service_id."""
+class ApplicationRecord:
+    """Immutable public form of one canonical active-application record."""
 
+    schema: str
     service_id: str
+    version: str
+    action: str
+    transaction_id: str
+    plan_sha256: str
+    request_sha256: str
+    definition_sha256: str
+    compose_sha256: str
+    identity_sha256: str
+    config_sha256: str
+    expected_containers: tuple[str, ...]
     record_sha256: str
-    duplicate: bool = False
 
 
 @dataclass(frozen=True)
-class ReadResult:
-    """Frozen read result for a single service."""
+class PublishResult:
+    """A proven create, exact replay, or compare-and-replace result."""
 
-    found: bool
-    entry: ActiveRecordEntry | None
-
-
-@dataclass(frozen=True)
-class CreateResult:
-    """Frozen create result."""
-
-    entry: ActiveRecordEntry
-    duplicate: bool
+    record: ApplicationRecord
+    outcome: str
 
 
 @dataclass(frozen=True)
-class CompareReplaceResult:
-    """Frozen compare-and-replace result."""
+class RemoveResult:
+    """A proven removal, or an observation that the service was absent."""
 
-    entry: ActiveRecordEntry
-    duplicate: bool
-
-
-@dataclass(frozen=True)
-class CompareDeleteResult:
-    """Frozen compare-and-delete result."""
-
-    deleted: bool
-    prior: ActiveRecordEntry | None
+    outcome: str
+    prior: ApplicationRecord | None
 
 
-# ---------------------------------------------------------------------------
-# Validators
-# ---------------------------------------------------------------------------
-
-_HASH64_RE = re.compile(r"^[0-9a-f]{64}$")
-_SERVICE_ID_RE = re.compile(r"^[a-z0-9]+(?:[._-][a-z0-9]+)*$")
+class _DuplicateKey(ValueError):
+    pass
 
 
-def _validate_record_sha256(value: Any) -> str:
-    if not isinstance(value, str) or _HASH64_RE.fullmatch(value) is None:
-        _fail("store-binding-invalid")
+def _no_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    value: dict[str, Any] = {}
+    for key, item in pairs:
+        if key in value:
+            raise _DuplicateKey
+        value[key] = item
     return value
 
 
-def _validate_service_id(value: Any) -> str:
-    if (
-        not isinstance(value, str)
-        or _SERVICE_ID_RE.fullmatch(value) is None
-    ):
-        _fail("store-binding-invalid")
-    return value
+def _reject_number(_value: str) -> Any:
+    raise ValueError
 
 
-# ---------------------------------------------------------------------------
-# JSON helpers
-# ---------------------------------------------------------------------------
-
-
-def _canonical_store_json_bytes(value: Any) -> bytes:
-    """Produce canonical JSON bytes for the store envelope."""
+def _canonical_json_bytes(value: Any) -> bytes:
     try:
         encoded = (
             json.dumps(
                 value,
-                ensure_ascii=False,
-                allow_nan=False,
                 sort_keys=True,
                 separators=(",", ":"),
+                ensure_ascii=False,
+                allow_nan=False,
             )
             + "\n"
         ).encode("utf-8")
     except (TypeError, ValueError, UnicodeError, RecursionError):
-        _fail("store-json-invalid")
+        _fail("application-record-store-json-invalid")
     if not encoded or len(encoded) > MAX_FILE_BYTES:
-        _fail("store-oversize")
+        _fail("application-record-store-size")
     return encoded
 
 
-# ---------------------------------------------------------------------------
-# Snapshot parsing / validation
-# ---------------------------------------------------------------------------
-
-
-def _validate_snapshot(data: Any) -> list[dict[str, Any]]:
-    """Validate the complete snapshot state. Raises on any fault."""
-    if not isinstance(data, dict):
-        _fail("store-schema-invalid")
-    if set(data.keys()) != {"schema", "records"}:
-        _fail("store-schema-invalid")
-    if data["schema"] != STORE_SCHEMA:
-        _fail("store-schema-invalid")
-    records = data["records"]
-    if not isinstance(records, list):
-        _fail("store-records-type")
-    if len(records) > MAX_RECORDS:
-        _fail("store-oversize-records")
-
-    previous_sid: str | None = None
-    for record in records:
-        parse_active_record(
-            _canonical_store_json_bytes(record)
-        )
-        sid = record["service_id"]
-        if previous_sid is not None and sid <= previous_sid:
-            _fail("store-record-order")
-        previous_sid = sid
-    return records
-
-
-def _parse_snapshot(raw: bytes) -> list[dict[str, Any]]:
-    """Decode strictly, validate, then require canonical byte equality."""
-    if type(raw) is not bytes:
-        _fail("store-bytes-required")
-    if not raw:
-        _fail("store-empty-snapshot")
-    if len(raw) > MAX_FILE_BYTES:
-        _fail("store-oversize")
+def _record_model(value: Any) -> tuple[dict[str, Any], ApplicationRecord]:
+    if not isinstance(value, dict):
+        _fail("application-record-store-record-invalid")
     try:
-        text = raw.decode("utf-8")
+        parsed = parse_active_record(_canonical_json_bytes(value))
+    except LifecycleWorkError:
+        _fail("application-record-store-record-invalid")
+    record = ApplicationRecord(
+        schema=parsed["schema"],
+        service_id=parsed["service_id"],
+        version=parsed["version"],
+        action=parsed["action"],
+        transaction_id=parsed["transaction_id"],
+        plan_sha256=parsed["plan_sha256"],
+        request_sha256=parsed["request_sha256"],
+        definition_sha256=parsed["definition_sha256"],
+        compose_sha256=parsed["compose_sha256"],
+        identity_sha256=parsed["identity_sha256"],
+        config_sha256=parsed["config_sha256"],
+        expected_containers=tuple(parsed["expected_containers"]),
+        record_sha256=parsed["record_sha256"],
+    )
+    return parsed, record
+
+
+def _validate_snapshot(
+    value: Any,
+) -> tuple[list[dict[str, Any]], tuple[ApplicationRecord, ...]]:
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"schema", "records"}
+        or value.get("schema") != STORE_SCHEMA
+        or not isinstance(value.get("records"), list)
+    ):
+        _fail("application-record-store-schema")
+    supplied = value["records"]
+    if len(supplied) > MAX_RECORDS:
+        _fail("application-record-store-size")
+
+    dictionaries: list[dict[str, Any]] = []
+    models: list[ApplicationRecord] = []
+    previous: str | None = None
+    for supplied_record in supplied:
+        parsed, record = _record_model(supplied_record)
+        if previous is not None and record.service_id <= previous:
+            _fail("application-record-store-order")
+        previous = record.service_id
+        dictionaries.append(parsed)
+        models.append(record)
+    return dictionaries, tuple(models)
+
+
+def _parse_snapshot(
+    raw: bytes,
+) -> tuple[list[dict[str, Any]], tuple[ApplicationRecord, ...]]:
+    if type(raw) is not bytes or not raw or len(raw) > MAX_FILE_BYTES:
+        _fail("application-record-store-size")
+    try:
         value = json.loads(
-            text,
+            raw.decode("utf-8"),
             object_pairs_hook=_no_duplicate_keys,
-            parse_constant=lambda _value: (_ for _ in ()).throw(ValueError()),
+            parse_int=_reject_number,
+            parse_float=_reject_number,
+            parse_constant=_reject_number,
         )
-    except (UnicodeError, ValueError, TypeError, RecursionError):
-        _fail("store-json-invalid")
-    _validate_snapshot(value)
-    if _canonical_store_json_bytes(value) != raw:
-        _fail("store-noncanonical")
-    return value["records"]
+    except _DuplicateKey:
+        _fail("application-record-store-duplicate-key")
+    except (TypeError, ValueError, UnicodeError, RecursionError, json.JSONDecodeError):
+        _fail("application-record-store-json-invalid")
+    dictionaries, models = _validate_snapshot(value)
+    if _canonical_json_bytes(value) != raw:
+        _fail("application-record-store-noncanonical")
+    return dictionaries, models
 
 
-def _empty_snapshot_bytes() -> bytes:
-    return _canonical_store_json_bytes({"schema": STORE_SCHEMA, "records": []})
-
-
-# ---------------------------------------------------------------------------
-# Platform and root custody (mirrors reservation store)
-# ---------------------------------------------------------------------------
+def _snapshot_bytes(records: list[dict[str, Any]]) -> bytes:
+    envelope = {"schema": STORE_SCHEMA, "records": records}
+    _validate_snapshot(envelope)
+    return _canonical_json_bytes(envelope)
 
 
 def _validate_platform() -> None:
-    if not _platform_supported():
-        _fail("platform-unsupported")
+    if (
+        os.name != "posix"
+        or fcntl is None
+        or not hasattr(os, "O_DIRECTORY")
+        or not hasattr(os, "O_NOFOLLOW")
+        or not hasattr(os, "O_NONBLOCK")
+        or os.open not in os.supports_dir_fd
+        or os.stat not in os.supports_dir_fd
+        or os.stat not in os.supports_follow_symlinks
+        or os.unlink not in os.supports_dir_fd
+        or not callable(getattr(os, "replace", None))
+    ):
+        _fail("application-record-store-platform-unsupported")
 
 
 def _directory_flags() -> int:
-    return os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    return (
+        os.O_RDONLY
+        | os.O_DIRECTORY
+        | os.O_NOFOLLOW
+        | getattr(os, "O_CLOEXEC", 0)
+    )
 
 
 def _file_read_flags() -> int:
-    return os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0)
+    return (
+        os.O_RDONLY
+        | os.O_NOFOLLOW
+        | os.O_NONBLOCK
+        | getattr(os, "O_CLOEXEC", 0)
+    )
 
 
 def _close_quietly(descriptor: int) -> None:
@@ -269,61 +246,55 @@ def _close_quietly(descriptor: int) -> None:
 
 
 def _root_components(value: Any) -> tuple[str, ...]:
-    if not isinstance(value, str) or "\x00" in value:
-        _fail("store-root-invalid")
-    if not value.startswith("/") or value == "/":
-        _fail("store-root-invalid")
-    parts = value.split("/")[1:]
+    try:
+        raw = os.fspath(value)
+    except (TypeError, ValueError):
+        _fail("application-record-store-root-invalid")
+    if (
+        not isinstance(raw, str)
+        or "\x00" in raw
+        or not raw.startswith("/")
+        or raw == "/"
+    ):
+        _fail("application-record-store-root-invalid")
+    parts = tuple(raw.split("/")[1:])
     if any(part in {"", ".", ".."} for part in parts):
-        _fail("store-root-invalid")
-    return tuple(parts)
+        _fail("application-record-store-root-invalid")
+    return parts
 
 
 def _open_root(parts: tuple[str, ...]) -> int:
     try:
         descriptor = os.open("/", _directory_flags())
     except OSError:
-        _fail("store-root-missing")
+        _fail("application-record-store-root-missing")
     try:
-        info = os.fstat(descriptor)
-    except OSError:
-        _close_quietly(descriptor)
-        _fail("store-root-io-error")
-    try:
-        if not stat.S_ISDIR(info.st_mode):
-            _close_quietly(descriptor)
-            _fail("store-root-invalid")
         for component in parts:
             parent = descriptor
             descriptor = -1
             try:
                 descriptor = os.open(component, _directory_flags(), dir_fd=parent)
             except FileNotFoundError:
-                _fail("store-root-missing")
-            except OSError as exc:
-                if exc.errno in {errno.ELOOP, errno.ENOTDIR}:
-                    _fail("store-root-invalid")
-                _fail("store-root-io-error")
+                _fail("application-record-store-root-missing")
+            except OSError as error:
+                if error.errno in {errno.ELOOP, errno.ENOTDIR}:
+                    _fail("application-record-store-root-invalid")
+                _fail("application-record-store-root-io")
             finally:
                 _close_quietly(parent)
-            try:
-                info = os.fstat(descriptor)
-            except OSError:
-                _fail("store-root-io-error")
-            if not stat.S_ISDIR(info.st_mode):
-                _fail("store-root-invalid")
+        try:
+            info = os.fstat(descriptor)
+        except OSError:
+            _fail("application-record-store-root-io")
+        if not stat.S_ISDIR(info.st_mode):
+            _fail("application-record-store-root-invalid")
         if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != _ROOT_MODE:
-            _fail("store-root-custody-violation")
+            _fail("application-record-store-root-custody")
         return descriptor
     except BaseException:
         if descriptor >= 0:
             _close_quietly(descriptor)
         raise
-
-
-# ---------------------------------------------------------------------------
-# Snapshot file I/O
-# ---------------------------------------------------------------------------
 
 
 def _identity(info: os.stat_result) -> tuple[int, ...]:
@@ -343,62 +314,80 @@ def _check_snapshot_file(descriptor: int) -> os.stat_result:
     try:
         info = os.fstat(descriptor)
     except OSError:
-        _fail("store-snapshot-io-error")
-    if not stat.S_ISREG(info.st_mode):
-        _fail("store-corrupt-snapshot-file")
-    if info.st_uid != os.geteuid():
-        _fail("store-corrupt-snapshot-owner")
-    if stat.S_IMODE(info.st_mode) != _FILE_MODE:
-        _fail("store-corrupt-snapshot-mode")
-    if info.st_nlink != 1:
-        _fail("store-corrupt-snapshot-nlink")
+        _fail("application-record-store-read")
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or info.st_uid != os.geteuid()
+        or stat.S_IMODE(info.st_mode) != _FILE_MODE
+        or info.st_nlink != 1
+    ):
+        _fail("application-record-store-custody")
     if info.st_size > MAX_FILE_BYTES:
-        _fail("store-oversize")
+        _fail("application-record-store-size")
     return info
 
 
-def _read_all(descriptor: int, size: int) -> bytes:
+def _read_all(descriptor: int, expected_size: int) -> bytes:
     content = bytearray()
     try:
         while len(content) <= MAX_FILE_BYTES:
             remaining = MAX_FILE_BYTES + 1 - len(content)
-            chunk = os.read(descriptor, min(65536, remaining))
+            chunk = os.read(descriptor, min(65_536, remaining))
             if not chunk:
                 break
             content.extend(chunk)
     except OSError:
-        _fail("store-snapshot-io-error")
+        _fail("application-record-store-read")
     if len(content) > MAX_FILE_BYTES:
-        _fail("store-oversize")
-    if len(content) != size:
-        _fail("store-snapshot-integrity")
+        _fail("application-record-store-size")
+    if len(content) != expected_size:
+        _fail("application-record-store-integrity")
     return bytes(content)
 
 
-def _read_snapshot(root_fd: int) -> bytes:
+def _read_snapshot(root_descriptor: int) -> bytes:
     try:
-        fd = os.open(SNAPSHOT_NAME, _file_read_flags(), dir_fd=root_fd)
+        descriptor = os.open(
+            SNAPSHOT_NAME, _file_read_flags(), dir_fd=root_descriptor
+        )
     except FileNotFoundError:
-        _fail("store-snapshot-missing")
-    except OSError as exc:
-        if exc.errno in {errno.ELOOP, errno.ENOTDIR}:
-            _fail("store-snapshot-integrity")
-        _fail("store-snapshot-io-error")
+        _fail("application-record-store-missing")
+    except OSError as error:
+        if error.errno in {errno.ELOOP, errno.ENOTDIR}:
+            _fail("application-record-store-custody")
+        _fail("application-record-store-read")
     try:
-        before = _check_snapshot_file(fd)
-        raw = _read_all(fd, before.st_size)
-        after = _check_snapshot_file(fd)
+        before = _check_snapshot_file(descriptor)
+        raw = _read_all(descriptor, before.st_size)
+        after = _check_snapshot_file(descriptor)
         if _identity(before) != _identity(after):
-            _fail("store-snapshot-integrity")
+            _fail("application-record-store-integrity")
         try:
-            path_info = os.stat(SNAPSHOT_NAME, dir_fd=root_fd, follow_symlinks=False)
+            named = os.stat(
+                SNAPSHOT_NAME,
+                dir_fd=root_descriptor,
+                follow_symlinks=False,
+            )
         except OSError:
-            _fail("store-snapshot-integrity")
-        if (path_info.st_dev, path_info.st_ino) != (after.st_dev, after.st_ino):
-            _fail("store-snapshot-integrity")
+            _fail("application-record-store-integrity")
+        if (named.st_dev, named.st_ino) != (after.st_dev, after.st_ino):
+            _fail("application-record-store-integrity")
         return raw
     finally:
-        _close_quietly(fd)
+        _close_quietly(descriptor)
+
+
+def _read_records(
+    root_descriptor: int,
+) -> tuple[list[dict[str, Any]], tuple[ApplicationRecord, ...], bool]:
+    try:
+        raw = _read_snapshot(root_descriptor)
+    except ApplicationRecordStoreError as error:
+        if error.code == "application-record-store-missing":
+            return [], (), False
+        raise
+    dictionaries, models = _parse_snapshot(raw)
+    return dictionaries, models, True
 
 
 def _write_all(descriptor: int, content: bytes) -> None:
@@ -407,33 +396,80 @@ def _write_all(descriptor: int, content: bytes) -> None:
         while offset < len(content):
             written = os.write(descriptor, content[offset:])
             if written <= 0:
-                _fail("store-snapshot-io-error")
+                _fail("application-record-store-write-failed")
             offset += written
     except OSError:
-        _fail("store-snapshot-io-error")
+        _fail("application-record-store-write-failed")
 
 
-def _cleanup_temp(root_fd: int, temp_name: str, expected: os.stat_result) -> None:
+def _path_matches(
+    root_descriptor: int, name: str, expected: os.stat_result
+) -> bool:
     try:
-        current = os.stat(temp_name, dir_fd=root_fd, follow_symlinks=False)
+        current = os.stat(name, dir_fd=root_descriptor, follow_symlinks=False)
     except OSError:
-        return
-    if (current.st_dev, current.st_ino) != (expected.st_dev, expected.st_ino):
+        return False
+    return (current.st_dev, current.st_ino) == (expected.st_dev, expected.st_ino)
+
+
+def _cleanup_temp(
+    root_descriptor: int, name: str, expected: os.stat_result
+) -> None:
+    if not _path_matches(root_descriptor, name, expected):
         return
     try:
-        os.unlink(temp_name, dir_fd=root_fd)
+        os.unlink(name, dir_fd=root_descriptor)
     except OSError:
         pass
 
 
-def _write_snapshot(root_fd: int, records: list[dict[str, Any]]) -> None:
-    envelope = {"schema": STORE_SCHEMA, "records": records}
-    _validate_snapshot(envelope)
-    payload = _canonical_store_json_bytes(envelope)
-    if len(payload) > MAX_FILE_BYTES:
-        _fail("store-oversize")
+def _fsync_root(root_descriptor: int) -> bool:
+    for _attempt in range(2):
+        try:
+            os.fsync(root_descriptor)
+            return True
+        except OSError:
+            continue
+    return False
 
-    temp_name = TEMP_PREFIX + secrets.token_hex(16) + TEMP_SUFFIX
+
+def _durably_matches(root_descriptor: int, payload: bytes) -> bool:
+    if not _fsync_root(root_descriptor):
+        return False
+    try:
+        return _read_snapshot(root_descriptor) == payload
+    except ApplicationRecordStoreError:
+        return False
+
+
+def _prove_unchanged(
+    root_descriptor: int,
+    records: list[dict[str, Any]],
+    snapshot_present: bool,
+) -> None:
+    if not _fsync_root(root_descriptor):
+        _fail("application-record-store-write-ambiguous")
+    if snapshot_present:
+        expected = _snapshot_bytes(records)
+        try:
+            current = _read_snapshot(root_descriptor)
+        except ApplicationRecordStoreError:
+            _fail("application-record-store-write-ambiguous")
+        if current != expected:
+            _fail("application-record-store-write-ambiguous")
+        return
+    try:
+        _read_snapshot(root_descriptor)
+    except ApplicationRecordStoreError as error:
+        if error.code == "application-record-store-missing":
+            return
+    _fail("application-record-store-write-ambiguous")
+
+
+def _write_snapshot(root_descriptor: int, records: list[dict[str, Any]]) -> None:
+    # Validate the entire candidate before allocating a temporary entry.
+    payload = _snapshot_bytes(records)
+    temp_name = _TEMP_PREFIX + secrets.token_hex(16) + _TEMP_SUFFIX
     flags = (
         os.O_WRONLY
         | os.O_CREAT
@@ -442,375 +478,154 @@ def _write_snapshot(root_fd: int, records: list[dict[str, Any]]) -> None:
         | getattr(os, "O_CLOEXEC", 0)
     )
     try:
-        temp_fd = os.open(temp_name, flags, _FILE_MODE, dir_fd=root_fd)
+        descriptor = os.open(
+            temp_name, flags, _FILE_MODE, dir_fd=root_descriptor
+        )
     except OSError:
-        _fail("store-snapshot-io-error")
+        _fail("application-record-store-write-failed")
 
     temp_info: os.stat_result | None = None
-    replaced = False
     try:
         try:
-            temp_info = os.fstat(temp_fd)
+            temp_info = os.fstat(descriptor)
         except OSError:
-            _fail("store-snapshot-integrity")
+            _fail("application-record-store-write-failed")
         if (
             not stat.S_ISREG(temp_info.st_mode)
             or temp_info.st_uid != os.geteuid()
             or stat.S_IMODE(temp_info.st_mode) != _FILE_MODE
             or temp_info.st_nlink != 1
         ):
-            _fail("store-snapshot-integrity")
+            _fail("application-record-store-write-failed")
 
-        _write_all(temp_fd, payload)
+        _write_all(descriptor, payload)
         try:
-            os.fsync(temp_fd)
-            sealed = os.fstat(temp_fd)
+            os.fsync(descriptor)
+            sealed = os.fstat(descriptor)
         except OSError:
-            _fail("store-snapshot-io-error")
+            _fail("application-record-store-write-failed")
         if (
             (sealed.st_dev, sealed.st_ino) != (temp_info.st_dev, temp_info.st_ino)
             or not stat.S_ISREG(sealed.st_mode)
             or sealed.st_uid != os.geteuid()
-            or sealed.st_size != len(payload)
             or stat.S_IMODE(sealed.st_mode) != _FILE_MODE
             or sealed.st_nlink != 1
+            or sealed.st_size != len(payload)
         ):
-            _fail("store-snapshot-integrity")
-
+            _fail("application-record-store-write-failed")
+        temp_info = sealed
         try:
-            named_temp = os.stat(temp_name, dir_fd=root_fd, follow_symlinks=False)
+            named_temp = os.stat(
+                temp_name, dir_fd=root_descriptor, follow_symlinks=False
+            )
         except OSError:
-            _fail("store-snapshot-integrity")
+            _fail("application-record-store-write-failed")
         if _identity(named_temp) != _identity(sealed):
-            _fail("store-snapshot-integrity")
+            _fail("application-record-store-write-failed")
 
         try:
             os.replace(
                 temp_name,
                 SNAPSHOT_NAME,
-                src_dir_fd=root_fd,
-                dst_dir_fd=root_fd,
+                src_dir_fd=root_descriptor,
+                dst_dir_fd=root_descriptor,
             )
-            replaced = True
         except OSError:
-            _fail("store-snapshot-io-error")
+            # A wrapper or interrupted syscall may raise after replacement.
+            if _durably_matches(root_descriptor, payload):
+                return
+            if _path_matches(root_descriptor, temp_name, sealed):
+                _fail("application-record-store-write-failed")
+            _fail("application-record-store-write-ambiguous")
 
-        try:
-            os.fsync(root_fd)
-        except OSError:
-            _fail("store-snapshot-io-error")
-
-        # Reopen and require the exact payload bytes.
-        if _read_snapshot(root_fd) != payload:
-            _fail("store-snapshot-integrity")
+        if not _durably_matches(root_descriptor, payload):
+            _fail("application-record-store-write-ambiguous")
     finally:
-        _close_quietly(temp_fd)
-        if not replaced and temp_info is not None:
-            _cleanup_temp(root_fd, temp_name, temp_info)
+        _close_quietly(descriptor)
+        if temp_info is not None:
+            _cleanup_temp(root_descriptor, temp_name, temp_info)
 
 
-def _read_records(root_fd: int) -> list[dict[str, Any]]:
+def _validate_service_id(value: Any) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) > 128
+        or _SERVICE_RE.fullmatch(value) is None
+    ):
+        _fail("application-record-store-binding-invalid")
+    return value
+
+
+def _validate_record_hash(value: Any, *, optional: bool) -> str | None:
+    if value is None and optional:
+        return None
+    if not isinstance(value, str) or _HASH_RE.fullmatch(value) is None:
+        _fail("application-record-store-binding-invalid")
+    return value
+
+
+def _prepare_record(
+    command: Any,
+    config_sha256: Any,
+    expected_containers: Any,
+) -> tuple[dict[str, Any], ApplicationRecord]:
+    if not isinstance(command, LifecycleWorkCommand):
+        _fail("application-record-store-binding-invalid")
+    # The producer performs the authoritative strict digest/container checks.
     try:
-        raw = _read_snapshot(root_fd)
-    except ApplicationRecordStoreError as exc:
-        if exc.code == "store-snapshot-missing":
-            return []
-        raise
-    return _parse_snapshot(raw)
-
-
-# ---------------------------------------------------------------------------
-# Store
-# ---------------------------------------------------------------------------
+        identity = produce_application_identity(command)
+        raw = produce_active_record(identity, config_sha256, expected_containers)
+        parsed = parse_active_record(raw)
+    except (LifecycleWorkError, TypeError, ValueError, UnicodeError):
+        _fail("application-record-store-record-invalid")
+    validated, model = _record_model(parsed)
+    return validated, model
 
 
 class ApplicationRecordStore:
-    """Snapshot-backed active-application record store.
-
-    The root is re-validated and re-opened for every public call.  Exclusive
-    ``flock`` is taken on the root descriptor and explicitly released in
-    ``finally`` before close.
-
-    Records are sorted by ``service_id``.  A duplicate ``service_id`` within
-    the snapshot is rejected as corrupt state.
-    """
+    """Descriptor-relative snapshot store for current application records."""
 
     def __init__(self, root_path: str | os.PathLike[str]) -> None:
         _validate_platform()
-        try:
-            raw = os.fspath(root_path)
-        except (TypeError, ValueError):
-            _fail("store-root-invalid")
-        self._root_parts = _root_components(raw)
+        self._root_parts = _root_components(root_path)
         _close_quietly(_open_root(self._root_parts))
 
     def _run_locked(self, operation: Any) -> Any:
-        root_fd = _open_root(self._root_parts)
+        root_descriptor = _open_root(self._root_parts)
         locked = False
         try:
             try:
-                fcntl.flock(root_fd, fcntl.LOCK_EX)
+                assert fcntl is not None
+                fcntl.flock(root_descriptor, fcntl.LOCK_EX)
             except OSError:
-                _fail("store-lock-error")
+                _fail("application-record-store-lock")
             locked = True
-            return operation(root_fd)
+            return operation(root_descriptor)
         finally:
             if locked:
                 try:
-                    fcntl.flock(root_fd, fcntl.LOCK_UN)
+                    assert fcntl is not None
+                    fcntl.flock(root_descriptor, fcntl.LOCK_UN)
                 except OSError:
                     pass
-            _close_quietly(root_fd)
+            _close_quietly(root_descriptor)
 
-    # -- readers -------------------------------------------------------------
-
-    def read(self, service_id: str) -> ReadResult:
-        """Read the canonical active record for one service.
-
-        Returns ``ReadResult(found=True, entry=...)`` or
-        ``ReadResult(found=False, entry=None)``.
-        """
+    def snapshot(self, service_id: str) -> ApplicationRecord | None:
         service_id = _validate_service_id(service_id)
 
-        def operation(root_fd: int) -> ReadResult:
-            for record in _read_records(root_fd):
-                if record["service_id"] == service_id:
-                    return ReadResult(
-                        found=True,
-                        entry=ActiveRecordEntry(
-                            service_id=record["service_id"],
-                            record_sha256=record["record_sha256"],
-                            duplicate=False,
-                        ),
-                    )
-            return ReadResult(found=False, entry=None)
-
-        return self._run_locked(operation)
-
-    def active(self) -> tuple[ActiveRecordEntry, ...]:
-        """Return all persisted records sorted by service_id."""
-
-        def operation(root_fd: int) -> tuple[ActiveRecordEntry, ...]:
-            records = _read_records(root_fd)
-            return tuple(
-                ActiveRecordEntry(
-                    service_id=r["service_id"],
-                    record_sha256=r["record_sha256"],
-                    duplicate=False,
-                )
-                for r in records
+        def operation(root_descriptor: int) -> ApplicationRecord | None:
+            _dictionaries, records, _present = _read_records(root_descriptor)
+            return next(
+                (record for record in records if record.service_id == service_id),
+                None,
             )
 
         return self._run_locked(operation)
 
-    # -- writers -------------------------------------------------------------
-
-    def create(
-        self,
-        command: LifecycleWorkCommand,
-        config_sha256: str,
-        expected_containers: tuple[str, ...],
-    ) -> CreateResult:
-        """Create or exact-replay one active record.
-
-        Accepts a plan-bound command and config digest.  Calls the existing
-        ``produce_application_identity`` and ``produce_active_record`` from
-        the observation module; never trusts a caller-fabricated dict.
-
-        An exact replay (same record_sha256 already persisted for the same
-        service_id) returns the persisted record with ``duplicate=True``.
-        A conflicting active record for the same service_id with a different
-        record_sha256 raises ``store-binding-conflict``.
-        """
-        if not isinstance(command, LifecycleWorkCommand):
-            _fail("store-binding-invalid")
-        if (
-            not isinstance(config_sha256, str)
-            or not re.fullmatch(r"^sha256:[0-9a-f]{64}$", config_sha256)
-        ):
-            _fail("store-binding-invalid")
-        if type(expected_containers) is not tuple or not expected_containers:
-            _fail("store-binding-invalid")
-
-        def operation(root_fd: int) -> CreateResult:
-            try:
-                identity = produce_application_identity(command)
-            except ApplicationIdentityError:
-                _fail("store-identity-invalid")
-            try:
-                record_bytes = produce_active_record(
-                    identity, config_sha256, expected_containers
-                )
-            except Exception as exc:  # noqa: BLE001
-                code = (
-                    exc.code if isinstance(exc, LifecycleWorkError) else "store-record-invalid"
-                )
-                _fail(code)
-
-            record = parse_active_record(record_bytes)
-            service_id = record["service_id"]
-            record_sha256 = record["record_sha256"]
-            records = _read_records(root_fd)
-
-            for i, existing in enumerate(records):
-                if existing["service_id"] == service_id:
-                    if existing["record_sha256"] == record_sha256:
-                        return CreateResult(
-                            entry=ActiveRecordEntry(
-                                service_id=service_id,
-                                record_sha256=record_sha256,
-                                duplicate=True,
-                            ),
-                            duplicate=True,
-                        )
-                    _fail("store-binding-conflict")
-
-            if len(records) >= MAX_RECORDS:
-                _fail("store-oversize-records")
-
-            new_record = {
-                k: v for k, v in record.items()
-            }
-            records.append(new_record)
-            records.sort(key=lambda r: r["service_id"])
-            _write_snapshot(root_fd, records)
-
-            return CreateResult(
-                entry=ActiveRecordEntry(
-                    service_id=service_id,
-                    record_sha256=record_sha256,
-                    duplicate=False,
-                ),
-                duplicate=False,
-            )
-
-        return self._run_locked(operation)
-
-    def compare_replace(
-        self,
-        command: LifecycleWorkCommand,
-        config_sha256: str,
-        expected_containers: tuple[str, ...],
-        prior_record_sha256: str,
-    ) -> CompareReplaceResult:
-        """Compare-and-replace one active record.
-
-        Requires that the current persisted record for the same service_id
-        has exactly ``prior_record_sha256``.  Produces the replacement from
-        the plan-bound command (never trusts a caller dict).
-
-        An exact replay (new record matches what's already there) returns
-        with ``duplicate=True``.  A stale compare value raises
-        ``store-cas-stale``.  Missing target raises ``store-cas-absent``.
-        """
-        if not isinstance(command, LifecycleWorkCommand):
-            _fail("store-binding-invalid")
-        if (
-            not isinstance(config_sha256, str)
-            or not re.fullmatch(r"^sha256:[0-9a-f]{64}$", config_sha256)
-        ):
-            _fail("store-binding-invalid")
-        if type(expected_containers) is not tuple or not expected_containers:
-            _fail("store-binding-invalid")
-        prior_record_sha256 = _validate_record_sha256(prior_record_sha256)
-
-        def operation(root_fd: int) -> CompareReplaceResult:
-            try:
-                identity = produce_application_identity(command)
-            except ApplicationIdentityError:
-                _fail("store-identity-invalid")
-            try:
-                record_bytes = produce_active_record(
-                    identity, config_sha256, expected_containers
-                )
-            except Exception as exc:  # noqa: BLE001
-                code = (
-                    exc.code if isinstance(exc, LifecycleWorkError) else "store-record-invalid"
-                )
-                _fail(code)
-
-            record = parse_active_record(record_bytes)
-            service_id = record["service_id"]
-            record_sha256 = record["record_sha256"]
-            records = _read_records(root_fd)
-
-            target_idx: int | None = None
-            for i, existing in enumerate(records):
-                if existing["service_id"] == service_id:
-                    target_idx = i
-                    break
-
-            if target_idx is None:
-                _fail("store-cas-absent")
-            if records[target_idx]["record_sha256"] != prior_record_sha256:
-                _fail("store-cas-stale")
-
-            # Exact replay: new record identical to what is persisted
-            if records[target_idx]["record_sha256"] == record_sha256:
-                return CompareReplaceResult(
-                    entry=ActiveRecordEntry(
-                        service_id=service_id,
-                        record_sha256=record_sha256,
-                        duplicate=True,
-                    ),
-                    duplicate=True,
-                )
-
-            records[target_idx] = {k: v for k, v in record.items()}
-            records.sort(key=lambda r: r["service_id"])
-            _write_snapshot(root_fd, records)
-
-            return CompareReplaceResult(
-                entry=ActiveRecordEntry(
-                    service_id=service_id,
-                    record_sha256=record_sha256,
-                    duplicate=False,
-                ),
-                duplicate=False,
-            )
-
-        return self._run_locked(operation)
-
-    def compare_delete(
-        self,
-        service_id: str,
-        record_sha256: str,
-    ) -> CompareDeleteResult:
-        """Compare-and-delete one active record.
-
-        Requires that the current persisted record has exactly
-        ``record_sha256``.  A stale value raises ``store-cas-stale``.
-        Missing target raises ``store-cas-absent``.
-        """
-        service_id = _validate_service_id(service_id)
-        record_sha256 = _validate_record_sha256(record_sha256)
-
-        def operation(root_fd: int) -> CompareDeleteResult:
-            records = _read_records(root_fd)
-
-            target_idx: int | None = None
-            for i, existing in enumerate(records):
-                if existing["service_id"] == service_id:
-                    target_idx = i
-                    break
-
-            if target_idx is None:
-                _fail("store-cas-absent")
-            if records[target_idx]["record_sha256"] != record_sha256:
-                _fail("store-cas-stale")
-
-            prior = records[target_idx]
-            del records[target_idx]
-            _write_snapshot(root_fd, records)
-
-            return CompareDeleteResult(
-                deleted=True,
-                prior=ActiveRecordEntry(
-                    service_id=prior["service_id"],
-                    record_sha256=prior["record_sha256"],
-                    duplicate=False,
-                ),
-            )
+    def active(self) -> tuple[ApplicationRecord, ...]:
+        def operation(root_descriptor: int) -> tuple[ApplicationRecord, ...]:
+            _dictionaries, records, _present = _read_records(root_descriptor)
+            return records
 
         return self._run_locked(operation)
 
@@ -819,102 +634,86 @@ class ApplicationRecordStore:
         command: LifecycleWorkCommand,
         config_sha256: str,
         expected_containers: tuple[str, ...],
-    ) -> CreateResult:
-        """Publish a new active record from a plan-bound command.
+        previous_record_sha256: str | None = None,
+    ) -> PublishResult:
+        new_dictionary, new_record = _prepare_record(
+            command, config_sha256, expected_containers
+        )
+        previous = _validate_record_hash(previous_record_sha256, optional=True)
 
-        This is the primary write path for the ``apply:<serviceId>``
-        operation.  It accepts the exact plan-bound ``LifecycleWorkCommand``
-        plus config digest and expected containers and calls existing
-        application-identity/active-record producers.  It never trusts a
-        caller-fabricated dict.
-
-        An exact replay of the same record_sha256 for the same service_id
-        returns the persisted record with ``duplicate=True``.  A conflicting
-        record with a different sha256 raises ``store-publish-conflict``.
-        """
-        if not isinstance(command, LifecycleWorkCommand):
-            _fail("store-binding-invalid")
-        if (
-            not isinstance(config_sha256, str)
-            or not re.fullmatch(r"^sha256:[0-9a-f]{64}$", config_sha256)
-        ):
-            _fail("store-binding-invalid")
-        if type(expected_containers) is not tuple or not expected_containers:
-            _fail("store-binding-invalid")
-
-        # Mutating inputs must be cloned/revalidated before locking.
-        # command is a frozen dataclass (safe), config_sha256 is str (safe),
-        # expected_containers is tuple (safe), but revalidate shape:
-        for name in expected_containers:
-            if not isinstance(name, str):
-                _fail("store-binding-invalid")
-
-        def operation(root_fd: int) -> CreateResult:
-            try:
-                identity = produce_application_identity(command)
-            except ApplicationIdentityError:
-                _fail("store-identity-invalid")
-            try:
-                record_bytes = produce_active_record(
-                    identity, config_sha256, expected_containers
-                )
-            except Exception as exc:  # noqa: BLE001
-                code = (
-                    exc.code if isinstance(exc, LifecycleWorkError) else "store-record-invalid"
-                )
-                _fail(code)
-
-            record = parse_active_record(record_bytes)
-            sid = record["service_id"]
-            rsha = record["record_sha256"]
-            records = _read_records(root_fd)
-
-            for existing in records:
-                if existing["service_id"] == sid:
-                    if existing["record_sha256"] == rsha:
-                        return CreateResult(
-                            entry=ActiveRecordEntry(
-                                service_id=sid,
-                                record_sha256=rsha,
-                                duplicate=True,
-                            ),
-                            duplicate=True,
-                        )
-                    _fail("store-publish-conflict")
-
-            if len(records) >= MAX_RECORDS:
-                _fail("store-oversize-records")
-
-            records.append({k: v for k, v in record.items()})
-            records.sort(key=lambda r: r["service_id"])
-            _write_snapshot(root_fd, records)
-
-            return CreateResult(
-                entry=ActiveRecordEntry(
-                    service_id=sid,
-                    record_sha256=rsha,
-                    duplicate=False,
+        def operation(root_descriptor: int) -> PublishResult:
+            dictionaries, records, present = _read_records(root_descriptor)
+            index = next(
+                (
+                    position
+                    for position, record in enumerate(records)
+                    if record.service_id == new_record.service_id
                 ),
-                duplicate=False,
+                None,
             )
+            if index is None:
+                if previous is not None:
+                    _fail("application-record-store-conflict")
+                if len(records) >= MAX_RECORDS:
+                    _fail("application-record-store-size")
+                dictionaries.append(new_dictionary)
+                dictionaries.sort(key=lambda record: record["service_id"])
+                _write_snapshot(root_descriptor, dictionaries)
+                return PublishResult(record=new_record, outcome="created")
+
+            current = records[index]
+            if current.record_sha256 == new_record.record_sha256:
+                if previous is not None and previous != current.record_sha256:
+                    _fail("application-record-store-conflict")
+                _prove_unchanged(root_descriptor, dictionaries, present)
+                return PublishResult(record=current, outcome="replayed")
+
+            if previous is None or previous != current.record_sha256:
+                _fail("application-record-store-conflict")
+            dictionaries[index] = new_dictionary
+            _write_snapshot(root_descriptor, dictionaries)
+            return PublishResult(record=new_record, outcome="replaced")
+
+        return self._run_locked(operation)
+
+    def remove(
+        self, service_id: str, expected_record_sha256: str
+    ) -> RemoveResult:
+        service_id = _validate_service_id(service_id)
+        expected = _validate_record_hash(expected_record_sha256, optional=False)
+        assert expected is not None
+
+        def operation(root_descriptor: int) -> RemoveResult:
+            dictionaries, records, present = _read_records(root_descriptor)
+            index = next(
+                (
+                    position
+                    for position, record in enumerate(records)
+                    if record.service_id == service_id
+                ),
+                None,
+            )
+            if index is None:
+                _prove_unchanged(root_descriptor, dictionaries, present)
+                return RemoveResult(outcome="absent", prior=None)
+            prior = records[index]
+            if prior.record_sha256 != expected:
+                _fail("application-record-store-conflict")
+            del dictionaries[index]
+            _write_snapshot(root_descriptor, dictionaries)
+            return RemoveResult(outcome="removed", prior=prior)
 
         return self._run_locked(operation)
 
 
-# ---------------------------------------------------------------------------
-# Public surface
-# ---------------------------------------------------------------------------
-
 __all__ = [
-    "MAX_FILE_BYTES",
-    "MAX_RECORDS",
-    "SNAPSHOT_NAME",
-    "STORE_SCHEMA",
-    "ActiveRecordEntry",
+    "ApplicationRecord",
     "ApplicationRecordStore",
     "ApplicationRecordStoreError",
-    "CompareDeleteResult",
-    "CompareReplaceResult",
-    "CreateResult",
-    "ReadResult",
+    "MAX_FILE_BYTES",
+    "MAX_RECORDS",
+    "PublishResult",
+    "RemoveResult",
+    "SNAPSHOT_NAME",
+    "STORE_SCHEMA",
 ]
