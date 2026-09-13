@@ -478,11 +478,27 @@ async def _stream_hermes_sse(session_key: str, text: str, request: Request):
 
     async def cancel_pending() -> None:
         nonlocal pending
-        if pending is not None and not pending.done():
-            pending.cancel()
-            with contextlib.suppress(asyncio.CancelledError, StopAsyncIteration):
+        if pending is not None:
+            if not pending.done():
+                pending.cancel()
+            # Interrupt cleanup closes the pooled Hermes WebSocket before this
+            # task is cancelled. Consume either outcome so a raced connection-
+            # closed exception cannot become an unobserved task warning.
+            with contextlib.suppress(
+                asyncio.CancelledError,
+                StopAsyncIteration,
+                hermes_bridge.HermesBridgeError,
+            ):
                 await pending
         pending = None
+
+    async def interrupt_before_cancel() -> None:
+        # Hermes detaches sessions when a WebSocket disappears. Explicitly use
+        # its session-scoped abort RPC first; otherwise the abandoned agent can
+        # keep the only local llama-server slot occupied long after the phone
+        # or fleet client has gone away.
+        with contextlib.suppress(Exception):
+            await hermes_bridge.interrupt_active_prompt(session_key)
 
     try:
         while True:
@@ -493,6 +509,7 @@ async def _stream_hermes_sse(session_key: str, text: str, request: Request):
             except asyncio.CancelledError:
                 emit_done = False
                 await deny_before_cancel()
+                await interrupt_before_cancel()
                 await cancel_pending()
                 raise
             if not done_set:
@@ -501,6 +518,7 @@ async def _stream_hermes_sse(session_key: str, text: str, request: Request):
                 if await request.is_disconnected():
                     emit_done = False
                     await deny_before_cancel()
+                    await interrupt_before_cancel()
                     await cancel_pending()
                     return
                 yield _SSE_KEEPALIVE

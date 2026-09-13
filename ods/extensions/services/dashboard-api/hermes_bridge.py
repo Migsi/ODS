@@ -620,6 +620,77 @@ async def deny_pending_approval(session_key: str) -> bool:
         return False
 
 
+async def interrupt_active_prompt(session_key: str) -> bool:
+    """Interrupt and evict the active Hermes prompt for one Talk session.
+
+    Closing the WebSocket alone is not cancellation: Hermes deliberately
+    detaches an in-flight session and lets its agent continue after a client
+    disconnect. On a single-slot local model that can block every later Talk,
+    Pixel, and capability request for minutes. Send Hermes's session-scoped
+    abort RPC before closing the pooled connection so the abandoned turn frees
+    its upstream model slot without affecting any sibling session.
+
+    This is best-effort disconnect cleanup. It never opens a new connection,
+    never interrupts an idle session, and always evicts the used connection so
+    late frames from the interrupted turn cannot be mistaken for a later Talk
+    response.
+    """
+    async with _POOL_GUARD:
+        conn = _CONNECTION_POOL.get(session_key)
+        if (
+            conn is None
+            or conn.closed
+            or conn.ws.closed
+            or not conn.lock.locked()
+        ):
+            return False
+        _CONNECTION_POOL.pop(session_key, None)
+
+    acquired = False
+    sent = False
+    try:
+        await asyncio.wait_for(
+            conn.write_lock.acquire(),
+            timeout=_APPROVAL_SEND_TIMEOUT,
+        )
+        acquired = True
+        if conn.closed or conn.ws.closed:
+            return False
+        rpc = json.dumps({
+            "jsonrpc": "2.0",
+            "id": f"ods-talk-interrupt-{time.monotonic_ns()}",
+            "method": "session.interrupt",
+            "params": {"session_id": conn.session_id},
+        })
+        await asyncio.wait_for(
+            conn.ws.send_str(rpc),
+            timeout=_APPROVAL_SEND_TIMEOUT,
+        )
+        conn.pending_approval = None
+        conn.last_used = time.monotonic()
+        sent = True
+    except (asyncio.TimeoutError, aiohttp.ClientError, ConnectionResetError, ConnectionError):
+        logger.warning(
+            "hermes-bridge: could not interrupt abandoned prompt for %s",
+            session_key[:8],
+            exc_info=True,
+        )
+    finally:
+        if acquired:
+            conn.write_lock.release()
+        try:
+            await asyncio.wait_for(
+                conn.aclose(),
+                timeout=_APPROVAL_SEND_TIMEOUT,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "hermes-bridge: timed out closing interrupted connection for %s",
+                session_key[:8],
+            )
+    return sent
+
+
 async def submit_prompt(session_key: str, text: str) -> HermesReply:
     """Blocking wrapper that consumes stream_prompt and returns the final reply.
 

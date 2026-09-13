@@ -414,6 +414,7 @@ def test_talk_message_stream_cancels_upstream_on_client_disconnect(talk_client, 
 
     bridge_started = _asyncio.Event()
     bridge_cancelled = _asyncio.Event()
+    cleanup_order = []
 
     async def hanging_stream(session_key, text):
         yield {"type": "session", "session_id": "sid-cancel"}
@@ -423,10 +424,16 @@ def test_talk_message_stream_cancels_upstream_on_client_disconnect(talk_client, 
             await _asyncio.sleep(60)
             yield {"type": "complete", "session_id": "sid-cancel", "text": "never", "status": "ok", "warning": None}
         except _asyncio.CancelledError:
+            cleanup_order.append("cancel")
             bridge_cancelled.set()
             raise
 
+    async def fake_interrupt(_session_key):
+        cleanup_order.append("interrupt")
+        return True
+
     monkeypatch.setattr("hermes_bridge.stream_prompt", hanging_stream)
+    monkeypatch.setattr("hermes_bridge.interrupt_active_prompt", fake_interrupt)
 
     # Build a stub Request that reports disconnected after the first poll.
     class StubRequest:
@@ -461,6 +468,7 @@ def test_talk_message_stream_cancels_upstream_on_client_disconnect(talk_client, 
     # And the upstream bridge task must have been cancelled (no hang).
     assert bridge_started.is_set()
     assert bridge_cancelled.is_set()
+    assert cleanup_order == ["interrupt", "cancel"]
 
 
 def _run_with_one_loop(coro_factory):
@@ -1249,6 +1257,39 @@ def test_bridge_maps_approval_request_and_keeps_authoritative_payload(monkeypatc
     }
 
 
+def test_interrupt_active_prompt_sends_abort_then_evicts_connection():
+    import asyncio as _asyncio
+    import json as _json
+    import hermes_bridge
+
+    hermes_bridge._CONNECTION_POOL.clear()
+    hermes_bridge._SWEEPER_TASK = None
+
+    async def main():
+        ws = _ApprovalFakeWS()
+        conn = hermes_bridge._HermesConnection(
+            http_session=_ApprovalFakeHTTP(),
+            ws=ws,
+            session_id="sid-abandoned",
+        )
+        await conn.lock.acquire()
+        hermes_bridge._CONNECTION_POOL["phone"] = conn
+        try:
+            interrupted = await hermes_bridge.interrupt_active_prompt("phone")
+        finally:
+            conn.lock.release()
+
+        assert interrupted is True
+        assert "phone" not in hermes_bridge._CONNECTION_POOL
+        assert ws.closed is True
+        assert len(ws.sent) == 1
+        return _json.loads(ws.sent[0])
+
+    rpc = _run_with_one_loop(main)
+    assert rpc["method"] == "session.interrupt"
+    assert rpc["params"] == {"session_id": "sid-abandoned"}
+
+
 def test_approval_response_bypasses_prompt_lock_and_is_single_claim():
     import asyncio as _asyncio
     import json as _json
@@ -1378,8 +1419,13 @@ def test_sse_disconnect_denies_approval_before_cancelling(monkeypatch):
         order.append("deny")
         return True
 
+    async def fake_interrupt(_session_key):
+        order.append("interrupt")
+        return True
+
     monkeypatch.setattr("hermes_bridge.stream_prompt", approval_then_hang)
     monkeypatch.setattr("hermes_bridge.deny_pending_approval", fake_deny)
+    monkeypatch.setattr("hermes_bridge.interrupt_active_prompt", fake_interrupt)
 
     class DisconnectedRequest:
         async def is_disconnected(self):
@@ -1397,4 +1443,4 @@ def test_sse_disconnect_denies_approval_before_cancelling(monkeypatch):
     assert '"type":"approval"' in body
     assert '"choices":["once","deny"]' in body
     assert '"type":"done"' not in body
-    assert order == ["deny", "cancel"]
+    assert order == ["deny", "interrupt", "cancel"]
