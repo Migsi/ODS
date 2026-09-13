@@ -42,7 +42,6 @@ from extension_lifecycle_work import (
 from extension_resource_reservation_store import (
     BATCH_RELEASE_SCHEMA,
     RELEASED,
-    SCHEMA as RESERVATION_SCHEMA,
     HostPort,
     ReleaseExpectation,
     ReservationClaims,
@@ -50,6 +49,7 @@ from extension_resource_reservation_store import (
     ReservationStoreError,
     ResourceReservationStore,
 )
+from extension_resource_reservation_store import SCHEMA as RESERVATION_SCHEMA
 
 _HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 _UTC_SECOND_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
