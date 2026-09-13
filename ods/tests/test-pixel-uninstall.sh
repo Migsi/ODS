@@ -953,6 +953,76 @@ for interrupted_step in attestation link; do
     fi
 done
 
+write_active_fixture
+python3 - "$HOME_DIR/.config/ods/pixel-managed.json" <<'PY'
+import json, pathlib, sys
+path = pathlib.Path(sys.argv[1])
+value = json.loads(path.read_text())
+value["state"] = "installing"
+path.write_text(json.dumps(value) + "\n")
+PY
+chmod 0600 "$HOME_DIR/.config/ods/pixel-managed.json"
+rm -f -- "$HOME_DIR/.local/share/pixel/runtime-attestation.json"
+if ods_pixel_uninstall_managed "$INSTALL_DIR" "$HOME_DIR" \
+    && [[ ! -e "$HOME_DIR/.local/share/pixel/current" \
+        && ! -e "$HOME_DIR/.local/share/pixel/runtime-attestation.json" \
+        && ! -e "$HOME_DIR/.local/share/pixel/.ods-uninstall-current" \
+        && ! -e "$HOME_DIR/.local/share/pixel/.ods-uninstall-runtime-attestation" \
+        && ! -e "$HOME_DIR/.local/share/pixel/releases/4.3.14" \
+        && ! -e "$HOME_DIR/.config/ods/pixel-managed.json" \
+        && ! -e "$DOCKER_STATE" ]]; then
+    pass "interrupted installing Pixel active link without attestation is safely retired"
+else
+    fail "interrupted installing Pixel active link without attestation was not resumable"
+fi
+
+write_active_fixture
+rm -f -- "$HOME_DIR/.local/share/pixel/runtime-attestation.json"
+if ods_pixel_uninstall_managed "$INSTALL_DIR" "$HOME_DIR"; then
+    fail "ready Pixel active link without attestation was accepted"
+else
+    [[ -L "$HOME_DIR/.local/share/pixel/current" \
+        && -d "$HOME_DIR/.local/share/pixel/releases/4.3.14" \
+        && -e "$HOME_DIR/.config/ods/pixel-managed.json" \
+        && -e "$DOCKER_STATE" && ! -s "$SYSTEMCTL_LOG" && ! -s "$DOCKER_LOG" ]] \
+        && pass "ready Pixel state without attestation fails closed before mutation" \
+        || fail "ready Pixel state without attestation caused partial cleanup"
+fi
+
+write_active_fixture
+pixel_install="$HOME_DIR/.local/share/pixel"
+rm -f -- "$pixel_install/runtime-attestation.json"
+mv -T "$pixel_install/current" "$pixel_install/.ods-uninstall-current"
+mkdir -m 0700 "$pixel_install/retired-ods-releases"
+identity_prefix="$(python3 - "$HOME_DIR/.config/ods/pixel-managed.json" <<'PY'
+import json, pathlib, sys
+print(json.loads(pathlib.Path(sys.argv[1]).read_text())["release_identity_sha256"][:12])
+PY
+)"
+retired_container="$(mktemp -d \
+    "$pixel_install/retired-ods-releases/4.3.14-${identity_prefix}.XXXXXXXX")"
+retired_release="$retired_container/release"
+python3 - "$HOME_DIR/.config/ods/pixel-managed.json" "$retired_release" <<'PY'
+import json, pathlib, sys
+path = pathlib.Path(sys.argv[1])
+value = json.loads(path.read_text())
+value["state"] = "deactivating"
+value["retired_release_path"] = sys.argv[2]
+value["runtime_attestation_state"] = "absent"
+path.write_text(json.dumps(value) + "\n")
+PY
+chmod 0600 "$HOME_DIR/.config/ods/pixel-managed.json"
+if ods_pixel_uninstall_managed "$INSTALL_DIR" "$HOME_DIR" \
+    && [[ -d "$retired_release" \
+        && ! -e "$pixel_install/releases/4.3.14" \
+        && ! -e "$pixel_install/.ods-uninstall-current" \
+        && ! -e "$HOME_DIR/.config/ods/pixel-managed.json" \
+        && ! -e "$DOCKER_STATE" ]]; then
+    pass "unattested Pixel deactivation resumes after active-link staging"
+else
+    fail "unattested Pixel deactivation could not resume after active-link staging"
+fi
+
 for archive_step in before-release-move after-release-move after-active-state-cleanup; do
     write_active_fixture
     pixel_install="$HOME_DIR/.local/share/pixel"

@@ -260,8 +260,17 @@ if state == "deactivating":
     # exactly one of those locations.
     if value.get("schema_version") != 2 or value.get("initial_active_state") != "absent":
         raise SystemExit("Pixel deactivation state lacks an ODS pre-install absence proof")
-    if current_present or attestation_present or staged_current_present != staged_attestation_present:
+    runtime_attestation_state = value.get("runtime_attestation_state", "verified")
+    if current_present or attestation_present:
         raise SystemExit("Pixel deactivation state is partial or still active")
+    if runtime_attestation_state == "verified":
+        if staged_current_present != staged_attestation_present:
+            raise SystemExit("Pixel deactivation state is partial or still active")
+    elif runtime_attestation_state == "absent":
+        if staged_attestation_present:
+            raise SystemExit("Pixel deactivation state unexpectedly gained a runtime attestation")
+    else:
+        raise SystemExit("Pixel deactivation state has an invalid runtime attestation status")
     if not isinstance(retired_release_raw, str) or "|" in retired_release_raw:
         raise SystemExit("Pixel deactivation marker has an invalid retired release path")
     retired_release = pathlib.Path(retired_release_raw)
@@ -305,10 +314,23 @@ if state == "deactivating":
 elif not any((current_present, attestation_present, staged_current_present, staged_attestation_present)):
     cleanup = ("none", "", "", "", "", "", "", "")
 else:
-    if ((int(current_present) + int(staged_current_present) != 1)
-            or (int(attestation_present) + int(staged_attestation_present) != 1)):
+    link_count = int(current_present) + int(staged_current_present)
+    attestation_count = int(attestation_present) + int(staged_attestation_present)
+    if link_count != 1 or attestation_count > 1:
         raise SystemExit("Pixel active-release state is partial, duplicated, or has an unsafe type")
-    if current_present and attestation_present:
+    if attestation_count == 0:
+        # Pixel creates the active link before its runtime attestation. A host
+        # interruption in that narrow window is recoverable only while the
+        # private ODS marker still says installing; the exact release identity,
+        # manifest, image, ownership, and initial-absence proof are validated
+        # below before any mutation.
+        if state != "installing":
+            raise SystemExit("Pixel active release lacks its runtime attestation")
+        cleanup = (
+            "unattested-active" if current_present else "unattested-staged",
+            None, None, None, None, None, None, "",
+        )
+    elif current_present and attestation_present:
         cleanup = ("active", None, None, None, None, None, None, "")
     elif current_present and staged_attestation_present:
         cleanup = ("staging-attestation", None, None, None, None, None, None, "")
@@ -322,8 +344,15 @@ if cleanup[0] != "none":
         raise SystemExit("Pixel active state lacks an ODS pre-install absence proof")
     receipt = None
     if cleanup[0] not in {"retiring", "retired"}:
-        link = current if cleanup[0] in {"active", "staging-attestation"} else staged_current
-        receipt = runtime_attestation if cleanup[0] in {"active", "staging-link"} else staged_attestation
+        link = current if cleanup[0] in {
+            "active", "staging-attestation", "unattested-active"
+        } else staged_current
+        if cleanup[0] not in {"unattested-active", "unattested-staged"}:
+            receipt = (
+                runtime_attestation
+                if cleanup[0] in {"active", "staging-link"}
+                else staged_attestation
+            )
         link_info = link.lstat()
         if not stat.S_ISLNK(link_info.st_mode) or link_info.st_uid != owner_uid:
             raise SystemExit("unsafe ODS-managed Pixel active-release link")
@@ -338,7 +367,10 @@ if cleanup[0] != "none":
             or not stat.S_ISDIR(release_info.st_mode) or stat.S_ISLNK(release_info.st_mode)
             or release_info.st_uid != owner_uid or release_info.st_mode & 0o022):
         raise SystemExit("ODS-managed Pixel release is outside its owner-controlled release root")
-    if cleanup[0] in {"retiring", "active", "staging-attestation", "staging-link", "staged"}:
+    if cleanup[0] in {
+        "retiring", "active", "staging-attestation", "staging-link", "staged",
+        "unattested-active", "unattested-staged",
+    }:
         if release.parent.resolve(strict=True) != releases_root.resolve(strict=True):
             raise SystemExit("ODS-managed Pixel release is outside its owner-controlled release root")
     elif release != pathlib.Path(retired_release_raw):
@@ -1304,6 +1336,7 @@ PY
         }
         local active_link="$current"
         [[ "$cleanup_state" == staged || "$cleanup_state" == staging-link \
+            || "$cleanup_state" == unattested-staged \
             || "$cleanup_state" == retiring ]] && active_link="$staged_current"
         [[ ( "$cleanup_state" == retired || "$(readlink -f -- "$active_link")" == "$release_path" ) \
             && "$(sha256sum "$release_path/release-identity.json" | awk '{print $1}')" == "$release_identity_sha256" \
@@ -1465,11 +1498,29 @@ PY
                     return 1
                 }
                 ;;
+            unattested-active)
+                mv -T -- "$current" "$staged_current" || {
+                    log_error "Could not stage the interrupted ODS-managed Pixel active-release link"
+                    return 1
+                }
+                ;;
+            unattested-staged)
+                ;;
         esac
         if [[ "$shared_image_present" == true ]] \
             && ! timeout 30s docker image rm -- "$sandbox_image" >/dev/null; then
-            mv -T -- "$staged_current" "$current" || true
-            mv -T -- "$staged_attestation" "$runtime_attestation" || true
+            # Before the durable deactivating marker is written, restore the
+            # live pair (or the interrupted install's lone link). A resumed
+            # deactivation already has durable archive intent, so moving its
+            # staged objects back would create a state that marker rejects.
+            if [[ "$cleanup_state" != retiring && "$cleanup_state" != retired ]]; then
+                if [[ -e "$staged_current" || -L "$staged_current" ]]; then
+                    mv -T -- "$staged_current" "$current" || true
+                fi
+                if [[ -e "$staged_attestation" || -L "$staged_attestation" ]]; then
+                    mv -T -- "$staged_attestation" "$runtime_attestation" || true
+                fi
+            fi
             log_error "Could not remove the exact ODS-managed Pixel live sandbox tag"
             return 1
         fi
@@ -1490,8 +1541,13 @@ PY
                 return 1
             }
             retired_release_path="$retired_container/release"
+            runtime_attestation_state=verified
+            [[ "$cleanup_state" == unattested-active \
+                || "$cleanup_state" == unattested-staged ]] \
+                && runtime_attestation_state=absent
             if ! python3 - "$marker" "$retired_release_path" "$release_version" \
-                "$release_identity_sha256" "$install_manifest_sha256" <<'PY'
+                "$release_identity_sha256" "$install_manifest_sha256" \
+                "$runtime_attestation_state" <<'PY'
 import json
 import os
 import pathlib
@@ -1501,7 +1557,7 @@ import tempfile
 
 marker = pathlib.Path(sys.argv[1])
 retired_release = pathlib.Path(sys.argv[2])
-version, identity_sha256, manifest_sha256 = sys.argv[3:]
+version, identity_sha256, manifest_sha256, runtime_attestation_state = sys.argv[3:]
 value = json.loads(marker.read_text(encoding="utf-8"))
 if (
     not isinstance(value, dict)
@@ -1524,8 +1580,13 @@ if (
     or retired_release.is_symlink()
 ):
     raise SystemExit("unsafe Pixel retired release reservation")
+if runtime_attestation_state not in {"verified", "absent"}:
+    raise SystemExit("invalid Pixel runtime attestation transition")
+if runtime_attestation_state == "absent" and value.get("state") != "installing":
+    raise SystemExit("only an interrupted Pixel install can lack runtime attestation")
 value["state"] = "deactivating"
 value["retired_release_path"] = str(retired_release)
+value["runtime_attestation_state"] = runtime_attestation_state
 temporary = None
 try:
     with tempfile.NamedTemporaryFile(
