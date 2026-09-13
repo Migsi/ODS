@@ -122,6 +122,11 @@ try:
 except Exception:  # pragma: no cover - import environment dependent
     _artifact_stage_runtime_module = None
 
+try:
+    import extension_resource_reservation_runtime as _resource_reservation_runtime_module
+except Exception:  # pragma: no cover - import environment dependent
+    _resource_reservation_runtime_module = None
+
 _EXTENSION_TRANSACTION_STORE_PATH = (
     Path(__file__).resolve().parent.parent
     / "extensions"
@@ -184,6 +189,13 @@ _extension_lifecycle_plan_loader = None
 _artifact_stage_runtime = None
 _artifact_stage_runtime_binding: tuple[Path, Path, Path] | None = None
 _artifact_stage_runtime_lock = threading.Lock()
+
+# Exact resource-reservation dependencies are composed lazily from fixed host
+# roots. Only the ``reserve:<serviceId>`` and ``release`` lifecycle-work
+# branches select them. Construction performs no reservation/release mutation.
+_resource_reservation_runtime = None
+_resource_reservation_runtime_data_dir: Path | None = None
+_resource_reservation_runtime_lock = threading.Lock()
 
 # General production lifecycle dispatch remains deliberately unwired.  The
 # exact ``stage`` operation selects its fixed runtime separately after lease
@@ -6533,6 +6545,35 @@ def _get_extension_artifact_stage_runtime():
         return _artifact_stage_runtime
 
 
+def _get_extension_resource_reservation_runtime():
+    """Compose, but do not register, the fixed host resource-reservation runtime.
+
+    Construction itself performs no reservation or release mutation.
+    Returns None if the module is unavailable or construction fails.
+    """
+    global _resource_reservation_runtime, _resource_reservation_runtime_data_dir
+    if _resource_reservation_runtime_module is None:
+        return None
+    with _resource_reservation_runtime_lock:
+        if (
+            _resource_reservation_runtime is None
+            or _resource_reservation_runtime_data_dir != DATA_DIR
+        ):
+            try:
+                _resource_reservation_runtime = (
+                    _resource_reservation_runtime_module.
+                    build_resource_reservation_runtime(
+                        data_dir=DATA_DIR,
+                    )
+                )
+            except Exception:
+                _resource_reservation_runtime = None
+                _resource_reservation_runtime_data_dir = None
+                return None
+            _resource_reservation_runtime_data_dir = DATA_DIR
+        return _resource_reservation_runtime
+
+
 def _get_extension_transaction_store():
     """Return the fixed owner-private Assistant First transaction store."""
     global _extension_transaction_store, _extension_transaction_store_data_dir
@@ -7573,6 +7614,16 @@ class AgentHandler(BaseHTTPRequestHandler):
                     if runtime is not None:
                         dispatcher = runtime.dispatcher
                         started_observer = runtime.started_observer
+                elif (
+                    command.operation_key == "release"
+                    or command.operation_key.startswith("reserve:")
+                ):
+                    res_runtime = _get_extension_resource_reservation_runtime()
+                    if res_runtime is not None:
+                        if command.operation_key == "release":
+                            dispatcher = res_runtime.release_dispatcher
+                        else:
+                            dispatcher = res_runtime.reserve_dispatcher
 
                 if dispatcher is None:
                     # Preserve the dormant production boundary without creating
