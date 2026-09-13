@@ -2004,6 +2004,7 @@ PY
 
 _ods_pixel_restart_gateway_and_verify() {
     local owner="$1" home="$2" pixel_root="$3" attempt ready=false previous_pid current_pid gateway_port
+    local verify_attempt
     gateway_port="$(_ods_pixel_gateway_port)" || return 1
     previous_pid="$(systemctl show openclaw-gateway.service -p MainPID --value 2>/dev/null || true)"
     if ods_sudo_available; then
@@ -2055,7 +2056,24 @@ _ods_pixel_restart_gateway_and_verify() {
         (( attempt < 60 )) && sleep 2
     done
     [[ "$ready" == true ]] || return 1
-    ods_pixel_run_as_owner "$owner" "$home" "$pixel_root/pixel" verify
+    # A fresh install can finish the gateway HTTP listener while OpenClaw's
+    # separate CLI process is still settling its newly-created plugin registry
+    # under first-boot memory and I/O pressure. The gateway itself already
+    # reports every required plugin loaded, but the first strict `pixel verify`
+    # can transiently fail its independent registry read. Retry only the same
+    # complete verification command; every attempt remains fail closed and a
+    # persistent version, root, policy, or endpoint mismatch still aborts the
+    # model transaction and triggers rollback.
+    for verify_attempt in 1 2 3; do
+        if ods_pixel_run_as_owner "$owner" "$home" "$pixel_root/pixel" verify; then
+            return 0
+        fi
+        if (( verify_attempt < 3 )); then
+            printf '%s\n' "Pixel verification did not settle after gateway restart (attempt ${verify_attempt}/3); retrying..." >&2
+            sleep 2
+        fi
+    done
+    return 1
 }
 
 _ods_pixel_wait_access_reconcile() {

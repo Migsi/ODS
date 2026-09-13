@@ -608,6 +608,87 @@ else
 fi
 
 if (
+    retry_state="$restart_probe/retry-state"
+    retry_calls="$restart_probe/retry-calls"
+    : > "$retry_calls"
+    systemctl() {
+        if [[ "$1" == show ]]; then
+            if [[ -e "$retry_state" ]]; then
+                printf '%s\n' 4343
+            else
+                : > "$retry_state"
+                printf '%s\n' 0
+            fi
+        elif [[ "$1" == is-active ]]; then
+            return 0
+        else
+            return 1
+        fi
+    }
+    ods_sudo_available() { return 0; }
+    ods_sudo() { [[ "$*" == "systemctl restart openclaw-gateway.service" ]]; }
+    curl() {
+        [[ "$*" == *"http://127.0.0.1:18790/health"* ]] || return 1
+        printf '%s\n' '{"ok":true,"status":"live"}'
+    }
+    sleep() { :; }
+    ods_pixel_run_as_owner() {
+        [[ "$1" == "$owner" && "$2" == "$home" \
+            && "$3" == "$restart_probe/pixel-root/pixel" && "$4" == verify ]] || return 1
+        printf 'x' >> "$retry_calls"
+        [[ "$(wc -c < "$retry_calls")" -ge 2 ]]
+    }
+    PIXEL_GATEWAY_PORT=18790 _ods_pixel_restart_gateway_and_verify "$owner" "$home" "$restart_probe/pixel-root" \
+        && [[ "$(wc -c < "$retry_calls")" -eq 2 ]]
+); then
+    pass "Pixel restart retries one transient complete verification failure"
+else
+    fail "Pixel restart retries one transient complete verification failure"
+fi
+
+if (
+    persistent_state="$restart_probe/persistent-state"
+    persistent_calls="$restart_probe/persistent-calls"
+    : > "$persistent_calls"
+    systemctl() {
+        if [[ "$1" == show ]]; then
+            if [[ -e "$persistent_state" ]]; then
+                printf '%s\n' 4444
+            else
+                : > "$persistent_state"
+                printf '%s\n' 0
+            fi
+        elif [[ "$1" == is-active ]]; then
+            return 0
+        else
+            return 1
+        fi
+    }
+    ods_sudo_available() { return 0; }
+    ods_sudo() { [[ "$*" == "systemctl restart openclaw-gateway.service" ]]; }
+    curl() {
+        [[ "$*" == *"http://127.0.0.1:18790/health"* ]] || return 1
+        printf '%s\n' '{"ok":true,"status":"live"}'
+    }
+    sleep() { :; }
+    ods_pixel_run_as_owner() {
+        [[ "$1" == "$owner" && "$2" == "$home" \
+            && "$3" == "$restart_probe/pixel-root/pixel" && "$4" == verify ]] || return 1
+        printf 'x' >> "$persistent_calls"
+        return 1
+    }
+    if PIXEL_GATEWAY_PORT=18790 _ods_pixel_restart_gateway_and_verify \
+        "$owner" "$home" "$restart_probe/pixel-root" >/dev/null 2>&1; then
+        return 1
+    fi
+    [[ "$(wc -c < "$persistent_calls")" -eq 3 ]]
+); then
+    pass "Pixel restart remains fail closed after bounded verification retries"
+else
+    fail "Pixel restart remains fail closed after bounded verification retries"
+fi
+
+if (
     systemctl() {
         [[ "$1" == show ]] && printf '%s\n' 0
     }
