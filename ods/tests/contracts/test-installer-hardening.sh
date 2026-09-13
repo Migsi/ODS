@@ -233,6 +233,9 @@ assert_contains "$bootstrap" 'Re-run with --force to remove it automatically' "b
 assert_contains "$bootstrap" 'remove_install_dir()' "bootstrap should centralize incomplete install cleanup"
 assert_contains "$bootstrap" 'sudo -n rm -rf -- "\$target_dir"' "bootstrap --force should retry root-owned container data cleanup with sudo -n"
 assert_contains "$bootstrap" 'root-owned container data' "bootstrap sudo fallback should explain root-owned Docker data cleanup"
+assert_contains "$bootstrap" 'validate_force_reinstall_target()' "bootstrap should fingerprint a complete install before forced replacement"
+assert_contains "$bootstrap" 'candidate_uninstaller="\$TEMP_DIR/repo/ods/ods-uninstall.sh"' "bootstrap should stage the requested candidate uninstaller"
+assert_contains "$bootstrap" 'INSTALL_DIR="\$INSTALL_DIR" bash "\$candidate_uninstaller" --force' "bootstrap should run the candidate uninstaller against the existing install"
 
 echo "[contract] public bootstrap can install from an exact commit SHA"
 sha_repo="$tmpdir/sha-ref-repo"
@@ -246,6 +249,17 @@ set -euo pipefail
 printf '%s\n' first-commit > "${ODS_TEST_BOOTSTRAP_INSTALL_MARKER:?}"
 EOF
 chmod +x "$sha_repo/ods/install.sh"
+cat > "$sha_repo/ods/ods-uninstall.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "${INSTALL_DIR:?}" == "${ODS_TEST_EXPECTED_INSTALL_DIR:?}" ]]
+printf '%s\n' candidate > "${ODS_TEST_CANDIDATE_UNINSTALL_MARKER:?}"
+if [[ "${ODS_TEST_CANDIDATE_UNINSTALL_FAIL:-false}" == "true" ]]; then
+  exit 92
+fi
+rm -rf -- "$INSTALL_DIR"
+EOF
+chmod +x "$sha_repo/ods/ods-uninstall.sh"
 git -C "$sha_repo" init -q
 git -C "$sha_repo" add ods
 git -C "$sha_repo" \
@@ -291,6 +305,122 @@ fi
 grep -qF first-commit "$sha_marker" \
   || { cat "$tmpdir/bootstrap-sha.out"; echo "[FAIL] bootstrap did not install the exact SHA payload"; exit 1; }
 assert_not_contains "$tmpdir/bootstrap-sha.out" 'Remote branch .* not found' "bootstrap treated an exact SHA as a branch name"
+
+echo "[contract] forced reinstall uses the requested candidate uninstaller"
+reinstall_dir="$tmpdir/reinstall-target"
+reinstall_marker="$tmpdir/reinstall-marker"
+candidate_uninstall_marker="$tmpdir/candidate-uninstall-marker"
+old_uninstall_marker="$tmpdir/old-uninstall-marker"
+mkdir -p "$reinstall_dir"
+touch "$reinstall_dir/.env" "$reinstall_dir/ods-cli" "$reinstall_dir/docker-compose.yml"
+cat > "$reinstall_dir/ods-uninstall.sh" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' old > "$old_uninstall_marker"
+exit 91
+EOF
+chmod +x "$reinstall_dir/ods-uninstall.sh"
+
+if ! PATH="$tmpdir/bin:$PATH" \
+    HOME="$sha_home" \
+    ODS_BOOTSTRAP_ROOT="$sha_home" \
+    ODS_REPO_URL="file://$sha_repo" \
+    ODS_REF="$sha_ref" \
+    ODS_INSTALL_DIR="$reinstall_dir" \
+    ODS_ALLOW_LEGACY_PARALLEL=1 \
+    ODS_TEST_EXPECTED_INSTALL_DIR="$reinstall_dir" \
+    ODS_TEST_CANDIDATE_UNINSTALL_MARKER="$candidate_uninstall_marker" \
+    ODS_TEST_BOOTSTRAP_INSTALL_MARKER="$reinstall_marker" \
+    OSTYPE=linux-gnu \
+    bash get-ods.sh --non-interactive --force >"$tmpdir/bootstrap-reinstall.out" 2>&1; then
+  cat "$tmpdir/bootstrap-reinstall.out"
+  echo "[FAIL] bootstrap candidate-driven reinstall failed"
+  exit 1
+fi
+grep -qF candidate "$candidate_uninstall_marker" \
+  || { cat "$tmpdir/bootstrap-reinstall.out"; echo "[FAIL] requested candidate uninstaller was not invoked"; exit 1; }
+[[ ! -e "$old_uninstall_marker" ]] \
+  || { cat "$tmpdir/bootstrap-reinstall.out"; echo "[FAIL] installed stale uninstaller was invoked"; exit 1; }
+grep -qF first-commit "$reinstall_marker" \
+  || { cat "$tmpdir/bootstrap-reinstall.out"; echo "[FAIL] reinstall did not launch the exact requested payload"; exit 1; }
+
+echo "[contract] failed candidate uninstall prevents candidate overlay"
+failed_reinstall_dir="$tmpdir/failed-reinstall-target"
+failed_candidate_marker="$tmpdir/failed-candidate-marker"
+mkdir -p "$failed_reinstall_dir"
+touch "$failed_reinstall_dir/.env" "$failed_reinstall_dir/ods-cli" \
+  "$failed_reinstall_dir/docker-compose.yml" "$failed_reinstall_dir/preserve-me"
+cp "$reinstall_dir/ods-uninstall.sh" "$failed_reinstall_dir/ods-uninstall.sh"
+set +e
+PATH="$tmpdir/bin:$PATH" \
+    HOME="$sha_home" \
+    ODS_BOOTSTRAP_ROOT="$sha_home" \
+    ODS_REPO_URL="file://$sha_repo" \
+    ODS_REF="$sha_ref" \
+    ODS_INSTALL_DIR="$failed_reinstall_dir" \
+    ODS_ALLOW_LEGACY_PARALLEL=1 \
+    ODS_TEST_EXPECTED_INSTALL_DIR="$failed_reinstall_dir" \
+    ODS_TEST_CANDIDATE_UNINSTALL_MARKER="$failed_candidate_marker" \
+    ODS_TEST_CANDIDATE_UNINSTALL_FAIL=true \
+    ODS_TEST_BOOTSTRAP_INSTALL_MARKER="$reinstall_marker" \
+    OSTYPE=linux-gnu \
+    bash get-ods.sh --non-interactive --force >"$tmpdir/bootstrap-reinstall-fail.out" 2>&1
+failed_reinstall_rc=$?
+set -e
+[[ "$failed_reinstall_rc" -ne 0 ]] \
+  || { cat "$tmpdir/bootstrap-reinstall-fail.out"; echo "[FAIL] failed candidate uninstall was accepted"; exit 1; }
+[[ -f "$failed_reinstall_dir/preserve-me" && -f "$failed_reinstall_dir/.env" ]] \
+  || { cat "$tmpdir/bootstrap-reinstall-fail.out"; echo "[FAIL] failed candidate uninstall mutated the existing install"; exit 1; }
+
+echo "[contract] forced reinstall rejects a symlinked compose fingerprint"
+unsafe_reinstall_dir="$tmpdir/unsafe-reinstall-target"
+unsafe_candidate_marker="$tmpdir/unsafe-candidate-marker"
+mkdir -p "$unsafe_reinstall_dir"
+touch "$unsafe_reinstall_dir/.env" "$unsafe_reinstall_dir/ods-cli" \
+  "$unsafe_reinstall_dir/compose-outside.yml" "$unsafe_reinstall_dir/preserve-me"
+cp "$reinstall_dir/ods-uninstall.sh" "$unsafe_reinstall_dir/ods-uninstall.sh"
+ln -s "$unsafe_reinstall_dir/compose-outside.yml" "$unsafe_reinstall_dir/docker-compose.yml"
+set +e
+PATH="$tmpdir/bin:$PATH" \
+    HOME="$sha_home" \
+    ODS_BOOTSTRAP_ROOT="$sha_home" \
+    ODS_REPO_URL="file://$sha_repo" \
+    ODS_REF="$sha_ref" \
+    ODS_INSTALL_DIR="$unsafe_reinstall_dir" \
+    ODS_ALLOW_LEGACY_PARALLEL=1 \
+    ODS_TEST_EXPECTED_INSTALL_DIR="$unsafe_reinstall_dir" \
+    ODS_TEST_CANDIDATE_UNINSTALL_MARKER="$unsafe_candidate_marker" \
+    ODS_TEST_BOOTSTRAP_INSTALL_MARKER="$reinstall_marker" \
+    OSTYPE=linux-gnu \
+    bash get-ods.sh --non-interactive --force >"$tmpdir/bootstrap-reinstall-unsafe.out" 2>&1
+unsafe_reinstall_rc=$?
+set -e
+[[ "$unsafe_reinstall_rc" -ne 0 ]] \
+  || { cat "$tmpdir/bootstrap-reinstall-unsafe.out"; echo "[FAIL] unsafe reinstall fingerprint was accepted"; exit 1; }
+[[ ! -e "$unsafe_candidate_marker" && -f "$unsafe_reinstall_dir/preserve-me" ]] \
+  || { cat "$tmpdir/bootstrap-reinstall-unsafe.out"; echo "[FAIL] unsafe reinstall target was mutated"; exit 1; }
+
+echo "[contract] forced reinstall rejects the bootstrap root"
+bootstrap_root_target="$tmpdir/bootstrap-root-target"
+mkdir -p "$bootstrap_root_target"
+touch "$bootstrap_root_target/.env" "$bootstrap_root_target/ods-cli" \
+  "$bootstrap_root_target/docker-compose.yml" "$bootstrap_root_target/preserve-me"
+cp "$reinstall_dir/ods-uninstall.sh" "$bootstrap_root_target/ods-uninstall.sh"
+set +e
+PATH="$tmpdir/bin:$PATH" \
+    HOME="$bootstrap_root_target" \
+    ODS_REPO_URL="file://$sha_repo" \
+    ODS_REF="$sha_ref" \
+    ODS_INSTALL_DIR="$bootstrap_root_target/" \
+    ODS_ALLOW_LEGACY_PARALLEL=1 \
+    ODS_TEST_EXPECTED_INSTALL_DIR="$bootstrap_root_target/" \
+    ODS_TEST_CANDIDATE_UNINSTALL_MARKER="$unsafe_candidate_marker" \
+    ODS_TEST_BOOTSTRAP_INSTALL_MARKER="$reinstall_marker" \
+    OSTYPE=linux-gnu \
+    bash get-ods.sh --non-interactive --force >"$tmpdir/bootstrap-reinstall-root.out" 2>&1
+bootstrap_root_rc=$?
+set -e
+[[ "$bootstrap_root_rc" -ne 0 && -f "$bootstrap_root_target/preserve-me" ]] \
+  || { cat "$tmpdir/bootstrap-reinstall-root.out"; echo "[FAIL] bootstrap root reinstall target was accepted or mutated"; exit 1; }
 
 echo "[contract] runtime dispatcher supports non-gnu Linux OSTYPE"
 dispatcher_common="installers/common.sh"

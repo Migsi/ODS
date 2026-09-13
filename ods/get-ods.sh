@@ -35,6 +35,7 @@ PRE_ODS_INSTALL_DIR="${ODS_LEGACY_INSTALL_DIR:-}"
 ODS_REF="${ODS_REF:-${ODS_BOOTSTRAP_REF:-}}"
 BOOTSTRAP_FORCE=false
 BOOTSTRAP_NON_INTERACTIVE=false
+BOOTSTRAP_REINSTALL=false
 
 for _arg in "$@"; do
     case "$_arg" in
@@ -94,6 +95,23 @@ remove_install_dir() {
     fi
 
     return 1
+}
+
+validate_force_reinstall_target() {
+    local target_dir="$1" target_real bootstrap_real
+
+    [[ "$target_dir" == /* ]] || return 1
+    [[ -d "$target_dir" && ! -L "$target_dir" ]] || return 1
+    target_real="$(cd -P -- "$target_dir" 2>/dev/null && pwd -P)" || return 1
+    bootstrap_real="$(cd -P -- "$ODS_BOOTSTRAP_ROOT" 2>/dev/null && pwd -P)" || return 1
+    [[ "$target_real" != / && "$target_real" != "$bootstrap_real" ]] || return 1
+    [[ -f "$target_dir/.env" && ! -L "$target_dir/.env" ]] || return 1
+    [[ -f "$target_dir/ods-cli" && ! -L "$target_dir/ods-cli" ]] || return 1
+    [[ -f "$target_dir/ods-uninstall.sh" && ! -L "$target_dir/ods-uninstall.sh" ]] || return 1
+    if [[ -f "$target_dir/docker-compose.base.yml" && ! -L "$target_dir/docker-compose.base.yml" ]]; then
+        return 0
+    fi
+    [[ -f "$target_dir/docker-compose.yml" && ! -L "$target_dir/docker-compose.yml" ]] || return 1
 }
 
 is_truthy() {
@@ -384,13 +402,20 @@ fi
 # ── Check for existing installation ──────────────────
 if [[ -d "$INSTALL_DIR" ]]; then
     if [[ -f "$INSTALL_DIR/.env" ]]; then
-        warn "ODS already installed at $INSTALL_DIR"
-        echo ""
-        echo "  To start:     cd $INSTALL_DIR && docker compose up -d"
-        echo "  To reinstall: rm -rf $INSTALL_DIR && re-run this script"
-        echo "  To update:    cd $INSTALL_DIR && ./ods-cli update"
-        echo ""
-        exit 0
+        if [[ "$BOOTSTRAP_FORCE" == "true" ]]; then
+            validate_force_reinstall_target "$INSTALL_DIR" \
+                || error "Refusing forced reinstall because $INSTALL_DIR is not a safely identifiable ODS installation."
+            BOOTSTRAP_REINSTALL=true
+            warn "ODS already installed at $INSTALL_DIR; staging the requested candidate before reinstalling."
+        else
+            warn "ODS already installed at $INSTALL_DIR"
+            echo ""
+            echo "  To start:     cd $INSTALL_DIR && docker compose up -d"
+            echo "  To reinstall: re-run this script with --force"
+            echo "  To update:    cd $INSTALL_DIR && ./ods-cli update"
+            echo ""
+            exit 0
+        fi
     else
         warn "Directory exists but incomplete install at $INSTALL_DIR"
         echo ""
@@ -456,6 +481,24 @@ git sparse-checkout set ods 2>/dev/null || {
     cd "$TEMP_DIR/repo"
     checkout_requested_sha_ref "$ODS_REF"
 }
+
+# A forced reinstall must use the requested candidate's uninstaller, not the
+# potentially older installed copy. This lets a newer release safely repair a
+# previously interrupted, marker-bound Pixel activation before replacing the
+# product tree. The old install remains untouched until the requested source is
+# cloned and an exact SHA (when supplied) is checked out.
+if [[ "$BOOTSTRAP_REINSTALL" == "true" ]]; then
+    candidate_uninstaller="$TEMP_DIR/repo/ods/ods-uninstall.sh"
+    [[ -f "$candidate_uninstaller" && ! -L "$candidate_uninstaller" ]] \
+        || error "Requested ODS source does not contain a safe candidate uninstaller. Existing installation was not replaced."
+    log "Removing the existing installation with the requested candidate uninstaller..."
+    if ! INSTALL_DIR="$INSTALL_DIR" bash "$candidate_uninstaller" --force; then
+        error "Candidate uninstall failed. Existing installation was not replaced."
+    fi
+    [[ ! -e "$INSTALL_DIR" && ! -L "$INSTALL_DIR" ]] \
+        || error "Candidate uninstall returned success but left the existing install path behind; refusing to overlay it."
+    success "Existing installation removed by the requested candidate"
+fi
 
 # Move ods to install location (exclude dev-only files)
 if [[ -d "$TEMP_DIR/repo/ods" ]]; then
