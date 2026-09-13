@@ -717,6 +717,34 @@ def test_dispatch_requires_preexisting_exact_started_receipt(
     assert called == []
 
 
+def test_dispatch_rejects_misbound_started_receipt_at_http_boundary(
+    host_server, host_request
+):
+    agent, _listener = host_server
+    grant = acquire_lease(agent, host_request)
+    request = work_request(
+        agent._extension_lifecycle_work.REQUEST_SCHEMA,
+        lease_evidence(agent, grant),
+    )
+    agent._lifecycle_receipt_store.begin(
+        request["transactionId"],
+        "9" * 64,
+        request["operationKey"],
+        request["requestHash"],
+        request["serviceIds"],
+    )
+    called = []
+    agent._extension_lifecycle_work_dispatcher = lambda command: (
+        called.append(command) or EVIDENCE_HASH
+    )
+
+    status, result = host_request("/v1/extension/lifecycle-work", request)
+
+    assert status == 409
+    assert result == {"error": {"code": "lifecycle-work-receipt-mismatch"}}
+    assert called == []
+
+
 def test_host_agent_source_leaves_production_dispatcher_unwired():
     tree = ast.parse((BIN_DIR / "ods-host-agent.py").read_text(encoding="utf-8"))
     assignments = []

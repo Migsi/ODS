@@ -438,8 +438,16 @@ def test_receipted_dispatch_requires_the_exact_started_binding():
     assert called == []
 
 
-@pytest.mark.parametrize("failure", [RuntimeError("private"), None])
-def test_receipted_dispatch_durably_fails_and_never_replays(failure):
+@pytest.mark.parametrize(
+    ("failure", "failure_code"),
+    [
+        (RuntimeError("private"), "lifecycle-work-operation-failed"),
+        (None, "lifecycle-work-invalid-result"),
+    ],
+)
+def test_receipted_dispatch_durably_fails_and_never_replays(
+    failure, failure_code
+):
     command = host_work.parse_lifecycle_work_request(
         work_request("verify", ["documents"], {"serviceIds": ["documents"]})
     )
@@ -458,12 +466,56 @@ def test_receipted_dispatch_durably_fails_and_never_replays(failure):
     snapshot = store.snapshot(command.transaction_id, command.operation_key)
     assert snapshot.state == "failed"
     assert snapshot.terminal_receipt is not None
-    assert len(snapshot.terminal_receipt.evidence_hash) == 64
+    expected_failure_hash = hashlib.sha256(
+        json.dumps(
+            {
+                "schema": host_work.FAILURE_SCHEMA,
+                "transactionId": command.transaction_id,
+                "planHash": command.plan_hash,
+                "operationKey": command.operation_key,
+                "requestHash": command.request_hash,
+                "serviceIds": list(command.service_ids),
+                "outcome": "failed",
+                "code": failure_code,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+    ).hexdigest()
+    assert snapshot.terminal_receipt.evidence_hash == expected_failure_hash
 
     with pytest.raises(host_work.LifecycleWorkExecutionError) as replay:
         host_work.dispatch_receipted_lifecycle_work(command, dispatch, store)
     assert replay.value.code == "lifecycle-work-terminal-failed"
     assert calls == 1
+
+
+def test_receipted_dispatch_never_reports_success_if_terminal_publish_fails():
+    command = host_work.parse_lifecycle_work_request(
+        work_request("verify", ["documents"], {"serviceIds": ["documents"]})
+    )
+    store = _begun_store(command)
+    calls = []
+
+    def fail_finish(*_args):
+        raise OSError("private-store-detail")
+
+    store.finish = fail_finish
+
+    with pytest.raises(host_work.LifecycleWorkExecutionError) as caught:
+        host_work.dispatch_receipted_lifecycle_work(
+            command,
+            lambda value: calls.append(value) or EVIDENCE_HASH,
+            store,
+        )
+
+    assert caught.value.code == "lifecycle-work-receipt-store-unavailable"
+    assert "private-store-detail" not in str(caught.value)
+    assert calls == [command]
+    assert store.snapshot(command.transaction_id, command.operation_key).state == (
+        "started"
+    )
 
 
 def test_host_core_is_stdlib_only_and_has_no_mutation_primitives():

@@ -409,14 +409,12 @@ def dispatch_receipted_lifecycle_work(
                 "failed",
                 evidence_hash,
             )
-            validated = _require_terminal_receipt(
+            _require_terminal_receipt(
                 snapshot.started_receipt,
                 terminal,
                 "failed",
                 command,
             )
-            if validated is None:
-                raise LifecycleWorkExecutionError("lifecycle-work-receipt-mismatch")
         except LifecycleWorkError:
             raise
         except Exception as exc:
@@ -448,8 +446,6 @@ def dispatch_receipted_lifecycle_work(
         raise LifecycleWorkExecutionError(
             "lifecycle-work-receipt-store-unavailable"
         ) from exc
-    if validated is None:
-        raise LifecycleWorkExecutionError("lifecycle-work-receipt-mismatch")
     return _completed_result(command, validated.evidence_hash)
 
 
