@@ -35,10 +35,17 @@ prepare_sudo_credential() {
     fi
 
     log_info "Administrator privileges are required for system-owned ODS files."
-    # Keep the credential prompt attached directly to the terminal. Wrapping an
-    # interactive sudo invocation in `timeout` can prevent sudo from managing
-    # terminal echo correctly on some systems.
-    sudo -v
+    if $NON_INTERACTIVE; then
+        if ! sudo -n -v; then
+            log_error "Non-interactive uninstall requires cached or passwordless sudo. Run sudo -v in a terminal, then retry."
+            return 1
+        fi
+    else
+        # Keep the credential prompt attached directly to the terminal. Wrapping
+        # an interactive sudo invocation in `timeout` can prevent sudo from
+        # managing terminal echo correctly on some systems.
+        sudo -v
+    fi
     SUDO_CREDENTIAL_READY=true
 }
 
@@ -82,6 +89,7 @@ resolve_compose_flags() {
 KEEP_MODELS=false
 KEEP_DATA=false
 FORCE=false
+NON_INTERACTIVE=false
 
 validate_requested_install_dir() {
     local target_dir="$1" target_real home_real script_real
@@ -108,6 +116,7 @@ while [[ $# -gt 0 ]]; do
         --keep-models) KEEP_MODELS=true; shift ;;
         --keep-data)   KEEP_DATA=true; shift ;;
         --force)       FORCE=true; shift ;;
+        --non-interactive) NON_INTERACTIVE=true; shift ;;
         --install-dir)
             [[ $# -ge 2 && -n "$2" ]] || { log_error "--install-dir requires a path"; exit 1; }
             REQUESTED_INSTALL_DIR="$2"
@@ -128,6 +137,7 @@ Options:
     --keep-models   Keep downloaded AI models (saves re-download time)
     --keep-data     Keep user data (chat history, n8n workflows, etc.)
     --force         Skip confirmation prompts
+    --non-interactive  Never prompt for sudo; require cached or passwordless sudo
     --install-dir   Uninstall a separately located, fingerprinted ODS installation
     -h, --help      Show this help
 
@@ -190,6 +200,15 @@ if [[ "$FORCE" != "true" ]]; then
         exit 0
     fi
     echo ""
+fi
+
+# A non-interactive purge must prove that privileged cleanup can run before
+# removing Pixel, stopping containers, or otherwise mutating the installation.
+# Candidate-driven reinstalls rely on this path and must fail promptly instead
+# of waiting forever at a sudo password prompt or leaving a half-uninstalled
+# tree behind.
+if $NON_INTERACTIVE && ! $KEEP_DATA && [[ "$(id -u)" -ne 0 ]] && command -v sudo >/dev/null 2>&1; then
+    prepare_sudo_credential || exit 1
 fi
 
 # Validate and remove Pixel before any broader uninstall mutation. The helper
@@ -472,6 +491,11 @@ OPENCODE_CONFIG="$HOME/.config/opencode/opencode.json"
 if [[ -f "$OPENCODE_CONFIG" ]] && grep -q "llama-server" "$OPENCODE_CONFIG" 2>/dev/null; then
     rm -f "$OPENCODE_CONFIG"
     log_ok "OpenCode config removed"
+fi
+
+if ! $INSTALL_DIR_CLEANED; then
+    log_error "ODS uninstall was incomplete; the installation directory remains at $INSTALL_DIR"
+    exit 1
 fi
 
 echo ""

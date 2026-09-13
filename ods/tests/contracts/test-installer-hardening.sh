@@ -235,7 +235,9 @@ assert_contains "$bootstrap" 'sudo -n rm -rf -- "\$target_dir"' "bootstrap --for
 assert_contains "$bootstrap" 'root-owned container data' "bootstrap sudo fallback should explain root-owned Docker data cleanup"
 assert_contains "$bootstrap" 'validate_force_reinstall_target()' "bootstrap should fingerprint a complete install before forced replacement"
 assert_contains "$bootstrap" 'candidate_uninstaller="\$TEMP_DIR/repo/ods/ods-uninstall.sh"' "bootstrap should stage the requested candidate uninstaller"
-assert_contains "$bootstrap" 'bash "\$candidate_uninstaller" --install-dir "\$INSTALL_DIR" --force' "bootstrap should run the candidate uninstaller against the existing install"
+assert_contains "$bootstrap" 'candidate_uninstall_args=\(--install-dir "\$INSTALL_DIR" --force\)' "bootstrap should target the existing install with the candidate uninstaller"
+assert_contains "$bootstrap" 'candidate_uninstall_args\+=\(--non-interactive\)' "bootstrap should propagate non-interactive mode to the candidate uninstaller"
+assert_contains "$bootstrap" 'bash "\$candidate_uninstaller" "\${candidate_uninstall_args\[@\]}"' "bootstrap should run the candidate uninstaller with bounded arguments"
 assert_contains "ods-uninstall.sh" 'validate_requested_install_dir()' "candidate uninstaller should independently validate a requested install target"
 assert_contains "ods-uninstall.sh" '--install-dir)' "candidate uninstaller should accept an explicit install target"
 
@@ -258,6 +260,10 @@ set -euo pipefail
 install_dir="$2"
 shift 2
 [[ "${1:-}" == "--force" ]]
+shift
+[[ "${1:-}" == "--non-interactive" ]]
+shift
+[[ "$#" -eq 0 ]]
 [[ "$install_dir" == "${ODS_TEST_EXPECTED_INSTALL_DIR:?}" ]]
 printf '%s\n' candidate > "${ODS_TEST_CANDIDATE_UNINSTALL_MARKER:?}"
 if [[ "${ODS_TEST_CANDIDATE_UNINSTALL_FAIL:-false}" == "true" ]]; then
