@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import PixelConversationRecovery from '../components/PixelConversationRecovery'
 import { readConversations, saveConversation, SELECT_EVENT, DELETE_EVENT, deleteConversation, isConversationDeleted } from '../lib/pixelConversations'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -1207,7 +1208,7 @@ export default function Pixel({ systemStatus = null }) {
     <div className="pixel-chat flex flex-col overflow-hidden text-theme-text">
       <div className="pixel-chat-preview-layout flex min-h-0 flex-1 flex-col lg:flex-row">
         <div className="pixel-chat-column flex min-h-0 min-w-0 flex-1 flex-col">
-      {persistenceError && <p role="alert" className="px-6 py-2 text-sm text-amber-300">{persistenceError}</p>}
+      {persistenceError && <PixelConversationRecovery error={persistenceError} chatId={chatIdRef.current} messages={messages} draft={input}/>}
       <header className="pixel-chat-header">
         <div className="pixel-chat-identity">
         <div className="flex h-9 w-9 items-center justify-center text-theme-accent-light">

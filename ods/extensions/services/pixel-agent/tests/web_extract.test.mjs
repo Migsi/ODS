@@ -238,3 +238,27 @@ test("requires every security dependency", () => {
     /dependencies are unavailable/
   );
 });
+
+for (const query of ["Path.exists", "routing context budget"]) {
+  test(`keeps original text offsets after Unicode case expansion: ${query}`, async () => {
+    // U+0130 lowercases to two UTF-16 code units. Offsets in a lowercased
+    // document therefore cannot be used to slice the original document.
+    const target = "Path.exists sets routing and context with a budget.";
+    const body = "İstanbul reference\n".repeat(1500) + target + "\n" + "Other material.\n".repeat(1000);
+    const harness = fixture({ body });
+    const result = await harness.tool.execute("unicode-offset", {
+      url: "https://docs.example.org/reference", query,
+    });
+    assert.equal(result.details.matched, true);
+    assert.ok(result.content[0].text.includes(target));
+    assert.ok(selectEvidenceWindow(body, query).text.length <= 6000);
+    assert.equal(harness.releases(), 1);
+  });
+}
+
+test("case-insensitive evidence queries remain literal", () => {
+  const selected = selectEvidenceWindow("Header\nUse [CACHE](a+b)? here.\n", "[cache](a+b)?");
+  assert.ok(selected.text.includes("[CACHE](a+b)?"));
+  assert.equal(selectEvidenceWindow("Use CACHEab here.", "[cache](a+b)?"), null);
+  assert.ok(selectEvidenceWindow("😀\nPATH.EXISTS returns true.\n", "Path.exists").text.includes("PATH.EXISTS"));
+});
