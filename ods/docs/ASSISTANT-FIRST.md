@@ -284,10 +284,11 @@ the atomic publish may have succeeded before an error, the handler re-observes
 the exact post-state and returns success only if every released record exactly
 matches; otherwise a single value-free failure is emitted.  A replay where
 every targeted record is already released returns the persisted records with
-`duplicate=True` and deterministic evidence.  The reserve and release adapters
-must be activated together later; neither is registered or reachable from
-production.  Manual recovery and failed lifecycle-receipt retry policy are not
-solved by this PR.
+`duplicate=True` and deterministic evidence.  Mixed active/released state is
+rejected without another write because it is neither a fresh atomic batch nor
+an exact replay.  The reserve and release adapters must be activated together
+later; neither is registered or reachable from production.  Manual recovery
+and failed lifecycle-receipt retry policy are not solved by this PR.
 
 The runtime composition now includes both the reserve and release dispatchers
 as inert dependencies, but neither is wired to any lifecycle handler.

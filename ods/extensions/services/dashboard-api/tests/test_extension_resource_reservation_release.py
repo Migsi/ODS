@@ -10,11 +10,14 @@ root custody, runtime, and no production importer.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import shutil
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -23,15 +26,15 @@ BIN_DIR = Path(__file__).resolve().parents[4] / "bin"
 if str(BIN_DIR) not in sys.path:
     sys.path.insert(0, str(BIN_DIR))
 
-import extension_resource_reservation_store as reservations
-from extension_lifecycle_plan import (
+import extension_resource_reservation_store as reservations  # noqa: E402
+from extension_lifecycle_plan import (  # noqa: E402
     PLAN_MATERIAL_SCHEMA,
     LifecyclePlanMaterial,
     PlannedDefinition,
     PlannedHostPort,
     PlannedOperation,
 )
-from extension_lifecycle_work import (
+from extension_lifecycle_work import (  # noqa: E402
     LifecycleWorkCommand,
     LifecycleWorkValidationError,
 )
@@ -87,11 +90,37 @@ def _def(
     )
 
 
-def _claims(port: int, protocol: str = "tcp", exclusive: tuple[str, ...] = ()) -> reservations.ReservationClaims:
+def _claims(
+    port: int,
+    protocol: str = "tcp",
+    exclusive: tuple[str, ...] = (),
+) -> reservations.ReservationClaims:
     return reservations.ReservationClaims(
         host_ports=(reservations.HostPort(port=port, protocol=protocol),),
         exclusive=exclusive,
     )
+
+
+def _rehash_record(
+    record: reservations.ReservationRecord,
+    **changes: object,
+) -> reservations.ReservationRecord:
+    """Return an internally hash-consistent forged record for adapter tests."""
+    forged = replace(record, **changes)
+    document = {
+        "schema": forged.schema,
+        "transactionId": forged.transaction_id,
+        "planHash": forged.plan_hash,
+        "serviceId": forged.service_id,
+        "action": forged.action,
+        "status": forged.status,
+        "createdAt": forged.created_at,
+        "updatedAt": forged.updated_at,
+        "claims": forged.claims.to_dict(),
+        "claimsDigest": forged.claims_digest,
+    }
+    digest = hashlib.sha256(reservations._canonical_json_bytes(document)).hexdigest()
+    return replace(forged, record_sha256=digest)
 
 
 def _plan_material(
@@ -152,8 +181,6 @@ class StoreBatchReleaseTests(unittest.TestCase):
         self.store = reservations.ResourceReservationStore(str(root))
 
     def tearDown(self) -> None:
-        import shutil
-
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     # -- happy path --
@@ -216,8 +243,8 @@ class StoreBatchReleaseTests(unittest.TestCase):
         replay = self.store.batch_release(TXN, PLAN_HASH, (exp,), LATER)
         self.assertTrue(replay[0].duplicate)
 
-    def test_partial_replay_mixed_released_and_active(self) -> None:
-        """Two services: release all, then full replay returns all duplicate."""
+    def test_full_replay_returns_all_duplicate(self) -> None:
+        """Two services: release all, then exact replay is wholly duplicate."""
         claims_a = _claims(8080)
         claims_b = _claims(9090)
         exp_a = reservations.ReleaseExpectation(
@@ -239,6 +266,57 @@ class StoreBatchReleaseTests(unittest.TestCase):
         )
         self.assertTrue(replay[0].duplicate)
         self.assertTrue(replay[1].duplicate)
+
+    def test_mixed_active_released_batch_fails_without_effect(self) -> None:
+        """Mixed state is neither a fresh atomic batch nor an exact replay."""
+        claims_a = _claims(8080)
+        claims_b = _claims(9090)
+        exp_a = reservations.ReleaseExpectation(
+            service_id="svc-a", action="install", claims=claims_a
+        )
+        exp_b = reservations.ReleaseExpectation(
+            service_id="svc-b", action="install", claims=claims_b
+        )
+        self.store.reserve(TXN, PLAN_HASH, "svc-a", "install", claims_a, NOW)
+        self.store.reserve(TXN, PLAN_HASH, "svc-b", "install", claims_b, NOW)
+        self.store.batch_release(TXN, PLAN_HASH, (exp_a,), LATER)
+
+        with self.assertRaises(reservations.ReservationStoreError) as ctx:
+            self.store.batch_release(TXN, PLAN_HASH, (exp_a, exp_b), LATER)
+        self.assertEqual(ctx.exception.code, "transition-invalid")
+        self.assertEqual(
+            self.store.snapshot(TXN, PLAN_HASH, "svc-a").status,
+            reservations.RELEASED,
+        )
+        self.assertEqual(
+            self.store.snapshot(TXN, PLAN_HASH, "svc-b").status,
+            reservations.ACTIVE,
+        )
+
+    def test_released_action_mismatch_fails_before_other_effect(self) -> None:
+        """Released targets are re-proved before any active target changes."""
+        claims_a = _claims(8080)
+        claims_b = _claims(9090)
+        enable_a = reservations.ReleaseExpectation(
+            service_id="svc-a", action="enable", claims=claims_a
+        )
+        install_a = reservations.ReleaseExpectation(
+            service_id="svc-a", action="install", claims=claims_a
+        )
+        install_b = reservations.ReleaseExpectation(
+            service_id="svc-b", action="install", claims=claims_b
+        )
+        self.store.reserve(TXN, PLAN_HASH, "svc-a", "enable", claims_a, NOW)
+        self.store.reserve(TXN, PLAN_HASH, "svc-b", "install", claims_b, NOW)
+        self.store.batch_release(TXN, PLAN_HASH, (enable_a,), LATER)
+
+        with self.assertRaises(reservations.ReservationStoreError) as ctx:
+            self.store.batch_release(TXN, PLAN_HASH, (install_a, install_b), LATER)
+        self.assertEqual(ctx.exception.code, "transition-invalid")
+        self.assertEqual(
+            self.store.snapshot(TXN, PLAN_HASH, "svc-b").status,
+            reservations.ACTIVE,
+        )
 
     # -- action binding validation --
 
@@ -264,6 +342,61 @@ class StoreBatchReleaseTests(unittest.TestCase):
         with self.assertRaises(reservations.ReservationStoreError) as ctx:
             self.store.batch_release(TXN, PLAN_HASH, (exp,), LATER)
         self.assertEqual(ctx.exception.code, "transition-invalid")
+
+    def test_expectations_reproved_while_store_lock_is_held(self) -> None:
+        claims = _claims(8080)
+        expectation = reservations.ReleaseExpectation(
+            service_id="svc-a", action="install", claims=claims
+        )
+        self.store.reserve(TXN, PLAN_HASH, "svc-a", "install", claims, NOW)
+
+        lock_held = False
+        original_flock = reservations.fcntl.flock
+        original_validate_action = reservations._validate_action
+        original_release_claims = reservations._release_claims_dict
+
+        def tracked_flock(descriptor, operation):
+            nonlocal lock_held
+            result = original_flock(descriptor, operation)
+            if operation == reservations.fcntl.LOCK_EX:
+                lock_held = True
+            elif operation == reservations.fcntl.LOCK_UN:
+                lock_held = False
+            return result
+
+        def checked_action(value):
+            self.assertTrue(lock_held)
+            return original_validate_action(value)
+
+        def checked_claims(value):
+            self.assertTrue(lock_held)
+            return original_release_claims(value)
+
+        with (
+            mock.patch.object(
+                reservations.fcntl,
+                "flock",
+                side_effect=tracked_flock,
+            ),
+            mock.patch.object(
+                reservations,
+                "_validate_action",
+                side_effect=checked_action,
+            ),
+            mock.patch.object(
+                reservations,
+                "_release_claims_dict",
+                side_effect=checked_claims,
+            ),
+        ):
+            released = self.store.batch_release(
+                TXN,
+                PLAN_HASH,
+                (expectation,),
+                LATER,
+            )
+        self.assertEqual(released[0].status, reservations.RELEASED)
+        self.assertFalse(lock_held)
 
     # -- validation failures --
 
@@ -364,6 +497,43 @@ class StoreBatchReleaseTests(unittest.TestCase):
         self.assertIsNotNone(rec)
         self.assertEqual(rec.status, reservations.ACTIVE)
 
+    def test_fresh_batch_publishes_exactly_one_snapshot(self) -> None:
+        claims_a = _claims(8080)
+        claims_b = _claims(9090)
+        expectations = (
+            reservations.ReleaseExpectation("svc-a", "install", claims_a),
+            reservations.ReleaseExpectation("svc-b", "install", claims_b),
+        )
+        self.store.reserve(TXN, PLAN_HASH, "svc-a", "install", claims_a, NOW)
+        self.store.reserve(TXN, PLAN_HASH, "svc-b", "install", claims_b, NOW)
+
+        with (
+            mock.patch.object(
+                reservations,
+                "_read_records",
+                wraps=reservations._read_records,
+            ) as read_records,
+            mock.patch.object(
+                reservations,
+                "_write_snapshot",
+                wraps=reservations._write_snapshot,
+            ) as publish,
+        ):
+            self.store.batch_release(TXN, PLAN_HASH, expectations, LATER)
+        self.assertEqual(read_records.call_count, 1)
+        self.assertEqual(publish.call_count, 1)
+
+        with mock.patch.object(
+            reservations,
+            "_write_snapshot",
+            wraps=reservations._write_snapshot,
+        ) as replay_publish:
+            replay = self.store.batch_release(
+                TXN, PLAN_HASH, expectations, LATER
+            )
+        self.assertEqual(replay_publish.call_count, 0)
+        self.assertTrue(all(record.duplicate for record in replay))
+
     def test_non_tuple_expectations_rejected(self) -> None:
         claims = _claims(8080)
         exp = reservations.ReleaseExpectation(
@@ -373,11 +543,54 @@ class StoreBatchReleaseTests(unittest.TestCase):
             self.store.batch_release(TXN, PLAN_HASH, [exp], LATER)  # type: ignore[arg-type]
         self.assertEqual(ctx.exception.code, "binding-invalid")
 
+    def test_tuple_subclass_expectations_rejected(self) -> None:
+        class TupleSubclass(tuple):
+            pass
+
+        claims = _claims(8080)
+        expectation = reservations.ReleaseExpectation(
+            service_id="svc-a", action="install", claims=claims
+        )
+        with self.assertRaises(reservations.ReservationStoreError) as ctx:
+            self.store.batch_release(
+                TXN,
+                PLAN_HASH,
+                TupleSubclass((expectation,)),  # type: ignore[arg-type]
+                LATER,
+            )
+        self.assertEqual(ctx.exception.code, "binding-invalid")
+
     def test_wrong_expectation_type_rejected(self) -> None:
         with self.assertRaises(reservations.ReservationStoreError) as ctx:
             self.store.batch_release(
                 TXN, PLAN_HASH, (object(),), LATER  # type: ignore[arg-type]
             )
+        self.assertEqual(ctx.exception.code, "binding-invalid")
+
+    def test_expectation_subclass_rejected(self) -> None:
+        class ExpectationSubclass(reservations.ReleaseExpectation):
+            pass
+
+        expectation = ExpectationSubclass(
+            service_id="svc-a", action="install", claims=_claims(8080)
+        )
+        with self.assertRaises(reservations.ReservationStoreError) as ctx:
+            self.store.batch_release(TXN, PLAN_HASH, (expectation,), LATER)
+        self.assertEqual(ctx.exception.code, "binding-invalid")
+
+    def test_claims_subclass_rejected(self) -> None:
+        class ClaimsSubclass(reservations.ReservationClaims):
+            pass
+
+        claims = ClaimsSubclass(
+            host_ports=(reservations.HostPort(8080, "tcp"),),
+            exclusive=(),
+        )
+        expectation = reservations.ReleaseExpectation(
+            service_id="svc-a", action="install", claims=claims
+        )
+        with self.assertRaises(reservations.ReservationStoreError) as ctx:
+            self.store.batch_release(TXN, PLAN_HASH, (expectation,), LATER)
         self.assertEqual(ctx.exception.code, "binding-invalid")
 
     # -- write failure + ambiguity --
@@ -425,16 +638,67 @@ class StoreBatchReleaseTests(unittest.TestCase):
     # an ambiguous write.
 
     def test_injected_after_replace_readback_failure(self) -> None:
-        """The post-write ambiguity handler is verified by
-        ``test_write_failure_leaves_snapshot_intact``: when the write fails
-        before the rename, the ambiguity handler re-reads the snapshot, finds
-        records still active (not released), and emits a value-free failure.
-        The structural guarantee is that one atomic write path cannot leave
-        a partially-released state.  Direct injection of failure between
-        rename and re-read is not feasible with stdlib mocks but is covered
-        by the store's internal post-rename readback verification.
-        """
-        self.assertTrue(True)
+        """A one-shot readback fault after replace reconciles exact post-state."""
+        claims_a = _claims(8080)
+        claims_b = _claims(9090)
+        expectations = (
+            reservations.ReleaseExpectation("svc-a", "install", claims_a),
+            reservations.ReleaseExpectation("svc-b", "install", claims_b),
+        )
+        self.store.reserve(TXN, PLAN_HASH, "svc-a", "install", claims_a, NOW)
+        self.store.reserve(TXN, PLAN_HASH, "svc-b", "install", claims_b, NOW)
+
+        original_read = reservations._read_snapshot
+        read_count = 0
+
+        def fail_first_post_replace_read(root_fd):
+            nonlocal read_count
+            read_count += 1
+            if read_count == 2:
+                raise reservations.ReservationStoreError("snapshot-io-error")
+            return original_read(root_fd)
+
+        with mock.patch.object(
+            reservations,
+            "_read_snapshot",
+            side_effect=fail_first_post_replace_read,
+        ):
+            released = self.store.batch_release(
+                TXN, PLAN_HASH, expectations, LATER
+            )
+        self.assertEqual(read_count, 3)
+        self.assertTrue(all(record.status == reservations.RELEASED for record in released))
+        self.assertTrue(all(not record.duplicate for record in released))
+
+    def test_injected_after_replace_fsync_failure(self) -> None:
+        """A directory-fsync fault after replace reconciles exact post-state."""
+        claims = _claims(8080)
+        expectation = reservations.ReleaseExpectation(
+            service_id="svc-a", action="install", claims=claims
+        )
+        self.store.reserve(TXN, PLAN_HASH, "svc-a", "install", claims, NOW)
+
+        original_fsync = reservations.os.fsync
+        fsync_count = 0
+
+        def fail_directory_fsync(descriptor):
+            nonlocal fsync_count
+            fsync_count += 1
+            if fsync_count == 2:
+                raise OSError(5, "injected directory fsync failure")
+            return original_fsync(descriptor)
+
+        with mock.patch.object(
+            reservations.os,
+            "fsync",
+            side_effect=fail_directory_fsync,
+        ):
+            released = self.store.batch_release(
+                TXN, PLAN_HASH, (expectation,), LATER
+            )
+        self.assertEqual(fsync_count, 2)
+        self.assertEqual(released[0].status, reservations.RELEASED)
+        self.assertFalse(released[0].duplicate)
 
     def test_injected_write_before_rename_failure(self) -> None:
         """Failure during write (before rename) leaves original snapshot intact."""
@@ -478,9 +742,45 @@ class ReleaseAdapterTests(unittest.TestCase):
         self.adapt = release_adapter.ResourceReleaseAdapter(self.store)
 
     def tearDown(self) -> None:
-        import shutil
-
         shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _assert_forged_result_rejected(self, transform) -> None:
+        operations = (PlannedOperation("svc-a", "install"),)
+        definitions = (
+            _def("svc-a", (PlannedHostPort("tcp", 8080),), ("gpu/slot-0",)),
+        )
+        plan_material = _plan_material(
+            operations=operations,
+            definitions=definitions,
+        )
+        self.store.reserve(
+            TXN,
+            PLAN_HASH,
+            "svc-a",
+            "install",
+            _claims(8080, exclusive=("gpu/slot-0",)),
+            NOW,
+        )
+        original_batch_release = self.store.batch_release
+
+        def fake_batch_release(*args, **kwargs):
+            return tuple(
+                transform(record)
+                for record in original_batch_release(*args, **kwargs)
+            )
+
+        self.store.batch_release = fake_batch_release  # type: ignore[method-assign]
+        try:
+            with self.assertRaises(
+                release_adapter.ResourceReleaseAdapterError
+            ) as ctx:
+                self.adapt(_release_command(plan_material=plan_material))
+            self.assertEqual(
+                ctx.exception.code,
+                "lifecycle-work-release-evidence-mismatch",
+            )
+        finally:
+            self.store.batch_release = original_batch_release
 
     # -- happy path --
 
@@ -857,8 +1157,6 @@ class ReleaseAdapterTests(unittest.TestCase):
 
         def fake_batch_release(*args, **kwargs):
             records = original_batch_release(*args, **kwargs)
-            from dataclasses import replace
-
             return tuple(
                 replace(r, record_sha256="g" * 64)
                 for r in records
@@ -884,8 +1182,6 @@ class ReleaseAdapterTests(unittest.TestCase):
 
         def fake_batch_release(*args, **kwargs):
             records = original_batch_release(*args, **kwargs)
-            from dataclasses import replace
-
             return tuple(replace(r, duplicate=1) for r in records)  # int, not bool
 
         self.store.batch_release = fake_batch_release  # type: ignore[method-assign]
@@ -929,8 +1225,6 @@ class ReleaseAdapterTests(unittest.TestCase):
 
         def fake_batch_release(*args, **kwargs):
             records = original_batch_release(*args, **kwargs)
-            from dataclasses import replace
-
             return tuple(replace(r, status="active") for r in records)
 
         self.store.batch_release = fake_batch_release  # type: ignore[method-assign]
@@ -946,6 +1240,45 @@ class ReleaseAdapterTests(unittest.TestCase):
             )
         finally:
             self.store.batch_release = original_batch_release
+
+    def test_hash_consistent_forged_schema_rejected(self) -> None:
+        self._assert_forged_result_rejected(
+            lambda record: _rehash_record(
+                record,
+                schema="ods.extension-resource-reservation.v2",
+            )
+        )
+
+    def test_hash_consistent_forged_action_rejected(self) -> None:
+        self._assert_forged_result_rejected(
+            lambda record: _rehash_record(record, action="enable")
+        )
+
+    def test_hash_consistent_forged_claims_rejected(self) -> None:
+        forged_claims = _claims(9090, exclusive=("gpu/slot-1",))
+        forged_digest = hashlib.sha256(
+            reservations._canonical_json_bytes(forged_claims.to_dict())
+        ).hexdigest()
+        self._assert_forged_result_rejected(
+            lambda record: _rehash_record(
+                record,
+                claims=forged_claims,
+                claims_digest=forged_digest,
+            )
+        )
+
+    def test_hash_consistent_forged_claims_digest_rejected(self) -> None:
+        self._assert_forged_result_rejected(
+            lambda record: _rehash_record(record, claims_digest="f" * 64)
+        )
+
+    def test_hash_consistent_future_timestamp_rejected(self) -> None:
+        self._assert_forged_result_rejected(
+            lambda record: _rehash_record(
+                record,
+                updated_at="9999-01-01T00:00:00Z",
+            )
+        )
 
     # -- exception redaction --
 
@@ -1097,13 +1430,36 @@ class ReleaseAdapterTests(unittest.TestCase):
 
     def test_claims_race_one_lock(self) -> None:
         """Claims validation is inside batch_release under the same lock.
-        Verify that a claims change between pre-validation and mutation
-        cannot slip through (because there is no pre-validation)."""
-        # The adapter builds expectations from plan material (immutable once
-        # passed in). It never calls snapshot() for pre-validation.
-        # All validation happens inside batch_release under one lock.
-        # Verified by test_action_race_one_lock above.
-        self.assertTrue(True)
+        Prove the adapter never observes claims through an unlocked snapshot."""
+        operations = (PlannedOperation("svc-a", "install"),)
+        definitions = (
+            _def(
+                "svc-a",
+                (PlannedHostPort("tcp", 8080),),
+                ("gpu/slot-0",),
+            ),
+        )
+        plan_material = _plan_material(
+            operations=operations,
+            definitions=definitions,
+        )
+        self.store.reserve(
+            TXN,
+            PLAN_HASH,
+            "svc-a",
+            "install",
+            _claims(8080, exclusive=("gpu/slot-0",)),
+            NOW,
+        )
+
+        with mock.patch.object(
+            self.store,
+            "snapshot",
+            side_effect=AssertionError("unlocked snapshot must not be used"),
+        ) as snapshot:
+            evidence = self.adapt(_release_command(plan_material=plan_material))
+        snapshot.assert_not_called()
+        self.assertRegex(evidence, r"^[0-9a-f]{64}$")
 
 
 # ---------------------------------------------------------------------------

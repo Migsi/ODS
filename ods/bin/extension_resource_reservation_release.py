@@ -42,6 +42,8 @@ from extension_lifecycle_work import (
 from extension_resource_reservation_store import (
     BATCH_RELEASE_SCHEMA,
     RELEASED,
+    SCHEMA as RESERVATION_SCHEMA,
+    HostPort,
     ReleaseExpectation,
     ReservationClaims,
     ReservationRecord,
@@ -50,6 +52,7 @@ from extension_resource_reservation_store import (
 )
 
 _HASH_RE = re.compile(r"^[0-9a-f]{64}$")
+_UTC_SECOND_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
 
 
 class ResourceReleaseAdapterError(LifecycleWorkExecutionError):
@@ -144,17 +147,85 @@ def _build_release_evidence(
 
 def _plan_ports_to_store(
     ports: tuple[PlannedHostPort, ...],
-) -> tuple[Any, ...]:
+) -> tuple[HostPort, ...]:
     """Convert plan ports to store HostPort form, sorted by (port, protocol)."""
-    from extension_resource_reservation_store import HostPort
-
-    converted: list[Any] = []
+    converted: list[HostPort] = []
     for hp in ports:
         if type(hp) is not PlannedHostPort:
             _validation_error("lifecycle-work-plan-mismatch")
         converted.append(HostPort(port=hp.port, protocol=hp.protocol))
     converted.sort(key=lambda hp: (hp.port, hp.protocol))
     return tuple(converted)
+
+
+def _parse_utc_second(value: Any) -> datetime:
+    if type(value) is not str or _UTC_SECOND_RE.fullmatch(value) is None:
+        _execution_error("lifecycle-work-release-evidence-mismatch")
+    try:
+        parsed = datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc
+        )
+    except ValueError:
+        _execution_error("lifecycle-work-release-evidence-mismatch")
+    if parsed.strftime("%Y-%m-%dT%H:%M:%SZ") != value:
+        _execution_error("lifecycle-work-release-evidence-mismatch")
+    return parsed
+
+
+def _validate_returned_record(
+    record: Any,
+    command: LifecycleWorkCommand,
+    expectation: ReleaseExpectation,
+    now: str,
+) -> ReservationRecord:
+    """Re-prove every persisted field before deriving release evidence."""
+    if type(record) is not ReservationRecord:
+        _execution_error("lifecycle-work-release-evidence-mismatch")
+    if (
+        record.schema != RESERVATION_SCHEMA
+        or record.transaction_id != command.transaction_id
+        or record.plan_hash != command.plan_hash
+        or record.service_id != expectation.service_id
+        or record.action != expectation.action
+        or record.status != RELEASED
+        or type(record.claims) is not ReservationClaims
+        or record.claims != expectation.claims
+        or type(record.duplicate) is not bool
+        or type(record.claims_digest) is not str
+        or _HASH_RE.fullmatch(record.claims_digest) is None
+        or type(record.record_sha256) is not str
+        or _HASH_RE.fullmatch(record.record_sha256) is None
+    ):
+        _execution_error("lifecycle-work-release-evidence-mismatch")
+
+    created_at = _parse_utc_second(record.created_at)
+    updated_at = _parse_utc_second(record.updated_at)
+    observed_at = _parse_utc_second(now)
+    if created_at > updated_at or updated_at > observed_at:
+        _execution_error("lifecycle-work-release-evidence-mismatch")
+    if not record.duplicate and record.updated_at != now:
+        _execution_error("lifecycle-work-release-evidence-mismatch")
+
+    claims_document = record.claims.to_dict()
+    expected_claims_digest = _sha256hex(_canonical_json_bytes(claims_document))
+    if record.claims_digest != expected_claims_digest:
+        _execution_error("lifecycle-work-release-evidence-mismatch")
+
+    record_document = {
+        "schema": record.schema,
+        "transactionId": record.transaction_id,
+        "planHash": record.plan_hash,
+        "serviceId": record.service_id,
+        "action": record.action,
+        "status": record.status,
+        "createdAt": record.created_at,
+        "updatedAt": record.updated_at,
+        "claims": claims_document,
+        "claimsDigest": record.claims_digest,
+    }
+    if record.record_sha256 != _sha256hex(_canonical_json_bytes(record_document)):
+        _execution_error("lifecycle-work-release-evidence-mismatch")
+    return record
 
 
 # -------------------------------------------------------------------
@@ -293,11 +364,12 @@ class ResourceReleaseAdapter:
 
         # -- Atomic batch release under one lock --------------------------
         now = _now_utc_second()
+        expectation_tuple = tuple(expectations)
         try:
             released = self._store.batch_release(
                 command.transaction_id,
                 command.plan_hash,
-                tuple(expectations),
+                expectation_tuple,
                 now,
             )
         except ReservationStoreError as exc:
@@ -309,25 +381,13 @@ class ResourceReleaseAdapter:
         if type(released) is not tuple or len(released) != len(mutable_service_ids):
             _execution_error("lifecycle-work-release-evidence-mismatch")
 
-        for pos, sid in enumerate(mutable_service_ids):
-            rec = released[pos]
-            if type(rec) is not ReservationRecord:
-                _execution_error("lifecycle-work-release-evidence-mismatch")
-            if rec.transaction_id != command.transaction_id:
-                _execution_error("lifecycle-work-release-evidence-mismatch")
-            if rec.plan_hash != command.plan_hash:
-                _execution_error("lifecycle-work-release-evidence-mismatch")
-            if rec.service_id != sid:
-                _execution_error("lifecycle-work-release-evidence-mismatch")
-            if rec.status != RELEASED:
-                _execution_error("lifecycle-work-release-evidence-mismatch")
-            if type(rec.duplicate) is not bool:
-                _execution_error("lifecycle-work-release-evidence-mismatch")
-            if (
-                not isinstance(rec.record_sha256, str)
-                or _HASH_RE.fullmatch(rec.record_sha256) is None
-            ):
-                _execution_error("lifecycle-work-release-evidence-mismatch")
+        for position, expectation in enumerate(expectation_tuple):
+            _validate_returned_record(
+                released[position],
+                command,
+                expectation,
+                now,
+            )
 
         # -- Build evidence hash ------------------------------------------
         record_sha256s = tuple(rec.record_sha256 for rec in released)
