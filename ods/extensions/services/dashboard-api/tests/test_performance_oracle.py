@@ -875,7 +875,10 @@ def test_bundled_windows_laptop_phi_evidence_blocks_agent_compatibility(data_dir
 def test_real_catalog_has_six_windows_8gb_release_swap_candidates(data_dir, tmp_path):
     install_dir = tmp_path / "ods"
     (install_dir / "data" / "models").mkdir(parents=True)
-    (install_dir / ".env").write_text("ODS_FLEET_HOST_ID=windows-laptop\n", encoding="utf-8")
+    (install_dir / ".env").write_text(
+        "ODS_FLEET_HOST_ID=windows-laptop\nSYSTEM_RAM_GB=31\n",
+        encoding="utf-8",
+    )
     catalog = _official_model_catalog()
 
     payload = build_models_payload(
