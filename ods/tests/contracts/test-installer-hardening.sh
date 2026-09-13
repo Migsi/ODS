@@ -663,9 +663,9 @@ assert_contains "$host_agent" 'Get-ODSPortOwners' "host-agent should snapshot Le
 assert_not_contains "$host_agent" '\$existingTaskMatches' "host-agent should not reuse a stale Lemonade task contract"
 assert_not_contains "$host_agent" '\$argString = "serve --port .*--no-tray' "host-agent must not embed obsolete Lemonade 10.7 arguments"
 
-echo "[contract] Windows Lemonade Hermes uses LiteLLM compact path"
+echo "[contract] Windows Lemonade Hermes uses cancellable model-router path"
 phase06_win="installers/windows/phases/06-directories.ps1"
-assert_contains "$phase06_win" 'http://litellm:4000/v1' "Windows AMD Hermes should route through LiteLLM, not direct Lemonade"
+assert_contains "installers/windows/lib/env-generator.ps1" 'http://model-router:9099/v1' "Windows AMD Hermes should route through model-router, not direct Lemonade"
 assert_contains "$phase06_win" 'local-lemonade' "Windows AMD Hermes should render compact local profile"
 assert_contains "$phase06_win" 'disabled_toolsets:' "Windows AMD Hermes should compact optional toolsets"
 assert_contains "$phase06_win" 'extensions-library-bundle\\services' "Windows installer should consider public-bootstrap extensions-library bundle"

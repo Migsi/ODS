@@ -1722,7 +1722,7 @@ patch_hermes_model_after_swap() {
     fi
     if [[ "$switchboard_mode" == "enabled" ]]; then
         new_model="ods/current"
-        [[ -n "$hermes_base_url" ]] || hermes_base_url="http://litellm:4000/v1"
+        [[ -n "$hermes_base_url" ]] || hermes_base_url="http://model-router:9099/v1"
     fi
 
     log "Patching Hermes config after full-model swap: ${old_model} -> ${new_model}"
@@ -3275,7 +3275,7 @@ elif [[ -n "$DOCKER_CMD" ]] && $DOCKER_CMD ps --filter name=ods-llama-server --f
         fi
         if [[ "$_hermes_switchboard_mode" == "enabled" ]]; then
             _hermes_new_model="ods/current"
-            [[ -n "$_hermes_base_url" ]] || _hermes_base_url="http://litellm:4000/v1"
+            [[ -n "$_hermes_base_url" ]] || _hermes_base_url="http://model-router:9099/v1"
         fi
         log "Patching Hermes config: model.default $_hermes_old_model -> $_hermes_new_model"
         _hermes_request_timeout=180

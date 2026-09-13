@@ -664,7 +664,11 @@ if ($enableHermes) {
         $_hermesBaseUrl = $_envLines["HERMES_LLM_BASE_URL"].Trim().Trim('"').Trim("'")
     }
     if ([string]::IsNullOrWhiteSpace($_hermesBaseUrl)) {
-        $_hermesBaseUrl = $(if ($cloudMode -or $gpuInfo.Backend -eq "amd" -or $_switchboardMode -eq "enabled") {
+        $_hermesBaseUrl = $(if ($cloudMode) {
+            "http://litellm:4000/v1"
+        } elseif ($_switchboardMode -eq "enabled") {
+            "http://model-router:9099/v1"
+        } elseif ($gpuInfo.Backend -eq "amd") {
             "http://litellm:4000/v1"
         } else {
             "http://llama-server:8080/v1"
@@ -678,6 +682,8 @@ if ($enableHermes) {
         if ($_envLines.ContainsKey("LITELLM_KEY")) {
             $_hermesApiKey = $_envLines["LITELLM_KEY"].Trim().Trim('"').Trim("'")
         }
+    } elseif ([string]::IsNullOrWhiteSpace($_hermesApiKey) -and $_hermesBaseUrl -match 'model-router:9099') {
+        $_hermesApiKey = "no-key"
     }
     if ([string]::IsNullOrWhiteSpace($_hermesApiKey)) {
         $_hermesApiKey = "sk-ods-hermes-local"

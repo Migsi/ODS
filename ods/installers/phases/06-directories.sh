@@ -818,9 +818,13 @@ Fix with: sudo chown -R \$(id -u):\$(id -g) $INSTALL_DIR/config $INSTALL_DIR/dat
         _default_hermes_base_url="http://llama-server:8080/v1"
         _default_hermes_api_key="sk-ods-hermes-local"
     fi
-    if [[ "$ODS_MODEL_SWITCHBOARD_VALUE" == "enabled" ]]; then
-        _default_hermes_base_url="http://litellm:4000/v1"
-        _default_hermes_api_key="${LITELLM_KEY}"
+    if [[ "$ODS_MODEL_SWITCHBOARD_VALUE" == "enabled" && "${ODS_MODE:-local}" != "cloud" && "$EXTERNAL_LLM_ACTIVE" != "true" ]]; then
+        # Local Hermes streams directly through model-router so an abandoned
+        # Talk request can cancel the active backend request.  LiteLLM remains
+        # the authenticated cloud/external gateway, but its retry layer can
+        # outlive a disconnected local Hermes client and pin the only slot.
+        _default_hermes_base_url="http://model-router:9099/v1"
+        _default_hermes_api_key="no-key"
     fi
     if [[ "$EXTERNAL_LLM_ACTIVE" == "true" ]]; then
         HERMES_LLM_BASE_URL_VALUE="http://litellm:4000/v1"
@@ -831,6 +835,12 @@ Fix with: sudo chown -R \$(id -u):\$(id -g) $INSTALL_DIR/config $INSTALL_DIR/dat
     else
         HERMES_LLM_BASE_URL_VALUE=$(_env_get HERMES_LLM_BASE_URL "$_default_hermes_base_url")
         HERMES_LLM_API_KEY_VALUE=$(_env_get HERMES_LLM_API_KEY "$_default_hermes_api_key")
+    fi
+    if [[ "$ODS_MODEL_SWITCHBOARD_VALUE" == "enabled" && "${ODS_MODE:-local}" != "cloud" && "$EXTERNAL_LLM_ACTIVE" != "true" && "$HERMES_LLM_BASE_URL_VALUE" == "http://litellm:4000/v1" ]]; then
+        # Migrate the former managed default on upgrade.  Preserve every
+        # non-default custom endpoint exactly as supplied by the operator.
+        HERMES_LLM_BASE_URL_VALUE="http://model-router:9099/v1"
+        HERMES_LLM_API_KEY_VALUE="no-key"
     fi
     LLM_API_URL="$LLM_API_URL_VALUE"
     HERMES_LLM_BASE_URL="$HERMES_LLM_BASE_URL_VALUE"

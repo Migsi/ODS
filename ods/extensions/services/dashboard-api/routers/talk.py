@@ -19,6 +19,7 @@ from typing import Any, AsyncIterator
 import httpx
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import StreamingResponse
+from starlette.requests import ClientDisconnect
 
 import hermes_bridge
 import session_signer
@@ -398,6 +399,45 @@ _SSE_KEEPALIVE = b": keepalive\n\n"
 _KEEPALIVE_INTERVAL = 5.0
 
 
+class _TalkStreamingResponse(StreamingResponse):
+    """StreamingResponse that actively watches for an HTTP disconnect.
+
+    Starlette 0.48 stops listening to the ASGI receive channel when the server
+    advertises ASGI 2.4 and relies only on a later socket-write failure.  A
+    quiet Talk stream can therefore keep its Hermes/model request alive long
+    after the client has gone.  Race body streaming against the real
+    ``http.disconnect`` signal on every ASGI version, then close the iterator
+    so its Hermes-interrupt cleanup runs immediately.
+    """
+
+    async def __call__(self, scope, receive, send) -> None:
+        stream_task = asyncio.create_task(self.stream_response(send))
+        disconnect_task = asyncio.create_task(self.listen_for_disconnect(receive))
+        try:
+            done, _pending = await asyncio.wait(
+                {stream_task, disconnect_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if stream_task in done:
+                try:
+                    await stream_task
+                except OSError as exc:
+                    raise ClientDisconnect from exc
+        finally:
+            for task in (stream_task, disconnect_task):
+                if not task.done():
+                    task.cancel()
+            for task in (stream_task, disconnect_task):
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await task
+            close = getattr(self.body_iterator, "aclose", None)
+            if close is not None:
+                with contextlib.suppress(Exception):
+                    await close()
+        if self.background is not None:
+            await self.background()
+
+
 # Hermes tool name → human-readable spinner caption. We map by exact name
 # first, then by a few well-known prefixes. The fallback is a literal "Using
 # `<name>`…" so an unrecognised tool still produces something honest rather
@@ -465,6 +505,7 @@ async def _stream_hermes_sse(session_key: str, text: str, request: Request):
     bridge_iter = hermes_bridge.stream_prompt(session_key, text).__aiter__()
     pending: asyncio.Task | None = None
     emit_done = True
+    upstream_complete = False
     approval_pending = False
     approval_denied = False
 
@@ -486,6 +527,7 @@ async def _stream_hermes_sse(session_key: str, text: str, request: Request):
             # closed exception cannot become an unobserved task warning.
             with contextlib.suppress(
                 asyncio.CancelledError,
+                asyncio.TimeoutError,
                 StopAsyncIteration,
                 hermes_bridge.HermesBridgeError,
             ):
@@ -508,18 +550,12 @@ async def _stream_hermes_sse(session_key: str, text: str, request: Request):
                 done_set, _ = await asyncio.wait({pending}, timeout=_KEEPALIVE_INTERVAL)
             except asyncio.CancelledError:
                 emit_done = False
-                await deny_before_cancel()
-                await interrupt_before_cancel()
-                await cancel_pending()
                 raise
             if not done_set:
                 # No bridge event in the keepalive window; check disconnect
                 # before sending more bytes, then emit a keepalive comment.
                 if await request.is_disconnected():
                     emit_done = False
-                    await deny_before_cancel()
-                    await interrupt_before_cancel()
-                    await cancel_pending()
                     return
                 yield _SSE_KEEPALIVE
                 continue
@@ -527,6 +563,7 @@ async def _stream_hermes_sse(session_key: str, text: str, request: Request):
             try:
                 event = pending.result()
             except StopAsyncIteration:
+                upstream_complete = True
                 pending = None
                 break
             except hermes_bridge.HermesUnavailable as exc:
@@ -582,6 +619,10 @@ async def _stream_hermes_sse(session_key: str, text: str, request: Request):
                     "choices": ["once", "deny"],
                 })
             elif et == "complete":
+                # Mark the upstream turn complete before yielding.  ASGI may
+                # close the response generator as soon as this frame reaches
+                # the client, before it resumes us to emit ``done``.
+                upstream_complete = True
                 approval_pending = False
                 yield _sse_event("complete", {
                     "session_id": event.get("session_id", ""),
@@ -589,8 +630,25 @@ async def _stream_hermes_sse(session_key: str, text: str, request: Request):
                     "status": event.get("status") or "ok",
                     "warning": event.get("warning"),
                 })
+    except GeneratorExit:
+        # StreamingResponse may close an abandoned body iterator with
+        # ``aclose()``.  Yielding the normal terminal frame while handling
+        # GeneratorExit raises "async generator ignored GeneratorExit" and,
+        # more importantly, used to bypass the explicit disconnect branches.
+        emit_done = False
+        raise
     finally:
         await deny_before_cancel()
+        # Starlette can close a streaming response with ``aclose()`` /
+        # GeneratorExit rather than injecting CancelledError.  The explicit
+        # disconnect branches above therefore cannot be the only place that
+        # interrupts Hermes: cancelling just the local reader detaches the
+        # Hermes session and leaves its provider request running.  Interrupt
+        # every abandoned turn before cancelling the reader task.  A normal
+        # message.complete path stays pooled and is not interrupted.
+        if not upstream_complete:
+            logger.info("ods-talk: interrupting abandoned Hermes turn for %s", session_key[:8])
+            await interrupt_before_cancel()
         await cancel_pending()
         if emit_done:
             yield _sse_event("done", {})
@@ -692,7 +750,7 @@ async def talk_message_stream(payload: dict[str, Any], request: Request) -> Stre
         "X-Accel-Buffering": "no",
         "Connection": "keep-alive",
     }
-    return StreamingResponse(
+    return _TalkStreamingResponse(
         _stream_hermes_sse(session_key, text, request),
         media_type="text/event-stream",
         headers=headers,
@@ -814,7 +872,7 @@ async def talk_attachment(
         f"```\n{content}\n```\n\n"
         f"{caption or 'Take a look at this and let me know what you think.'}"
     )
-    return StreamingResponse(
+    return _TalkStreamingResponse(
         _stream_hermes_sse(session_key, prompt, request),
         media_type="text/event-stream",
         headers={

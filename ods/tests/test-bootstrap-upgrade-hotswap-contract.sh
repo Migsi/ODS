@@ -699,10 +699,10 @@ grep -qF 'new_model="ods/current"' <<<"$active_code" \
     || fail "Hermes post-swap patch helper must use the stable switchboard alias"
 grep -qF '_hermes_new_model="ods/current"' <<<"$active_code" \
     || fail "Docker full-model swap must patch Hermes to the stable switchboard alias"
-grep -qF 'hermes_base_url="http://litellm:4000/v1"' <<<"$active_code" \
-    || fail "Switchboard Hermes patch helper must route through LiteLLM"
-grep -qF '_hermes_base_url="http://litellm:4000/v1"' <<<"$active_code" \
-    || fail "Switchboard Docker swap must route Hermes through LiteLLM"
+grep -qF 'hermes_base_url="http://model-router:9099/v1"' <<<"$active_code" \
+    || fail "Switchboard Hermes patch helper must route through model-router"
+grep -qF '_hermes_base_url="http://model-router:9099/v1"' <<<"$active_code" \
+    || fail "Switchboard Docker swap must route Hermes through model-router"
 pass "Hermes post-swap patch uses switchboard stable alias when enabled"
 
 perplexica_update_block="$(awk '

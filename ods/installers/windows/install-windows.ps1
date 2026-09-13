@@ -264,14 +264,24 @@ function Set-ODSWindowsHermesRuntimeModel {
     }
     $hermesBaseUrl = Get-WindowsODSEnvValue `
         -EnvMap $runtimeEnv -Keys @("HERMES_LLM_BASE_URL") `
-        -Default $(if ($cloudMode -or $gpuInfo.Backend -eq "amd" -or $switchboardEnabled) {
+        -Default $(if ($cloudMode) {
+            "http://litellm:4000/v1"
+        } elseif ($switchboardEnabled) {
+            "http://model-router:9099/v1"
+        } elseif ($gpuInfo.Backend -eq "amd") {
             "http://litellm:4000/v1"
         } else {
             "http://llama-server:8080/v1"
         })
     $hermesApiKey = Get-WindowsODSEnvValue `
-        -EnvMap $runtimeEnv -Keys @("HERMES_LLM_API_KEY", "LITELLM_KEY") `
-        -Default "sk-ods-hermes-local"
+        -EnvMap $runtimeEnv -Keys @("HERMES_LLM_API_KEY") `
+        -Default $(if ($switchboardEnabled -and -not $cloudMode) {
+            "no-key"
+        } elseif ($cloudMode -or $gpuInfo.Backend -eq "amd") {
+            Get-WindowsODSEnvValue -EnvMap $runtimeEnv -Keys @("LITELLM_KEY") -Default ""
+        } else {
+            "sk-ods-hermes-local"
+        })
     $hermesTemplate = Join-Path (Join-Path (Join-Path $installDir "extensions") "services\hermes") "cli-config.yaml.template"
     $hermesLive = Join-Path (Join-Path $installDir "data\hermes") "config.yaml"
     $hermesRequestTimeout = $(if ($cloudMode -and -not $switchboardEnabled) { 180 } else { 900 })

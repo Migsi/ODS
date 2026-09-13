@@ -1070,20 +1070,15 @@ MODELS_INI_EOF
             if [[ "${GPU_BACKEND:-}" == "amd" && "${ODS_MODE:-local}" != "cloud" ]] && ! _phase11_external_lemonade; then
                 _hermes_model="extra.$GGUF_FILE"
             fi
-            # base_url: on AMD/Lemonade hosts, route Hermes through litellm
-            # instead of direct-to-Lemonade. Lemonade is strict about model
-            # names and rejects concurrent connections that show up during a
-            # multi-step agent loop (web_search → reason → tool result →
-            # reason …), which results in APIConnectionError mid-tool-loop.
-            # litellm's "*" wildcard model_list normalises the model name and
-            # adds upstream retry logic. On non-AMD Linux installs there's a
-            # sibling llama-server container that takes any model name; on
-            # macOS install-macos.sh handles the host.docker.internal swap.
+            # Local switchboard mode routes Hermes through model-router so a
+            # disconnected Talk request cancels the backend operation instead
+            # of leaving LiteLLM retries alive. Cloud/external and legacy AMD
+            # modes retain their authenticated/normalised LiteLLM paths.
             _hermes_base_url=""
             _hermes_api_key=""
             if [[ "$_hermes_switchboard_mode" == "enabled" ]]; then
-                _hermes_base_url="${HERMES_LLM_BASE_URL:-http://litellm:4000/v1}"
-                _hermes_api_key="${HERMES_LLM_API_KEY:-${LITELLM_KEY:-}}"
+                _hermes_base_url="${HERMES_LLM_BASE_URL:-http://model-router:9099/v1}"
+                _hermes_api_key="${HERMES_LLM_API_KEY:-no-key}"
             elif [[ "${ODS_MODE:-local}" == "cloud" ]]; then
                 _hermes_base_url="${HERMES_LLM_BASE_URL:-http://litellm:4000/v1}"
                 _hermes_api_key="${HERMES_LLM_API_KEY:-${LITELLM_KEY:-}}"

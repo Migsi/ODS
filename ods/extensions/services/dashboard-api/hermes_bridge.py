@@ -27,6 +27,7 @@ visitors doesn't pin Hermes resources forever.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import logging
@@ -620,6 +621,58 @@ async def deny_pending_approval(session_key: str) -> bool:
         return False
 
 
+async def _interrupt_session_with_ack(session_id: str) -> None:
+    """Interrupt a Hermes session on a short-lived control WebSocket.
+
+    The prompt's pooled WebSocket already has a reader blocked in
+    ``_submit_on_connection``.  Reading an interrupt reply on that socket
+    would race that reader, while sending and immediately closing gives the
+    Hermes gateway no delivery acknowledgement.  A separate authenticated
+    control connection can address the process-wide session id, receive the
+    JSON-RPC result, and prove Hermes processed the interrupt before the
+    prompt-owning socket is evicted.
+    """
+    timeout = aiohttp.ClientTimeout(total=_APPROVAL_SEND_TIMEOUT * 2)
+    control_session = aiohttp.ClientSession(timeout=timeout)
+    control_ws: aiohttp.ClientWebSocketResponse | None = None
+    request_id = f"ods-talk-interrupt-{time.monotonic_ns()}"
+    deadline = time.monotonic() + _APPROVAL_SEND_TIMEOUT
+    try:
+        control_ws = await _connect_ws(control_session)
+        await asyncio.wait_for(
+            control_ws.send_str(json.dumps({
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "method": "session.interrupt",
+                "params": {"session_id": session_id},
+            })),
+            timeout=max(0.01, deadline - time.monotonic()),
+        )
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise asyncio.TimeoutError
+            frame = await _recv_json(control_ws, remaining)
+            if frame.get("id") != request_id:
+                # gateway.ready and unrelated process-level events may arrive
+                # before the RPC result on a newly opened control socket.
+                continue
+            if frame.get("error"):
+                err = frame["error"]
+                message = err.get("message") if isinstance(err, dict) else str(err)
+                raise HermesBridgeError(message or "Hermes session interrupt failed")
+            result = frame.get("result")
+            if not isinstance(result, dict) or result.get("status") != "interrupted":
+                raise HermesBridgeError("Hermes did not acknowledge the session interrupt")
+            return
+    finally:
+        if control_ws is not None:
+            with contextlib.suppress(Exception):
+                await control_ws.close()
+        with contextlib.suppress(Exception):
+            await control_session.close()
+
+
 async def interrupt_active_prompt(session_key: str) -> bool:
     """Interrupt and evict the active Hermes prompt for one Talk session.
 
@@ -646,38 +699,29 @@ async def interrupt_active_prompt(session_key: str) -> bool:
             return False
         _CONNECTION_POOL.pop(session_key, None)
 
-    acquired = False
-    sent = False
+    acknowledged = False
     try:
-        await asyncio.wait_for(
-            conn.write_lock.acquire(),
-            timeout=_APPROVAL_SEND_TIMEOUT,
-        )
-        acquired = True
-        if conn.closed or conn.ws.closed:
-            return False
-        rpc = json.dumps({
-            "jsonrpc": "2.0",
-            "id": f"ods-talk-interrupt-{time.monotonic_ns()}",
-            "method": "session.interrupt",
-            "params": {"session_id": conn.session_id},
-        })
-        await asyncio.wait_for(
-            conn.ws.send_str(rpc),
-            timeout=_APPROVAL_SEND_TIMEOUT,
-        )
+        await _interrupt_session_with_ack(conn.session_id)
         conn.pending_approval = None
         conn.last_used = time.monotonic()
-        sent = True
-    except (asyncio.TimeoutError, aiohttp.ClientError, ConnectionResetError, ConnectionError):
+        acknowledged = True
+        logger.info(
+            "hermes-bridge: Hermes acknowledged interrupt for abandoned prompt %s",
+            session_key[:8],
+        )
+    except (
+        HermesBridgeError,
+        asyncio.TimeoutError,
+        aiohttp.ClientError,
+        ConnectionResetError,
+        ConnectionError,
+    ):
         logger.warning(
             "hermes-bridge: could not interrupt abandoned prompt for %s",
             session_key[:8],
             exc_info=True,
         )
     finally:
-        if acquired:
-            conn.write_lock.release()
         try:
             await asyncio.wait_for(
                 conn.aclose(),
@@ -688,7 +732,7 @@ async def interrupt_active_prompt(session_key: str) -> bool:
                 "hermes-bridge: timed out closing interrupted connection for %s",
                 session_key[:8],
             )
-    return sent
+    return acknowledged
 
 
 async def submit_prompt(session_key: str, text: str) -> HermesReply:
