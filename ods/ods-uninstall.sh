@@ -7,6 +7,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/ods}"
+REQUESTED_INSTALL_DIR=""
 
 # Colors
 RED='\033[0;31m'
@@ -82,11 +83,41 @@ KEEP_MODELS=false
 KEEP_DATA=false
 FORCE=false
 
+validate_requested_install_dir() {
+    local target_dir="$1" target_real home_real script_real
+
+    [[ "$target_dir" == /* ]] || return 1
+    [[ -d "$target_dir" && ! -L "$target_dir" ]] || return 1
+    target_real="$(cd -P -- "$target_dir" 2>/dev/null && pwd -P)" || return 1
+    home_real="$(cd -P -- "$HOME" 2>/dev/null && pwd -P)" || return 1
+    script_real="$(cd -P -- "$SCRIPT_DIR" 2>/dev/null && pwd -P)" || return 1
+    [[ "$target_real" != / && "$target_real" != "$home_real" && "$target_real" != "$script_real" ]] || return 1
+    [[ -f "$target_real/.env" && ! -L "$target_real/.env" ]] || return 1
+    [[ -f "$target_real/ods-cli" && ! -L "$target_real/ods-cli" ]] || return 1
+    [[ -f "$target_real/ods-uninstall.sh" && ! -L "$target_real/ods-uninstall.sh" ]] || return 1
+    if [[ -f "$target_real/docker-compose.base.yml" && ! -L "$target_real/docker-compose.base.yml" ]]; then
+        printf '%s\n' "$target_real"
+        return 0
+    fi
+    [[ -f "$target_real/docker-compose.yml" && ! -L "$target_real/docker-compose.yml" ]] || return 1
+    printf '%s\n' "$target_real"
+}
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --keep-models) KEEP_MODELS=true; shift ;;
         --keep-data)   KEEP_DATA=true; shift ;;
         --force)       FORCE=true; shift ;;
+        --install-dir)
+            [[ $# -ge 2 && -n "$2" ]] || { log_error "--install-dir requires a path"; exit 1; }
+            REQUESTED_INSTALL_DIR="$2"
+            shift 2
+            ;;
+        --install-dir=*)
+            REQUESTED_INSTALL_DIR="${1#*=}"
+            [[ -n "$REQUESTED_INSTALL_DIR" ]] || { log_error "--install-dir requires a path"; exit 1; }
+            shift
+            ;;
         -h|--help)
             cat << EOF
 ODS Uninstaller
@@ -97,6 +128,7 @@ Options:
     --keep-models   Keep downloaded AI models (saves re-download time)
     --keep-data     Keep user data (chat history, n8n workflows, etc.)
     --force         Skip confirmation prompts
+    --install-dir   Uninstall a separately located, fingerprinted ODS installation
     -h, --help      Show this help
 
 This will remove:
@@ -121,8 +153,12 @@ echo -e "${RED}║         ODS UNINSTALLER                ║${NC}"
 echo -e "${RED}╚══════════════════════════════════════════════════╝${NC}"
 echo ""
 
-# Detect install dir
-if [[ -d "$SCRIPT_DIR" && -f "$SCRIPT_DIR/ods-cli" ]]; then
+# Detect install dir. A candidate bootstrap can explicitly target an older ODS
+# tree, but only after this uninstaller independently validates that target.
+if [[ -n "$REQUESTED_INSTALL_DIR" ]]; then
+    INSTALL_DIR="$(validate_requested_install_dir "$REQUESTED_INSTALL_DIR")" \
+        || { log_error "Refusing unsafe or unrecognized ODS install target: $REQUESTED_INSTALL_DIR"; exit 1; }
+elif [[ -d "$SCRIPT_DIR" && -f "$SCRIPT_DIR/ods-cli" ]]; then
     INSTALL_DIR="$SCRIPT_DIR"
 fi
 

@@ -235,7 +235,9 @@ assert_contains "$bootstrap" 'sudo -n rm -rf -- "\$target_dir"' "bootstrap --for
 assert_contains "$bootstrap" 'root-owned container data' "bootstrap sudo fallback should explain root-owned Docker data cleanup"
 assert_contains "$bootstrap" 'validate_force_reinstall_target()' "bootstrap should fingerprint a complete install before forced replacement"
 assert_contains "$bootstrap" 'candidate_uninstaller="\$TEMP_DIR/repo/ods/ods-uninstall.sh"' "bootstrap should stage the requested candidate uninstaller"
-assert_contains "$bootstrap" 'INSTALL_DIR="\$INSTALL_DIR" bash "\$candidate_uninstaller" --force' "bootstrap should run the candidate uninstaller against the existing install"
+assert_contains "$bootstrap" 'bash "\$candidate_uninstaller" --install-dir "\$INSTALL_DIR" --force' "bootstrap should run the candidate uninstaller against the existing install"
+assert_contains "ods-uninstall.sh" 'validate_requested_install_dir()' "candidate uninstaller should independently validate a requested install target"
+assert_contains "ods-uninstall.sh" '--install-dir)' "candidate uninstaller should accept an explicit install target"
 
 echo "[contract] public bootstrap can install from an exact commit SHA"
 sha_repo="$tmpdir/sha-ref-repo"
@@ -252,12 +254,16 @@ chmod +x "$sha_repo/ods/install.sh"
 cat > "$sha_repo/ods/ods-uninstall.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-[[ "${INSTALL_DIR:?}" == "${ODS_TEST_EXPECTED_INSTALL_DIR:?}" ]]
+[[ "${1:-}" == "--install-dir" && -n "${2:-}" ]]
+install_dir="$2"
+shift 2
+[[ "${1:-}" == "--force" ]]
+[[ "$install_dir" == "${ODS_TEST_EXPECTED_INSTALL_DIR:?}" ]]
 printf '%s\n' candidate > "${ODS_TEST_CANDIDATE_UNINSTALL_MARKER:?}"
 if [[ "${ODS_TEST_CANDIDATE_UNINSTALL_FAIL:-false}" == "true" ]]; then
   exit 92
 fi
-rm -rf -- "$INSTALL_DIR"
+rm -rf -- "$install_dir"
 EOF
 chmod +x "$sha_repo/ods/ods-uninstall.sh"
 git -C "$sha_repo" init -q

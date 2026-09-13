@@ -492,7 +492,7 @@ if [[ "$BOOTSTRAP_REINSTALL" == "true" ]]; then
     [[ -f "$candidate_uninstaller" && ! -L "$candidate_uninstaller" ]] \
         || error "Requested ODS source does not contain a safe candidate uninstaller. Existing installation was not replaced."
     log "Removing the existing installation with the requested candidate uninstaller..."
-    if ! INSTALL_DIR="$INSTALL_DIR" bash "$candidate_uninstaller" --force; then
+    if ! bash "$candidate_uninstaller" --install-dir "$INSTALL_DIR" --force; then
         error "Candidate uninstall failed. Existing installation was not replaced."
     fi
     [[ ! -e "$INSTALL_DIR" && ! -L "$INSTALL_DIR" ]] \
