@@ -247,6 +247,20 @@ def main() -> int:
     result = run_selector(
         CATALOG,
         "--ram-gb",
+        "15",
+        max_size_mb=0,
+        agent_ready_only=False,
+    )
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["selected"]["id"] == "qwen3.5-9b-q4"
+    assert payload["source"] == "catalog_runtime_profile_pre_download"
+    assert payload["alternatives"][0]["runtime_profile"] == "nvidia-8gb-64k-q8-kv"
+    assert payload["alternatives"][0]["context_length"] == 65536
+
+    result = run_selector(
+        CATALOG,
+        "--ram-gb",
         "13",
         max_size_mb=0,
         agent_ready_only=False,
@@ -298,11 +312,17 @@ def main() -> int:
     features = (ROOT / "installers" / "phases" / "03-features.sh").read_text(
         encoding="utf-8"
     )
+    directories = (ROOT / "installers" / "phases" / "06-directories.sh").read_text(
+        encoding="utf-8"
+    )
     assert "--agent-ready-only" not in detection
     assert '_selector_max_size_mb=0' in detection
     assert 'PIXEL_AGENT_MODEL_READY=false' in detection
-    assert '--ram-gb "${MODEL_SELECTION_RAM_GB:-${RAM_GB:-0}}"' in detection
+    assert '--ram-gb "${RAM_GB:-0}"' in detection
+    assert "MODEL_TIER_RAM_GB" in detection
+    assert "MODEL_SELECTION_RAM_GB" not in detection
     assert 'ods_wsl_model_ram_budget "$RAM_GB"' in detection
+    assert "SYSTEM_RAM_GB=${RAM_GB:-0}" in directories
     assert "strongest installable hardware-fit model" in detection
     assert '_selector_env="$(_run_catalog_selector 2>>' in detection
     assert 'PIXEL_AGENT_MODEL_READY:-unknown' in features
