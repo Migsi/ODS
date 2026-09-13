@@ -123,6 +123,12 @@ MAX_TELEMETRY_RESPONSE_BYTES = 1024 * 1024
 SUBPROCESS_TIMEOUT_START = 600  # 10 min — image pulls can be slow
 SUBPROCESS_TIMEOUT_STOP = 120   # 2 min — stop should be fast
 HOOK_TIMEOUT = 120              # 2 min — hook execution timeout
+MODEL_ACTIVATION_HEALTH_ATTEMPTS = 60
+# Hermes can spend roughly two minutes in image/config bootstrap before its
+# 30-second Docker healthcheck observes the live dashboard.  Give that service
+# two additional health intervals during model activation while preserving the
+# same bounded, fail-closed health contract.
+HERMES_MODEL_ACTIVATION_HEALTH_ATTEMPTS = 90
 VALID_HOOK_NAMES = frozenset({
     "pre_install", "post_install", "pre_start", "post_start",
     "pre_uninstall", "post_uninstall",
@@ -13491,8 +13497,14 @@ class ContainerUnhealthyError(RuntimeError):
     """A running dependent reached Docker's explicit unhealthy state."""
 
 
-def _wait_for_container_health(container: str, attempts: int = 60) -> None:
+def _wait_for_container_health(container: str, attempts: int | None = None) -> None:
     """Wait until a restarted dependent is healthy, failing on terminal states."""
+    if attempts is None:
+        attempts = (
+            HERMES_MODEL_ACTIVATION_HEALTH_ATTEMPTS
+            if container == "ods-hermes"
+            else MODEL_ACTIVATION_HEALTH_ATTEMPTS
+        )
     for attempt in range(attempts):
         try:
             result = subprocess.run(

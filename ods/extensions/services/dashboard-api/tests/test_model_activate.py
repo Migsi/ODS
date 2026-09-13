@@ -37,6 +37,7 @@ _restart_windows_lemonade = _mod._restart_windows_lemonade
 _is_windows_host_llama_server = _mod._is_windows_host_llama_server
 _restart_windows_native_llama_server = _mod._restart_windows_native_llama_server
 _write_windows_native_litellm_config = _mod._write_windows_native_litellm_config
+_wait_for_container_health = _mod._wait_for_container_health
 
 
 @pytest.fixture(autouse=True)
@@ -78,6 +79,78 @@ def _install_runtime_renderer(tmp_path):
 
 def test_host_agent_backlog_handles_dashboard_poll_bursts():
     assert _mod.ThreadedHTTPServer.request_queue_size >= 64
+
+
+def test_hermes_health_wait_covers_delayed_docker_health_transition(monkeypatch):
+    statuses = iter(
+        ["starting"] * (_mod.HERMES_MODEL_ACTIVATION_HEALTH_ATTEMPTS - 1)
+        + ["healthy"]
+    )
+    inspections = []
+    sleeps = []
+
+    def inspect(*args, **_kwargs):
+        inspections.append(args)
+        return subprocess.CompletedProcess(args, 0, next(statuses) + "\n", "")
+
+    monkeypatch.setattr(_mod.subprocess, "run", inspect)
+    monkeypatch.setattr(_mod.time, "sleep", lambda seconds: sleeps.append(seconds))
+    monkeypatch.setattr(
+        _mod,
+        "_capture_container_state",
+        lambda _container: {"exists": True, "running": True},
+    )
+
+    _wait_for_container_health("ods-hermes")
+
+    assert len(inspections) == _mod.HERMES_MODEL_ACTIVATION_HEALTH_ATTEMPTS
+    assert sleeps == [2] * (_mod.HERMES_MODEL_ACTIVATION_HEALTH_ATTEMPTS - 1)
+
+
+def test_hermes_health_wait_remains_bounded_and_fail_closed(monkeypatch):
+    inspections = []
+    sleeps = []
+
+    def inspect(*args, **_kwargs):
+        inspections.append(args)
+        return subprocess.CompletedProcess(args, 0, "starting\n", "")
+
+    monkeypatch.setattr(_mod.subprocess, "run", inspect)
+    monkeypatch.setattr(_mod.time, "sleep", lambda seconds: sleeps.append(seconds))
+
+    with pytest.raises(
+        RuntimeError,
+        match="ods-hermes did not become healthy after model activation",
+    ):
+        _wait_for_container_health("ods-hermes")
+
+    assert len(inspections) == _mod.HERMES_MODEL_ACTIVATION_HEALTH_ATTEMPTS
+    assert sleeps == [2] * (_mod.HERMES_MODEL_ACTIVATION_HEALTH_ATTEMPTS - 1)
+
+
+@pytest.mark.parametrize(
+    ("container", "attempts", "expected_attempts"),
+    [
+        ("ods-openclaw", None, _mod.MODEL_ACTIVATION_HEALTH_ATTEMPTS),
+        ("ods-hermes", 3, 3),
+    ],
+)
+def test_container_health_wait_preserves_other_defaults_and_explicit_overrides(
+    monkeypatch, container, attempts, expected_attempts,
+):
+    inspections = []
+
+    def inspect(*args, **_kwargs):
+        inspections.append(args)
+        return subprocess.CompletedProcess(args, 0, "starting\n", "")
+
+    monkeypatch.setattr(_mod.subprocess, "run", inspect)
+    monkeypatch.setattr(_mod.time, "sleep", lambda _seconds: None)
+
+    with pytest.raises(RuntimeError, match="did not become healthy after model activation"):
+        _wait_for_container_health(container, attempts=attempts)
+
+    assert len(inspections) == expected_attempts
 
 
 def test_external_lemonade_runtime_overrides_wsl_cpu_discovery():
