@@ -75,6 +75,7 @@ ods_pixel_uninstall_managed() {
     local retired_releases="$pixel_install/retired-ods-releases"
     local retired_configs="$owner_home/.openclaw/retired-ods-configs"
     local cleanup_plan cleanup_state release_version sandbox_image sandbox_image_id release_path marker_state pixel_source_ref
+    local runtime_attestation_state
     local retire_openclaw_config openclaw_config_sha256
     local release_identity_sha256 install_manifest_sha256 retired_release_path
     local ops_plan="absent||||" ops_state_status ops_uid ops_gid ops_user_present ops_group_present
@@ -911,6 +912,7 @@ PY
         retire_openclaw_config openclaw_config_sha256 <<<"$cleanup_plan"
     [[ "$cleanup_state" == none || "$cleanup_state" == active || "$cleanup_state" == staged \
         || "$cleanup_state" == staging-attestation || "$cleanup_state" == staging-link \
+        || "$cleanup_state" == unattested-active || "$cleanup_state" == unattested-staged \
         || "$cleanup_state" == retiring || "$cleanup_state" == retired ]] || {
         log_error "ODS-managed Pixel cleanup plan is invalid"
         return 1
