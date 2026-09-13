@@ -165,6 +165,7 @@ async def _upstream_cancel(request):
 
 async def _upstream_preview(request):
     request.app["preview_hosts"].append(request.headers.get("Host"))
+    request.app["preview_paths"].append(request.path)
     site_id = "site-" + "a" * 24
     if request.match_info.get("site_id") != site_id:
         return web.Response(status=404)
@@ -213,6 +214,7 @@ async def _start_upstream():
     app["release_stream"] = asyncio.Event()
     app["release_on_cancel"] = False
     app["preview_hosts"] = []
+    app["preview_paths"] = []
     app.router.add_post("/v1/chat/completions", _upstream_chat)
     app.router.add_post("/v1/chat/cancel", _upstream_cancel)
     app.router.add_get("/v1/models", _upstream_models)
@@ -450,6 +452,30 @@ class TestAuth(BaseEdgeTest):
 
 
 class TestPreviewRelay(BaseEdgeTest):
+
+    async def test_nested_directory_links_resolve_to_published_index(self):
+        site = "site-" + "a" * 24
+        for method in ["GET", "HEAD"]:
+            async with self.client.request(
+                method, f"http://localhost/preview/{site}/guide/chapter/",
+                headers=self.auth(),
+            ) as response:
+                self.assertEqual(response.status, 200)
+                self.assertEqual(await response.read(),
+                                 b"<button id=launch>Remote preview</button>" if method == "GET" else b"")
+        self.assertEqual(self.up_runner.app["preview_paths"],
+                         [f"/{site}/guide/chapter/index.html"] * 2)
+        async with self.client.get(f"http://localhost/preview/{site}/guide/") as response:
+            self.assertEqual(response.status, 401)
+        self.assertEqual(len(self.up_runner.app["preview_paths"]), 2)
+
+    async def test_directory_alias_does_not_admit_unsafe_or_reserved_paths(self):
+        from pixel_edge import _preview_upstream_path
+        site = "site-" + "a" * 24
+        for tail in ["guide//", "../", "/guide/", "__ods_manifest__.json/",
+                     "guide/../", "guide/%2e%2e/", "guide/?file=private"]:
+            self.assertIsNone(_preview_upstream_path(site, tail), tail)
+
     async def test_manifest_route_is_exact_and_keeps_authentication(self):
         from pixel_edge import _preview_upstream_path
         site = "site-" + "a" * 24
@@ -1213,12 +1239,12 @@ class TestHeaderStripping(BaseEdgeTest):
             self.assertFalse(seen.get("xforwarded"))
 
             await cap_runner.cleanup()
-            os.unlink(cap_sock)
+            Path(cap_sock).unlink(missing_ok=True)
         finally:
             os.environ["PIXEL_INGRESS_SOCKET"] = self.up_sock
             importlib.reload(pixel_edge)
             await runner.cleanup()
-            os.unlink(path)
+            Path(path).unlink(missing_ok=True)
 
 
 # ---------------------------------------------------------------------------
@@ -1627,7 +1653,7 @@ class TestSanitizedErrors(BaseEdgeTest):
                     self.assertNotIn("Traceback", json.dumps(data))
 
             await runner.cleanup()
-            os.unlink(sock)
+            Path(sock).unlink(missing_ok=True)
         finally:
             pixel_edge._SOCKET_PATH = old
 

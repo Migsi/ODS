@@ -103,7 +103,9 @@ async def check_workflow_dependencies(deps: list[str], health_cache: dict[str, b
             health_cache[resolved] = healthy
             results[dep] = healthy
         else:
-            results[dep] = True
+            # An undeclared/uninstalled service has no health evidence.
+            # Keep the catalog and enable prerequisite unavailable.
+            results[dep] = False
     return results
 
 

@@ -294,6 +294,7 @@ def test_check_workflow_dependencies_with_alias(test_client, monkeypatch):
     import routers.workflows as wf_mod
     from models import ServiceStatus
 
+    monkeypatch.setitem(wf_mod.SERVICES, "llama-server", {"name": "LLM Server", "port": 8080})
     healthy_status = ServiceStatus(
         id="llama-server", name="LLM Server", port=8080,
         external_port=8080, status="healthy",
@@ -333,14 +334,14 @@ def test_check_workflow_dependencies_unhealthy(test_client, monkeypatch):
 
 
 def test_check_workflow_dependencies_unknown_dep(test_client, monkeypatch):
-    """check_workflow_dependencies returns True for deps not in SERVICES."""
+    """Unknown dependencies have no health evidence and remain unavailable."""
     import routers.workflows as wf_mod
 
     import asyncio
     result = asyncio.run(
         wf_mod.check_workflow_dependencies(["totally-unknown-service-xyz"])
     )
-    assert result["totally-unknown-service-xyz"] is True
+    assert result["totally-unknown-service-xyz"] is False
 
 
 def test_check_workflow_dependencies_uses_cache(test_client, monkeypatch):
