@@ -14795,6 +14795,7 @@ def _select_runtime_profile(model: dict, env: dict) -> dict | None:
                 "NVIDIA VRAM could not be determined; refusing an unprofiled "
                 "model activation"
             )
+    hardware_matches: list[dict] = []
     for profile in profiles:
         if not isinstance(profile, dict):
             continue
@@ -14815,11 +14816,32 @@ def _select_runtime_profile(model: dict, env: dict) -> dict | None:
                 continue
             if profile.get("vram_max_gb") is not None and vram_gb > float(profile["vram_max_gb"]):
                 continue
+        except (TypeError, ValueError):
+            continue
+        hardware_matches.append(profile)
+        try:
             if profile.get("system_ram_min_gb") is not None and float(ram_gb or 0) < float(profile["system_ram_min_gb"]):
                 continue
         except (TypeError, ValueError):
             continue
         return profile
+    if hardware_matches:
+        requirements = []
+        for profile in hardware_matches:
+            try:
+                requirements.append(float(profile.get("system_ram_min_gb") or 0))
+            except (TypeError, ValueError):
+                continue
+        minimum_ram_gb = min(requirements) if requirements else 0
+        requirement = (
+            f"; the lowest hardware-matching profile requires {minimum_ram_gb:g}GB"
+            if minimum_ram_gb > 0
+            else ""
+        )
+        raise RuntimeError(
+            "No runtime profile fits the available system RAM "
+            f"({ram_gb:g}GB){requirement}; refusing an unprofiled model activation"
+        )
     return None
 
 

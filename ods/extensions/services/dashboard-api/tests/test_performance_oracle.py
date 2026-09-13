@@ -1533,6 +1533,77 @@ def test_pre_download_ranker_allows_8gb_nvidia_runtime_profile(monkeypatch):
     assert ranked[0]["_runtime_profile"]["id"] == "nvidia-8gb-qwen36-35b-a3b-turboquant"
 
 
+def test_pre_download_ranker_excludes_ram_ineligible_hardware_profile(
+    monkeypatch,
+    data_dir,
+    tmp_path,
+):
+    monkeypatch.setattr("performance_oracle.platform.machine", lambda: "x86_64")
+    small = {
+        "id": "plain-small",
+        "name": "Plain Small",
+        "family": "qwen",
+        "gguf_file": "plain-small.gguf",
+        "size_mb": 1024,
+        "vram_required_gb": 2,
+        "context_length": 8192,
+        "quantization": "Q4_K_M",
+        "specialty": "Fast",
+        "description": "Unprofiled fallback",
+        "llm_model_name": "plain-small",
+    }
+    profiled = {
+        **_model(),
+        "runtime_profiles": [{
+            "id": "nvidia-8gb-profile",
+            "backend": "nvidia",
+            "host_arch": ["amd64"],
+            "memory_type": "discrete",
+            "vram_min_gb": 7.5,
+            "vram_max_gb": 8.5,
+            "system_ram_min_gb": 15,
+            "estimated_required_gb": 8,
+            "context_length": 65536,
+        }],
+    }
+
+    constrained = rank_pre_download_models(
+        [profiled, small],
+        _gpu(total_mb=8188),
+        profile="qwen",
+        limit=2,
+        system_ram_gb=13,
+    )
+    eligible = rank_pre_download_models(
+        [profiled, small],
+        _gpu(total_mb=8188),
+        profile="qwen",
+        limit=2,
+        system_ram_gb=15,
+    )
+
+    assert [model["id"] for model in constrained] == ["plain-small"]
+    assert eligible[0]["id"] == profiled["id"]
+    assert eligible[0]["_runtime_profile"]["id"] == "nvidia-8gb-profile"
+
+    install_dir = tmp_path / "ods"
+    install_dir.mkdir()
+    (install_dir / ".env").write_text("SYSTEM_RAM_GB=13\n", encoding="utf-8")
+    payload = build_models_payload(
+        _gpu(total_mb=8188),
+        None,
+        0,
+        install_dir,
+        data_dir,
+        catalog=[profiled, small],
+        evidence=[],
+    )
+    cards = {model["id"]: model for model in payload["models"]}
+    assert cards[profiled["id"]]["fitsVram"] is False
+    assert cards[profiled["id"]]["runtimeProfile"] is None
+    assert cards["plain-small"]["recommended"] is True
+
+
 def test_measured_local_from_live_loaded_model(data_dir, tmp_path):
     install_dir = tmp_path / "ods"
     (install_dir / "data" / "models").mkdir(parents=True)

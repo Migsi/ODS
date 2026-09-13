@@ -4252,6 +4252,39 @@ class TestModelActivateRollback:
                 {"GPU_BACKEND": "nvidia"},
             )
 
+    def test_nvidia_profile_selection_fails_closed_when_system_ram_is_too_low(
+        self,
+        monkeypatch,
+    ):
+        monkeypatch.setattr(_mod, "_nvidia_vram_gb", lambda: 8.0)
+        monkeypatch.setattr(_mod, "_system_ram_gb", lambda: 13)
+        monkeypatch.setattr(_mod.platform, "machine", lambda: "x86_64")
+
+        with pytest.raises(
+            RuntimeError,
+            match=r"available system RAM \(13GB\).*requires 15GB.*unprofiled",
+        ):
+            _mod._select_runtime_profile(
+                {
+                    "runtime_profiles": [
+                        {
+                            "id": "nvidia-8gb-profile",
+                            "backend": "nvidia",
+                            "host_arch": ["amd64"],
+                            "memory_type": "discrete",
+                            "vram_min_gb": 7.5,
+                            "vram_max_gb": 8.5,
+                            "system_ram_min_gb": 15,
+                        }
+                    ]
+                },
+                {
+                    "GPU_BACKEND": "nvidia",
+                    "GPU_MEMORY_TYPE": "discrete",
+                    "SYSTEM_RAM_GB": "13",
+                },
+            )
+
     def test_nvidia_vram_probe_uses_wsl_bridge_outside_service_path(
         self,
         monkeypatch,

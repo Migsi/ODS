@@ -14,7 +14,8 @@
 #           chapter(), ai(), ai_ok(), log(), warn(), success()
 # Provides: GPU_BACKEND, GPU_NAME, GPU_VRAM, GPU_COUNT, GPU_MEMORY_TYPE,
 #           TIER, TIER_NAME, LLM_MODEL, GGUF_FILE, GGUF_URL, MAX_CONTEXT,
-#           COMPOSE_FILE, COMPOSE_FLAGS, RAM_GB, DISK_AVAIL, BACKEND_ID,
+#           COMPOSE_FILE, COMPOSE_FLAGS, RAM_GB, MODEL_SELECTION_RAM_GB,
+#           DISK_AVAIL, BACKEND_ID,
 #           LLM_HEALTHCHECK_URL, LLM_PUBLIC_API_PORT,
 #           OPENCLAW_PROVIDER_NAME_DEFAULT, OPENCLAW_PROVIDER_URL_DEFAULT,
 #           GPU_TOPOLOGY_JSON, GPU_HAS_NVLINK, GPU_TOTAL_VRAM,
@@ -25,6 +26,7 @@
 # ============================================================================
 
 [[ -f "${SCRIPT_DIR:-}/lib/safe-env.sh" ]] && . "$SCRIPT_DIR/lib/safe-env.sh"
+. "$SCRIPT_DIR/installers/lib/wsl-memory.sh"
 
 ods_progress 12 "detection" "Detecting GPU hardware"
 chapter "SYSTEM DETECTION"
@@ -62,6 +64,7 @@ if [[ "${ODS_MODE:-local}" == "cloud" ]]; then
         RAM_KB=$(grep MemTotal /proc/meminfo | awk '{print $2}')
     fi
     RAM_GB=$((RAM_KB / 1024 / 1024))
+    MODEL_SELECTION_RAM_GB="$RAM_GB"
     DISK_AVAIL=$(df -Pk "$HOME" 2>/dev/null | tail -1 | awk '{printf "%d", $4 / 1048576}')
     BACKEND_ID="cpu"
     LLM_HEALTHCHECK_URL="http://127.0.0.1:4000/health/readiness"
@@ -82,7 +85,9 @@ ai "Reading hardware telemetry..."
 
 load_capability_profile || true
 
-# RAM Detection (WSL2-aware: query Windows host RAM if available)
+# RAM detection. WSL model selection must use the memory the VM can address,
+# not the Windows host's physical total. Keep a small explicit reserve for the
+# ODS control plane instead of handing the model every byte visible to WSL.
 if grep -qi microsoft /proc/version 2>/dev/null; then
     _wsl_ram_kb=""
     if command -v powershell.exe &>/dev/null; then
@@ -96,21 +101,22 @@ if grep -qi microsoft /proc/version 2>/dev/null; then
         _wsl_ram_kb=$(wmic.exe OS get TotalVisibleMemorySize /value 2>/dev/null \
             | grep -oE '[0-9]+' | sed -n '1p')
     fi
+    _wsl_vm_kb=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+    RAM_KB="$_wsl_vm_kb"
+    RAM_GB=$((RAM_KB / 1024 / 1024))
+    MODEL_SELECTION_RAM_GB="$(ods_wsl_model_ram_budget "$RAM_GB")"
+    _wsl_headroom_gb=$((RAM_GB - MODEL_SELECTION_RAM_GB))
     if [[ -n "$_wsl_ram_kb" && "$_wsl_ram_kb" =~ ^[0-9]+$ ]]; then
-        RAM_KB="$_wsl_ram_kb"
-        RAM_GB=$((RAM_KB / 1024 / 1024))
-        _wsl_vm_kb=$(grep MemTotal /proc/meminfo | awk '{print $2}')
-        _wsl_vm_gb=$((_wsl_vm_kb / 1024 / 1024))
-        log "WSL2 detected — Windows host RAM: ${RAM_GB}GB (WSL2 VM sees: ${_wsl_vm_gb}GB)"
+        _wsl_host_gb=$((_wsl_ram_kb / 1024 / 1024))
+        log "WSL2 detected — Windows host RAM: ${_wsl_host_gb}GB; VM RAM: ${RAM_GB}GB; model budget: ${MODEL_SELECTION_RAM_GB}GB (${_wsl_headroom_gb}GB reserved for ODS services)"
     else
-        RAM_KB=$(grep MemTotal /proc/meminfo | awk '{print $2}')
-        RAM_GB=$((RAM_KB / 1024 / 1024))
-        log "WSL2 detected — could not query Windows host RAM (VM sees: ${RAM_GB}GB)"
+        log "WSL2 detected — could not query Windows host RAM; VM RAM: ${RAM_GB}GB; model budget: ${MODEL_SELECTION_RAM_GB}GB (${_wsl_headroom_gb}GB reserved for ODS services)"
         log "For correct tier selection: use --tier N or configure .wslconfig"
     fi
 else
     RAM_KB=$(grep MemTotal /proc/meminfo | awk '{print $2}')
     RAM_GB=$((RAM_KB / 1024 / 1024))
+    MODEL_SELECTION_RAM_GB="$RAM_GB"
     log "RAM: ${RAM_GB}GB"
 fi
 
@@ -492,11 +498,11 @@ if [[ -z "$TIER" ]]; then
         fi
     elif [[ $GPU_VRAM -ge 40000 ]]; then
         TIER=4
-    elif [[ $GPU_VRAM -ge 20000 ]] || [[ $RAM_GB -ge 96 ]]; then
+    elif [[ $GPU_VRAM -ge 20000 ]] || [[ $MODEL_SELECTION_RAM_GB -ge 96 ]]; then
         TIER=3
-    elif [[ $GPU_VRAM -ge 12000 ]] || [[ $RAM_GB -ge 48 ]]; then
+    elif [[ $GPU_VRAM -ge 12000 ]] || [[ $MODEL_SELECTION_RAM_GB -ge 48 ]]; then
         TIER=2
-    elif [[ $GPU_VRAM -lt 4000 ]] && [[ $RAM_GB -lt 12 ]]; then
+    elif [[ $GPU_VRAM -lt 4000 ]] && [[ $MODEL_SELECTION_RAM_GB -lt 12 ]]; then
         TIER=0
     else
         TIER=1
@@ -574,6 +580,10 @@ if [[ "${ODS_DISABLE_CATALOG_MODEL_SELECTOR:-false}" != "true" && "${TIER:-}" !=
             _selector_max_size_mb="${LLM_MODEL_SIZE_MB:-0}"
             if [[ "$_pixel_default_selector" == true ]]; then
                 _selector_max_size_mb=0
+                # The selector overwrites this when its chosen model has an
+                # explicit Pixel capability verdict. Fail closed if selection
+                # itself cannot produce trusted metadata.
+                PIXEL_AGENT_MODEL_READY=false
             fi
             _run_catalog_selector() {
                 "$_selector_python" "$_selector_script" \
@@ -581,7 +591,7 @@ if [[ "${ODS_DISABLE_CATALOG_MODEL_SELECTOR:-false}" != "true" && "${TIER:-}" !=
                     --backend "${GPU_BACKEND:-unknown}" \
                     --memory-type "${GPU_MEMORY_TYPE:-discrete}" \
                     --vram-mb "${GPU_VRAM:-0}" \
-                    --ram-gb "${RAM_GB:-0}" \
+                    --ram-gb "${MODEL_SELECTION_RAM_GB:-${RAM_GB:-0}}" \
                     --profile "${MODEL_PROFILE_EFFECTIVE:-${MODEL_PROFILE:-qwen}}" \
                     --tier "${TIER:-1}" \
                     --max-size-mb "$_selector_max_size_mb" \
@@ -643,7 +653,7 @@ if [[ -f "$INSTALL_DIR/.env" && "${ODS_RESELECT_MODEL:-false}" != "true" && "${T
                 --backend "${GPU_BACKEND:-unknown}" \
                 --memory-type "${GPU_MEMORY_TYPE:-discrete}" \
                 --vram-mb "${GPU_VRAM:-0}" \
-                --ram-gb "${RAM_GB:-0}" \
+                --ram-gb "${MODEL_SELECTION_RAM_GB:-${RAM_GB:-0}}" \
                 --host-arch "${HOST_ARCH:-unknown}" \
                 2>>"$LOG_FILE" || true)"
             if [[ -n "$_preserved_model_env" ]] && command -v load_model_selector_env_from_output >/dev/null 2>&1; then
