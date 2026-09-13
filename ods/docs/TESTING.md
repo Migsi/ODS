@@ -108,7 +108,7 @@ tests/fleet-multi-distro.sh --pull
 ```
 
 The Docker and Incus distro runners take a shared host lock by default:
-`/tmp/ods-fleet-heavy.lock`. Set `ODS_FLEET_HOST_LOCK` to override it. The
+`/tmp/dream-fleet-heavy.lock`. Set `ODS_FLEET_HOST_LOCK` to override it. The
 same explicit `ODS_FLEET_HOST_LOCK` value must be configured across mixed-version
 automation because defaults from older checkouts may differ. That keeps
 distro-lab dry-runs from competing with full fleet installs for Docker/build I/O

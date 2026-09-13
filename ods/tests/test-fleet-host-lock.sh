@@ -46,8 +46,8 @@ HARNESS_HELPERS
         ' "$source_file"
         cat <<'HARNESS_RUN'
 if [[ -n "${ODS_FLEET_TEST_ROOT:-}" ]]; then
-    if [[ "$LOCK_FILE" == "/tmp/ods-fleet-heavy.lock" ]]; then
-        LOCK_FILE="$ODS_FLEET_TEST_ROOT/ods-fleet-heavy.lock"
+    if [[ "$LOCK_FILE" == "/tmp/dream-fleet-heavy.lock" ]]; then
+        LOCK_FILE="$ODS_FLEET_TEST_ROOT/dream-fleet-heavy.lock"
     fi
 fi
 
@@ -93,8 +93,8 @@ for source_file in \
             bash "$harness_file"
     )
     assert_trace "$default_trace" "9" "$script_name default lock"
-    [[ -f "$default_dir/ods-fleet-heavy.lock" ]] \
-        || fail "$script_name did not open the ODS default lock"
+    [[ -f "$default_dir/dream-fleet-heavy.lock" ]] \
+        || fail "$script_name did not open the shared Dream Fleet default lock"
 
     custom_dir="$TMP_DIR/$script_name-custom"
     custom_trace="$custom_dir/flock.log"
@@ -149,8 +149,8 @@ for source_file in \
             bash "$harness_file" --no-host-lock
     )
     [[ ! -e "$disabled_trace" ]] || fail "$script_name called flock with --no-host-lock"
-    [[ ! -e "$disabled_dir/ods-fleet-heavy.lock" ]] \
+    [[ ! -e "$disabled_dir/dream-fleet-heavy.lock" ]] \
         || fail "$script_name opened the default lock with --no-host-lock"
 done
 
-echo "[PASS] Fleet host locks honor ODS defaults and overrides"
+echo "[PASS] Fleet host locks honor shared Dream Fleet defaults and ODS overrides"
