@@ -123,9 +123,11 @@ except Exception:  # pragma: no cover - import environment dependent
     _artifact_stage_runtime_module = None
 
 try:
-    import extension_resource_reservation_runtime as _resource_reservation_runtime_module
+    import extension_resource_reservation_runtime
 except Exception:  # pragma: no cover - import environment dependent
     _resource_reservation_runtime_module = None
+else:
+    _resource_reservation_runtime_module = extension_resource_reservation_runtime
 
 _EXTENSION_TRANSACTION_STORE_PATH = (
     Path(__file__).resolve().parent.parent
@@ -198,9 +200,10 @@ _resource_reservation_runtime_data_dir: Path | None = None
 _resource_reservation_runtime_lock = threading.Lock()
 
 # General production lifecycle dispatch remains deliberately unwired.  The
-# exact ``stage`` operation selects its fixed runtime separately after lease
-# admission; every other operation remains unavailable. Tests may inject a
-# callable for the still-dormant operation contracts.
+# exact ``stage``, ``reserve:<serviceId>``, and ``release`` operations select
+# fixed host-owned runtimes after lease admission; every other operation
+# remains unavailable. Tests may inject a callable for the still-dormant
+# operation contracts.
 _extension_lifecycle_work_dispatcher = None
 
 _MODEL_MEMORY_PATH = (
@@ -6560,10 +6563,10 @@ def _get_extension_resource_reservation_runtime():
             or _resource_reservation_runtime_data_dir != DATA_DIR
         ):
             try:
+                runtime_module = _resource_reservation_runtime_module
                 _resource_reservation_runtime = (
-                    _resource_reservation_runtime_module.
-                    build_resource_reservation_runtime(
-                        data_dir=DATA_DIR,
+                    runtime_module.build_resource_reservation_runtime(
+                        data_dir=DATA_DIR
                     )
                 )
             except Exception:
@@ -7618,6 +7621,7 @@ class AgentHandler(BaseHTTPRequestHandler):
                     command.operation_key == "release"
                     or command.operation_key.startswith("reserve:")
                 ):
+                    dispatcher = None
                     res_runtime = _get_extension_resource_reservation_runtime()
                     if res_runtime is not None:
                         if command.operation_key == "release":

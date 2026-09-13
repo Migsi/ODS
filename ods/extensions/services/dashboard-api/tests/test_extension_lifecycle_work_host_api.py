@@ -289,11 +289,17 @@ def host_server(tmp_path):
 
     builtins = tmp_path / "extensions"
     users = tmp_path / "user-extensions"
-    users.mkdir()
+    builtins.mkdir(mode=0o700)
+    builtins.chmod(0o700)
+    users.mkdir(mode=0o700)
+    users.chmod(0o700)
     for service_id in ("documents", "voice", "dashboard"):
         extension = builtins / service_id
-        extension.mkdir(parents=True)
-        (extension / "manifest.yaml").write_text("service: {}\n", encoding="utf-8")
+        extension.mkdir(mode=0o700)
+        extension.chmod(0o700)
+        manifest = extension / "manifest.yaml"
+        manifest.write_text("service: {}\n", encoding="utf-8")
+        manifest.chmod(0o600)
 
     agent.AGENT_API_KEY = TOKEN
     agent.ASSISTANT_TRANSACTIONS_ENABLED = True
@@ -1237,7 +1243,6 @@ def test_reserve_selects_reserve_dispatcher_from_cached_runtime(host_server, hos
     res_runtime = agent._get_extension_resource_reservation_runtime()
     assert res_runtime is not None
     seen = []
-    original_reserve = res_runtime.reserve_dispatcher
 
     def counted_reserve(command):
         seen.append("reserve")
@@ -1461,11 +1466,10 @@ def test_missing_runtime_module_returns_failure_not_success(
     agent._resource_reservation_runtime_module = None
     agent._resource_reservation_runtime = None
 
-    # When the reservation runtime is unavailable, reserve/release must
-    # NOT succeed via a fallback generic dispatcher.
-    # Set generic dispatcher to None (production default) to ensure the
-    # reservation runtime is the only path for these operations.
-    agent._extension_lifecycle_work_dispatcher = None
+    generic_calls = []
+    agent._extension_lifecycle_work_dispatcher = (
+        lambda command: generic_calls.append(command) or EVIDENCE_HASH
+    )
 
     # Reset the receipt store for this test
     agent._lifecycle_receipt_store = MemoryReceiptStore(
@@ -1507,8 +1511,59 @@ def test_missing_runtime_module_returns_failure_not_success(
         assert result2 == {
             "error": {"code": "lifecycle-work-dispatcher-unavailable"}
         }
+        assert generic_calls == []
     finally:
         agent._resource_reservation_runtime_module = original
+
+
+@pytest.mark.parametrize(
+    "operation_key,service_ids,payload",
+    [
+        (
+            "reserve:documents",
+            ["documents"],
+            {"operation": {"serviceId": "documents"}},
+        ),
+        ("release", ["documents"], {"serviceIds": ["documents"]}),
+    ],
+)
+def test_runtime_constructor_failure_cannot_fall_back_to_generic_dispatcher(
+    host_server,
+    host_request,
+    operation_key,
+    service_ids,
+    payload,
+):
+    agent, _listener = host_server
+    grant = acquire_lease(agent, host_request)
+    generic_calls = []
+
+    class BrokenRuntimeModule:
+        @staticmethod
+        def build_resource_reservation_runtime(**_kwargs):
+            raise OSError("private-construction-detail")
+
+    agent._resource_reservation_runtime = None
+    agent._resource_reservation_runtime_data_dir = None
+    agent._resource_reservation_runtime_module = BrokenRuntimeModule
+    agent._extension_lifecycle_work_dispatcher = (
+        lambda command: generic_calls.append(command) or EVIDENCE_HASH
+    )
+    request = work_request(
+        agent._extension_lifecycle_work.REQUEST_SCHEMA,
+        lease_evidence(agent, grant),
+        operation_key=operation_key,
+        service_ids=service_ids,
+        payload=payload,
+    )
+    begin_receipt(agent, host_request, request)
+
+    status, result = host_request("/v1/extension/lifecycle-work", request)
+
+    assert status == 503
+    assert result == {"error": {"code": "lifecycle-work-dispatcher-unavailable"}}
+    assert generic_calls == []
+    assert "private-construction-detail" not in json.dumps(result)
 
 
 def test_importing_runtime_performs_no_reservation_write(host_server):
@@ -1519,14 +1574,7 @@ def test_importing_runtime_performs_no_reservation_write(host_server):
     assert res_runtime is not None
     root = res_runtime.root
 
-    # All files under the reservation root must remain empty (no writes)
-    files = list(root.rglob("*"))
-    for f in files:
-        if f.is_file():
-            content = f.read_bytes()
-            # Files may exist (lock files etc.) but must not contain
-            # reservation data from construction alone
-            assert b"reserved" not in content.lower() or len(files) == 0
+    assert list(root.iterdir()) == []
 
 
 def test_reserve_and_release_production_reachability_is_paired(

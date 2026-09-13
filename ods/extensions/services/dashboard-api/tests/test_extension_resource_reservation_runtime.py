@@ -1,4 +1,4 @@
-"""Dormant reservation runtime composition tests."""
+"""Resource reservation runtime composition and reachability tests."""
 
 from __future__ import annotations
 
