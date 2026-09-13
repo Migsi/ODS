@@ -20,7 +20,7 @@ import hashlib
 import json
 import re
 import sys
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
 from typing import Any
 
@@ -194,6 +194,37 @@ def _build_canonical_record(
     return record_payload
 
 
+def _recompute_record(record: dict[str, Any]) -> dict[str, Any]:
+    cloned = dict(record)
+    cloned["expected_containers"] = list(record["expected_containers"])
+    payload = {key: value for key, value in cloned.items() if key != "record_sha256"}
+    canonical = (
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n"
+    ).encode("utf-8")
+    cloned["record_sha256"] = hashlib.sha256(canonical).hexdigest()
+    return cloned
+
+
+def _record_bytes(record: dict[str, Any]) -> bytes:
+    return (
+        json.dumps(
+            record,
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n"
+    ).encode("utf-8")
+
+
 def _absent_snapshot() -> receipts_mod.LifecycleSnapshot:
     return receipts_mod.LifecycleSnapshot(
         transaction_id=TRANSACTION_ID,
@@ -204,22 +235,30 @@ def _absent_snapshot() -> receipts_mod.LifecycleSnapshot:
     )
 
 
-def _started_receipt() -> receipts_mod.StartedReceipt:
+def _started_receipt(
+    identity: app_id.ApplicationIdentity | None = None,
+) -> receipts_mod.StartedReceipt:
+    if identity is None:
+        identity = _get_identity()
     return receipts_mod.StartedReceipt(
-        transaction_id=TRANSACTION_ID,
-        plan_hash=PLAN_HASH,
-        operation_key=f"apply:{SERVICE_ID}",
-        request_hash="8" * 64,
-        service_ids=(SERVICE_ID,),
+        transaction_id=identity.transaction_id,
+        plan_hash=identity.plan_sha256,
+        operation_key=f"apply:{identity.service_id}",
+        request_hash=identity.request_sha256,
+        service_ids=(identity.service_id,),
         event_hash="a" * 64,
     )
 
 
-def _started_snapshot() -> receipts_mod.LifecycleSnapshot:
-    sr = _started_receipt()
+def _started_snapshot(
+    identity: app_id.ApplicationIdentity | None = None,
+) -> receipts_mod.LifecycleSnapshot:
+    if identity is None:
+        identity = _get_identity()
+    sr = _started_receipt(identity)
     return receipts_mod.LifecycleSnapshot(
-        transaction_id=TRANSACTION_ID,
-        operation_key=f"apply:{SERVICE_ID}",
+        transaction_id=identity.transaction_id,
+        operation_key=f"apply:{identity.service_id}",
         state="started",
         started_receipt=sr,
         terminal_receipt=None,
@@ -227,16 +266,19 @@ def _started_snapshot() -> receipts_mod.LifecycleSnapshot:
 
 
 def _completed_terminal(
+    identity: app_id.ApplicationIdentity | None = None,
     evidence_hash: str | None = None,
 ) -> receipts_mod.TerminalReceipt:
+    if identity is None:
+        identity = _get_identity()
     if evidence_hash is None:
-        evidence_hash = "b" * 64
+        evidence_hash = identity.identity_sha256
     return receipts_mod.TerminalReceipt(
-        transaction_id=TRANSACTION_ID,
-        plan_hash=PLAN_HASH,
-        operation_key=f"apply:{SERVICE_ID}",
-        request_hash="8" * 64,
-        service_ids=(SERVICE_ID,),
+        transaction_id=identity.transaction_id,
+        plan_hash=identity.plan_sha256,
+        operation_key=f"apply:{identity.service_id}",
+        request_hash=identity.request_sha256,
+        service_ids=(identity.service_id,),
         outcome="completed",
         evidence_hash=evidence_hash,
         started_event_hash="a" * 64,
@@ -249,23 +291,27 @@ def _completed_snapshot(
 ) -> receipts_mod.LifecycleSnapshot:
     if identity is None:
         identity = _get_identity()
-    tr = _completed_terminal(identity.identity_sha256)
+    tr = _completed_terminal(identity, identity.identity_sha256)
     return receipts_mod.LifecycleSnapshot(
-        transaction_id=TRANSACTION_ID,
-        operation_key=f"apply:{SERVICE_ID}",
+        transaction_id=identity.transaction_id,
+        operation_key=f"apply:{identity.service_id}",
         state="completed",
-        started_receipt=_started_receipt(),
+        started_receipt=_started_receipt(identity),
         terminal_receipt=tr,
     )
 
 
-def _failed_terminal() -> receipts_mod.TerminalReceipt:
+def _failed_terminal(
+    identity: app_id.ApplicationIdentity | None = None,
+) -> receipts_mod.TerminalReceipt:
+    if identity is None:
+        identity = _get_identity()
     return receipts_mod.TerminalReceipt(
-        transaction_id=TRANSACTION_ID,
-        plan_hash=PLAN_HASH,
-        operation_key=f"apply:{SERVICE_ID}",
-        request_hash="8" * 64,
-        service_ids=(SERVICE_ID,),
+        transaction_id=identity.transaction_id,
+        plan_hash=identity.plan_sha256,
+        operation_key=f"apply:{identity.service_id}",
+        request_hash=identity.request_sha256,
+        service_ids=(identity.service_id,),
         outcome="failed",
         evidence_hash="d" * 64,
         started_event_hash="a" * 64,
@@ -273,13 +319,17 @@ def _failed_terminal() -> receipts_mod.TerminalReceipt:
     )
 
 
-def _failed_snapshot() -> receipts_mod.LifecycleSnapshot:
+def _failed_snapshot(
+    identity: app_id.ApplicationIdentity | None = None,
+) -> receipts_mod.LifecycleSnapshot:
+    if identity is None:
+        identity = _get_identity()
     return receipts_mod.LifecycleSnapshot(
-        transaction_id=TRANSACTION_ID,
-        operation_key=f"apply:{SERVICE_ID}",
+        transaction_id=identity.transaction_id,
+        operation_key=f"apply:{identity.service_id}",
         state="failed",
-        started_receipt=_started_receipt(),
-        terminal_receipt=_failed_terminal(),
+        started_receipt=_started_receipt(identity),
+        terminal_receipt=_failed_terminal(identity),
     )
 
 
@@ -290,6 +340,7 @@ def _build_evidence(
     config_digest: str | None = None,
     containers: tuple[obs_mod.ContainerObservation, ...] = (),
     snapshot: receipts_mod.LifecycleSnapshot | None = None,
+    topology: str = "docker",
     docker_available: bool = True,
 ) -> obs_mod.CurrentEvidence:
     if snapshot is None:
@@ -301,6 +352,7 @@ def _build_evidence(
         active_config_digest=config_digest,
         container_observations=containers,
         receipt_snapshot=snapshot,
+        topology=topology,
         docker_available=docker_available,
     )
 
@@ -340,7 +392,7 @@ def test_applied_started_only():
         compose_digest=COMPOSE_SHA,
         config_digest=CONFIG_SHA,
         containers=containers,
-        snapshot=_started_snapshot(),
+        snapshot=_started_snapshot(identity),
     )
     result = obs_mod.observe_application(cmd, evidence)
 
@@ -408,7 +460,7 @@ def test_applied_no_compose():
         compose_digest=None,
         config_digest=CONFIG_SHA,
         containers=containers,
-        snapshot=_started_snapshot(),
+        snapshot=_started_snapshot(identity),
     )
     result = obs_mod.observe_application(cmd, evidence)
     assert result.classification == "APPLIED"
@@ -753,7 +805,7 @@ def test_completed_evidence_hash_mismatch():
         _container_observation(n) for n in CONTAINER_NAMES
     )
     # Terminal with wrong evidence_hash
-    wrong_terminal = _completed_terminal("f" * 64)
+    wrong_terminal = _completed_terminal(identity, "f" * 64)
     snapshot = receipts_mod.LifecycleSnapshot(
         transaction_id=TRANSACTION_ID,
         operation_key=f"apply:{SERVICE_ID}",
@@ -959,6 +1011,7 @@ def test_docker_available_not_bool():
         active_config_digest=None,
         container_observations=(),
         receipt_snapshot=_absent_snapshot(),
+        topology="docker",
         docker_available=1,  # int, not bool
     )
     with pytest.raises(obs_mod.ApplicationObservationError) as exc:
@@ -1298,7 +1351,7 @@ def test_applied_requires_started_receipt():
     )
     with pytest.raises(obs_mod.ApplicationObservationError) as exc:
         obs_mod.observe_application(cmd, evidence)
-    assert exc.value.code == "applied-receipt-required"
+    assert exc.value.code == "receipt-started-binding-invalid"
 
 
 def test_applied_completed_no_terminal_receipt():
@@ -1326,7 +1379,7 @@ def test_applied_completed_no_terminal_receipt():
     )
     with pytest.raises(obs_mod.ApplicationObservationError) as exc:
         obs_mod.observe_application(cmd, evidence)
-    assert exc.value.code == "completed-no-terminal-receipt"
+    assert exc.value.code == "receipt-terminal-binding-invalid"
 
 
 # ===================================================================
@@ -1363,7 +1416,7 @@ def test_record_identity_mismatch():
     )
     with pytest.raises(obs_mod.ApplicationObservationError) as exc:
         obs_mod.observe_application(cmd, evidence)
-    assert exc.value.code == "record-identity-mismatch"
+    assert exc.value.code == "record-binding-mismatch-identity_sha256"
 
 
 def test_applied_compose_should_be_absent():
@@ -1380,7 +1433,7 @@ def test_applied_compose_should_be_absent():
         compose_digest=COMPOSE_SHA,  # present but should be absent
         config_digest=CONFIG_SHA,
         containers=containers,
-        snapshot=_started_snapshot(),
+        snapshot=_started_snapshot(identity),
     )
     with pytest.raises(obs_mod.ApplicationObservationError) as exc:
         obs_mod.observe_application(cmd, evidence)
@@ -1407,3 +1460,233 @@ def test_record_empty_containers_rejected():
     with pytest.raises(obs_mod.ApplicationObservationError) as exc:
         obs_mod._validate_canonical_record(record)
     assert exc.value.code == "record-field-invalid-expected_containers"
+
+
+# ===================================================================
+# 17. Independent fail-closed counterexamples
+# ===================================================================
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("service_id", "other-service"),
+        ("version", "9.9.9"),
+        ("action", "update"),
+        ("transaction_id", "txn-" + "f" * 24),
+        ("plan_sha256", "f" * 64),
+        ("request_sha256", "f" * 64),
+        ("definition_sha256", "sha256:" + "f" * 64),
+        ("compose_sha256", "sha256:" + "f" * 64),
+        ("identity_sha256", "f" * 64),
+    ],
+)
+def test_every_active_record_identity_field_is_bound(field: str, value: str):
+    cmd = _bound_command()
+    identity = app_id.produce_application_identity(cmd)
+    record = _build_canonical_record(identity)
+    record[field] = value
+    record = _recompute_record(record)
+    evidence = _build_evidence(
+        record=record,
+        def_digest=identity.definition_sha256,
+        compose_digest=identity.compose_sha256,
+        config_digest=CONFIG_SHA,
+        containers=tuple(_container_observation(name) for name in CONTAINER_NAMES),
+        snapshot=_started_snapshot(identity),
+    )
+    with pytest.raises(obs_mod.ApplicationObservationError) as exc:
+        obs_mod.observe_application(cmd, evidence)
+    assert exc.value.code == f"record-binding-mismatch-{field}"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("transaction_id", "txn-" + "f" * 24),
+        ("plan_hash", "f" * 64),
+        ("operation_key", "apply:other-service"),
+        ("request_hash", "f" * 64),
+        ("service_ids", ("other-service",)),
+        ("event_hash", "not-a-hash"),
+    ],
+)
+def test_started_receipt_must_match_exact_command(field: str, value: Any):
+    cmd = _bound_command()
+    identity = app_id.produce_application_identity(cmd)
+    started = replace(_started_receipt(identity), **{field: value})
+    snapshot = receipts_mod.LifecycleSnapshot(
+        transaction_id=identity.transaction_id,
+        operation_key=cmd.operation_key,
+        state="started",
+        started_receipt=started,
+        terminal_receipt=None,
+    )
+    with pytest.raises(obs_mod.ApplicationObservationError) as exc:
+        obs_mod.observe_application(cmd, _build_evidence(snapshot=snapshot))
+    assert exc.value.code == "receipt-started-binding-invalid"
+
+
+def test_snapshot_path_binding_must_match_exact_command():
+    cmd = _bound_command()
+    snapshot = replace(_absent_snapshot(), operation_key="apply:other-service")
+    with pytest.raises(obs_mod.ApplicationObservationError) as exc:
+        obs_mod.observe_application(cmd, _build_evidence(snapshot=snapshot))
+    assert exc.value.code == "receipt-snapshot-binding-invalid"
+
+
+def test_snapshot_state_and_receipt_shape_must_agree():
+    cmd = _bound_command()
+    identity = app_id.produce_application_identity(cmd)
+    snapshot = receipts_mod.LifecycleSnapshot(
+        transaction_id=identity.transaction_id,
+        operation_key=cmd.operation_key,
+        state="absent",
+        started_receipt=_started_receipt(identity),
+        terminal_receipt=None,
+    )
+    with pytest.raises(obs_mod.ApplicationObservationError) as exc:
+        obs_mod.observe_application(cmd, _build_evidence(snapshot=snapshot))
+    assert exc.value.code == "receipt-snapshot-shape-invalid"
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "code"),
+    [
+        ("request_hash", "f" * 64, "receipt-terminal-binding-invalid"),
+        ("started_event_hash", "f" * 64, "receipt-terminal-chain-invalid"),
+        ("outcome", "failed", "receipt-terminal-chain-invalid"),
+        ("evidence_hash", "not-a-hash", "receipt-terminal-chain-invalid"),
+    ],
+)
+def test_terminal_receipt_chain_is_reproved(field: str, value: Any, code: str):
+    cmd = _bound_command()
+    identity = app_id.produce_application_identity(cmd)
+    terminal = replace(_completed_terminal(identity), **{field: value})
+    snapshot = receipts_mod.LifecycleSnapshot(
+        transaction_id=identity.transaction_id,
+        operation_key=cmd.operation_key,
+        state="completed",
+        started_receipt=_started_receipt(identity),
+        terminal_receipt=terminal,
+    )
+    with pytest.raises(obs_mod.ApplicationObservationError) as exc:
+        obs_mod.observe_application(cmd, _build_evidence(snapshot=snapshot))
+    assert exc.value.code == code
+
+
+def test_failed_terminal_with_current_effects_is_never_absent():
+    cmd = _bound_command()
+    identity = app_id.produce_application_identity(cmd)
+    evidence = _build_evidence(
+        record=_build_canonical_record(identity),
+        def_digest=identity.definition_sha256,
+        compose_digest=identity.compose_sha256,
+        config_digest=CONFIG_SHA,
+        containers=tuple(_container_observation(name) for name in CONTAINER_NAMES),
+        snapshot=_failed_snapshot(identity),
+    )
+    with pytest.raises(obs_mod.ApplicationObservationError) as exc:
+        obs_mod.observe_application(cmd, evidence)
+    assert exc.value.code == "applied-receipt-state-invalid"
+
+
+def test_active_record_bytes_are_canonical_and_duplicate_safe():
+    identity = _get_identity()
+    raw = obs_mod.produce_active_record(
+        identity,
+        CONFIG_SHA,
+        tuple(sorted(CONTAINER_NAMES)),
+    )
+    assert obs_mod.parse_active_record(raw) == _build_canonical_record(identity)
+    assert raw == obs_mod.produce_active_record(
+        identity,
+        CONFIG_SHA,
+        tuple(sorted(CONTAINER_NAMES)),
+    )
+
+    duplicate = raw.replace(
+        b'"action":"install"',
+        b'"action":"install","action":"install"',
+        1,
+    )
+    with pytest.raises(obs_mod.ApplicationObservationError) as exc:
+        obs_mod.parse_active_record(duplicate)
+    assert exc.value.code == "record-duplicate-key"
+
+
+def test_active_record_parser_rejects_noncanonical_and_nonbytes():
+    identity = _get_identity()
+    record = _build_canonical_record(identity)
+    pretty = (json.dumps(record, indent=2) + "\n").encode("utf-8")
+    with pytest.raises(obs_mod.ApplicationObservationError) as exc:
+        obs_mod.parse_active_record(pretty)
+    assert exc.value.code == "record-noncanonical"
+
+    with pytest.raises(obs_mod.ApplicationObservationError) as exc:
+        obs_mod.parse_active_record(bytearray(_record_bytes(record)))  # type: ignore[arg-type]
+    assert exc.value.code == "record-bytes-required"
+
+
+def test_active_record_parser_rejects_oversized_raw_input():
+    with pytest.raises(obs_mod.ApplicationObservationError) as exc:
+        obs_mod.parse_active_record(b"x" * (obs_mod.MAX_INPUT_BYTES + 1))
+    assert exc.value.code == "record-oversize"
+
+
+@pytest.mark.parametrize(
+    ("state", "health", "code"),
+    [
+        ([], "healthy", "container-state-invalid"),
+        ("running", {}, "container-health-invalid"),
+        ("not_found", "healthy", "container-state-invalid"),
+    ],
+)
+def test_container_state_and_health_type_confusion_fails_closed(
+    state: Any,
+    health: Any,
+    code: str,
+):
+    observation = obs_mod.ContainerObservation(
+        name="documents-api",
+        state=state,
+        health=health,
+        labels={},
+    )
+    with pytest.raises(obs_mod.ApplicationObservationError) as exc:
+        obs_mod.observe_application(
+            _bound_command(),
+            _build_evidence(containers=(observation,)),
+        )
+    assert exc.value.code == code
+
+
+def test_unsupported_topology_is_not_treated_as_absent():
+    with pytest.raises(obs_mod.ApplicationObservationError) as exc:
+        obs_mod.observe_application(
+            _bound_command(),
+            _build_evidence(topology="systemd"),
+        )
+    assert exc.value.code == "topology-unsupported"
+
+
+def test_validation_clones_nested_mutable_evidence():
+    identity = _get_identity()
+    record = _build_canonical_record(identity)
+    labels = app_id.identity_labels(identity)
+    evidence = _build_evidence(
+        record=record,
+        containers=(
+            obs_mod.ContainerObservation(
+                name=CONTAINER_NAMES[0],
+                state="running",
+                health="healthy",
+                labels=labels,
+            ),
+        ),
+    )
+    validated = obs_mod._validate_current_evidence(evidence)
+    record["expected_containers"].append("later-mutation")
+    labels["later"] = "mutation"
+    assert "later-mutation" not in validated.active_record["expected_containers"]
+    assert "later" not in validated.container_observations[0].labels
