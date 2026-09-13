@@ -236,8 +236,9 @@ root. Composition validates the root without creating or repairing it, caches
 only the exact `DATA_DIR` and extension-root binding, and accepts no request or
 environment override. The host lifecycle handler calls the factory only for
 the exact `stage` operation and passes both callables through the existing
-plan-bound receipt path. Every other lifecycle operation remains unavailable,
-and Dashboard execution remains `None`.
+plan-bound receipt path. Beyond stage and the paired reserve/release boundary
+described below, lifecycle operations remain unavailable. Dashboard execution
+remains `None`.
 
 The installer also provisions an owner-private
 `data/assistant-first/resource-reservations` root for the next host boundary.
