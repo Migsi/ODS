@@ -413,11 +413,12 @@ class TestApplicationRecordStore:
             "application-record-store-binding-invalid",
             lambda: self.store.snapshot(bad),
         )
-        assert str(bad) not in str(
-            store_mod.ApplicationRecordStoreError(
-                "application-record-store-binding-invalid"
+        if str(bad):
+            assert str(bad) not in str(
+                store_mod.ApplicationRecordStoreError(
+                    "application-record-store-binding-invalid"
+                )
             )
-        )
 
     def test_record_inputs_are_validated_before_root_reopen_or_temp_allocation(self):
         with mock.patch.object(store_mod, "_open_root") as opened:
@@ -557,6 +558,7 @@ class TestApplicationRecordStore:
 
     def test_oversize_snapshot_fails_before_json_parse(self):
         self.snapshot_path.write_bytes(b"x" * (store_mod.MAX_FILE_BYTES + 1))
+        self.snapshot_path.chmod(0o600)
         _assert_code("application-record-store-size", self.store.active)
 
     def test_partial_write_and_file_fsync_failure_preserve_prior_snapshot(self):
