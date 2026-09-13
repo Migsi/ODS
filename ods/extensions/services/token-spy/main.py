@@ -448,7 +448,7 @@ async def _poll_remote_agents():
             for agent in AGENT_SESSION_DIRS:
                 if agent == AGENT_NAME or agent in REMOTE_AGENTS:
                     continue  # skip agents that go through this proxy instance
-                status = _get_local_session_status(agent)
+                status = _get_local_session_status(agent, include_session_id=True)
                 if not status:
                     continue
                 chars = status.get("current_history_chars", 0)
@@ -461,8 +461,12 @@ async def _poll_remote_agents():
                 if needs_reset:
                     reason = f"tool loop ({tool_results} calls)" if tool_results >= 480 else f"history {chars:,} >= {limit:,}"
                     log.warning(f"[LOCAL-POLL] {agent}: auto-reset — {reason}")
-                    _kill_session(agent, reason=f"auto-reset ({reason})")
-                    _last_auto_reset[agent] = time.time()
+                    result = _kill_session(
+                        agent, reason=f"auto-reset ({reason})",
+                        session_id=status["_reset_session_id"],
+                    )
+                    if result.get("action") == "killed":
+                        _last_auto_reset[agent] = time.time()
                 elif chars > 0:
                     log.info(f"[LOCAL-POLL] {agent}: {chars:,} / {limit:,} chars ({chars*100//limit}%)")
         except Exception as e:
@@ -1083,7 +1087,7 @@ _last_auto_reset: dict[str, float] = {}
 
 
 
-def _get_local_session_status(agent: str) -> dict:
+def _get_local_session_status(agent: str, *, include_session_id: bool = False) -> dict:
     """Get session status for a local agent by reading JSONL files directly.
     Used for agents whose traffic doesn't pass through the token monitor proxy
     (e.g. agents using a local model via vLLM/Ollama)."""
@@ -1097,38 +1101,39 @@ def _get_local_session_status(agent: str) -> dict:
         return None
 
     largest = files[0]
-    try:
-        with open(largest) as f:
-            lines = f.readlines()
-    except Exception:
-        log.warning(f"[SESSION] Failed to read session file: {largest}")
-        return None
-
     user_turns = 0
     assistant_turns = 0
     history_chars = 0
     tool_results = 0
-    for line in lines:
-        try:
-            d = json.loads(line)
-            if d.get("type") == "message":
-                msg = d.get("message", {})
-                if isinstance(msg, str):
-                    msg = json.loads(msg)
-                role = msg.get("role", "")
-                if role == "user":
-                    user_turns += 1
-                elif role == "assistant":
-                    assistant_turns += 1
-                if role in ("toolResult", "tool") or msg.get("tool_call_id"):
-                    tool_results += 1
-                c = msg.get("content", "")
-                if isinstance(c, list):
-                    history_chars += sum(len(str(x)) for x in c)
-                elif isinstance(c, str):
-                    history_chars += len(c)
-        except (json.JSONDecodeError, KeyError, TypeError):
-            pass  # skip malformed JSONL lines
+    total_lines = 0
+    try:
+        with open(largest) as session_file:
+            for line in session_file:
+                total_lines += 1
+                try:
+                    d = json.loads(line)
+                    if d.get("type") == "message":
+                        msg = d.get("message", {})
+                        if isinstance(msg, str):
+                            msg = json.loads(msg)
+                        role = msg.get("role", "")
+                        if role == "user":
+                            user_turns += 1
+                        elif role == "assistant":
+                            assistant_turns += 1
+                        if role in ("toolResult", "tool") or msg.get("tool_call_id"):
+                            tool_results += 1
+                        c = msg.get("content", "")
+                        if isinstance(c, list):
+                            history_chars += sum(len(str(x)) for x in c)
+                        elif isinstance(c, str):
+                            history_chars += len(c)
+                except (json.JSONDecodeError, KeyError, TypeError):
+                    pass  # skip malformed JSONL lines
+
+    except (OSError, UnicodeError):
+        log.warning(f"[SESSION] Failed to read session file: {largest}")
+        return None
 
     limit = get_agent_setting(agent, "session_char_limit") or AUTO_RESET_HISTORY_CHARS
     if tool_results >= 480:
@@ -1146,7 +1151,7 @@ def _get_local_session_status(agent: str) -> dict:
     # agents whose OpenClaw gateway doesn't log user messages in the JSONL.
     turns = user_turns if user_turns > 0 else assistant_turns
 
-    return {
+    result = {
         "agent": agent,
         "current_session_turns": turns,
         "current_history_chars": history_chars,
@@ -1159,9 +1164,13 @@ def _get_local_session_status(agent: str) -> dict:
         "is_local_model": agent in LOCAL_MODEL_AGENTS,
         "tool_results": tool_results,
         "file_bytes": os.path.getsize(largest),
-        "total_lines": len(lines),
+        "total_lines": total_lines,
         "session_files": len(files),
     }
+    if include_session_id:
+        # Poller-only selection: public status responses keep their existing shape.
+        result["_reset_session_id"] = os.path.basename(largest)[:-len(".jsonl")]
+    return result
 
 
 def _get_local_accumulated_turns(agent: str) -> int:
@@ -1375,8 +1384,8 @@ def _kill_remote_session(agent: str, reason: str = "dashboard") -> dict:
         log.error(f"Remote session check failed for {agent}: {e}")
         return {"agent": agent, "action": "none", "reason": "Remote check failed"}
 
-def _kill_session(agent: str, reason: str = "manual") -> dict:
-    """Kill the largest active session for an agent. Returns result dict."""
+def _kill_session(agent: str, reason: str = "manual", *, session_id: str | None = None) -> dict:
+    """Reset the selected local session, or the largest for manual/proxy calls."""
     import subprocess
     if agent in REMOTE_AGENTS:
         return _kill_remote_session(agent, reason)
@@ -1385,16 +1394,20 @@ def _kill_session(agent: str, reason: str = "manual") -> dict:
     if not sessions_dir:
         return {"agent": agent, "action": "none", "reason": f"unknown agent: {agent}"}
 
-    result = subprocess.run(
-        ["ls", "-S", f"{sessions_dir}/"],
-        capture_output=True, text=True,
-    )
-    largest = None
-    for line in result.stdout.strip().split("\n"):
-        line = line.strip()
-        if line.endswith(".jsonl"):
-            largest = line.replace(".jsonl", "")
-            break
+    largest = session_id
+    if session_id is not None:
+        if not session_id or os.path.basename(session_id) != session_id or "\0" in session_id:
+            return {"agent": agent, "action": "none", "reason": "invalid session selection"}
+    else:
+        result = subprocess.run(
+            ["ls", "-S", f"{sessions_dir}/"],
+            capture_output=True, text=True,
+        )
+        for line in result.stdout.strip().split("\n"):
+            line = line.strip()
+            if line.endswith(".jsonl"):
+                largest = line.replace(".jsonl", "")
+                break
 
     if not largest:
         return {"agent": agent, "action": "none", "reason": "no active sessions found"}
