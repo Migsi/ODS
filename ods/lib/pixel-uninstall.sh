@@ -1128,7 +1128,8 @@ for path, maximum in (
 
 manager_root_present = extension_manager_unit.exists() or extension_manager_unit.is_symlink()
 manager_program_present = extension_manager_program.exists() or extension_manager_program.is_symlink()
-if manager_root_present != manager_program_present:
+resumable_system_partial = state in {"installing", "deactivating"}
+if manager_root_present != manager_program_present and not resumable_system_partial:
     raise SystemExit("ODS-managed Pixel extension manager system artifacts are partial")
 if state == "ready" and extension_manager_present != manager_root_present:
     raise SystemExit("ready ODS-managed Pixel extension lifecycle deployment is partial")
@@ -1137,7 +1138,7 @@ if manager_root_present and not extension_manager_present:
 
 promoter_unit_present = artifact_promoter_unit.exists() or artifact_promoter_unit.is_symlink()
 promoter_program_present = artifact_promoter_program.exists() or artifact_promoter_program.is_symlink()
-if promoter_unit_present != promoter_program_present:
+if promoter_unit_present != promoter_program_present and not resumable_system_partial:
     raise SystemExit("ODS-managed Pixel artifact promoter system artifacts are partial")
 if state == "ready" and artifact_promoter_contract_present != promoter_unit_present:
     raise SystemExit("ready ODS-managed Pixel artifact promotion deployment is partial")
@@ -1146,7 +1147,7 @@ if promoter_unit_present and not artifact_promoter_contract_present:
 
 preview_unit_present = workspace_preview_unit.exists() or workspace_preview_unit.is_symlink()
 preview_program_present = workspace_preview_program.exists() or workspace_preview_program.is_symlink()
-if preview_unit_present != preview_program_present:
+if preview_unit_present != preview_program_present and not resumable_system_partial:
     raise SystemExit("ODS-managed Pixel workspace preview system artifacts are partial")
 if state == "ready" and workspace_preview_contract_present != preview_unit_present:
     raise SystemExit("ready ODS-managed Pixel workspace preview deployment is partial")

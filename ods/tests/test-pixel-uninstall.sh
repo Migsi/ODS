@@ -956,6 +956,26 @@ else
     fail "same-source installing transition retained a stale prior contract and could not be cleaned"
 fi
 
+for partial_unit in pixel-extension-manager.service pixel-artifact-promoter.service pixel-workspace-preview.service; do
+    write_ops_fixture
+    python3 - "$HOME_DIR/.config/ods/pixel-managed.json" <<'PY'
+import json, pathlib, sys
+path = pathlib.Path(sys.argv[1])
+value = json.loads(path.read_text())
+value["state"] = "installing"
+path.write_text(json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n")
+PY
+    chmod 0600 "$HOME_DIR/.config/ods/pixel-managed.json"
+    rm -f -- "$SYSTEMD_DIR/$partial_unit"
+    if ods_pixel_uninstall_managed "$INSTALL_DIR" "$HOME_DIR"; then
+        [[ ! -e "$HOME_DIR/.config/ods/pixel-managed.json" && ! -e "$OPS_INSTALL" ]] \
+            && pass "interrupted installing Pixel $partial_unit program-only state is resumably removed" \
+            || fail "interrupted installing Pixel $partial_unit cleanup was incomplete"
+    else
+        fail "interrupted installing Pixel $partial_unit program-only state was not resumable"
+    fi
+done
+
 write_ops_fixture
 python3 - "$HOME_DIR/.config/ods/pixel-managed.json" <<'PY'
 import json, pathlib, sys
