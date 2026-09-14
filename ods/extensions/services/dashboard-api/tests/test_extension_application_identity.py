@@ -23,9 +23,9 @@ BIN_DIR = Path(__file__).resolve().parents[4] / "bin"
 if str(BIN_DIR) not in sys.path:
     sys.path.insert(0, str(BIN_DIR))
 
-import extension_application_identity as app_id
-import extension_lifecycle_plan as lifecycle_plan
-import extension_lifecycle_work as lifecycle_work
+import extension_application_identity as app_id  # noqa: E402, RUF100
+import extension_lifecycle_plan as lifecycle_plan  # noqa: E402, RUF100
+import extension_lifecycle_work as lifecycle_work  # noqa: E402, RUF100
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -162,6 +162,20 @@ def test_happy_path_produces_identity():
     # Identity is frozen
     with pytest.raises(FrozenInstanceError):
         identity.service_id = "x"  # type: ignore
+
+
+def test_produce_rejects_lone_surrogate_version_with_stable_error():
+    cmd = _bound_command()
+    material = cmd.plan_material
+    definition = replace(material.definitions[0], version="\ud800")
+    tampered = replace(
+        cmd,
+        plan_material=replace(material, definitions=(definition,)),
+    )
+
+    with pytest.raises(app_id.ApplicationIdentityError) as exc:
+        app_id.produce_application_identity(tampered)
+    assert exc.value.code == "version-required"
 
 
 def test_happy_path_identity_is_deterministic():
@@ -452,6 +466,14 @@ def test_malformed_label_invalid_transaction_id():
 def test_version_control_character_is_rejected():
     labels = _make_labels()
     labels[app_id.LABEL_NAMESPACE + ".version"] = "1.2.3\nsecret"
+    with pytest.raises(app_id.ApplicationIdentityError) as exc:
+        app_id.parse_observed_labels(labels)
+    assert exc.value.code == "label-value-invalid"
+
+
+def test_observed_lone_surrogate_version_has_stable_value_free_error():
+    labels = _make_labels()
+    labels[app_id.LABEL_NAMESPACE + ".version"] = "\udfff"
     with pytest.raises(app_id.ApplicationIdentityError) as exc:
         app_id.parse_observed_labels(labels)
     assert exc.value.code == "label-value-invalid"

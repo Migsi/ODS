@@ -871,7 +871,8 @@ def test_reserve_and_release_dispatch_are_symmetric():
         seen = []
 
         result = host_work.dispatch_lifecycle_work(
-            bound, lambda value: seen.append(value) or EVIDENCE_HASH
+            bound,
+            lambda value: seen.append(value) or EVIDENCE_HASH,  # noqa: B023
         )
 
         assert len(seen) == 1

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import json
 import os
 import sys
 from pathlib import Path
@@ -399,6 +400,23 @@ EXEC_STEPS = executor_mod.EXECUTION_STEPS
 # ── Tests ────────────────────────────────────────────────────────────────────
 
 # 1. Happy path: approved-only execution succeeds
+
+
+@pytest.mark.parametrize(
+    ("transaction_id", "plan_hash", "code"),
+    [
+        ("", "a" * 64, "invalid-transaction-id"),
+        ("txn-valid", "a" * 63, "invalid-plan-hash"),
+        ("txn-valid", "g" * 64, "invalid-plan-hash"),
+    ],
+)
+def test_execution_binding_rejects_invalid_identity(
+    transaction_id, plan_hash, code
+):
+    with pytest.raises(transactions.ValidationRejected) as caught:
+        executor_mod.ExecutionBinding(transaction_id, plan_hash)
+
+    assert caught.value.code == code
 
 def test_approved_only_execution(tmp_path):
     """Full happy path: approved → reserved → downloading → ... → committed."""
@@ -862,6 +880,46 @@ def test_observation_with_wrong_binding_requires_manual_recovery(tmp_path):
     assert "adapter-plan-hash-mismatch" in result.error
 
 
+def test_observation_with_extra_fields_fails_closed(tmp_path):
+    store = transactions.TransactionStore(tmp_path / "store")
+    envelope = build_envelope(service_ids=["notes"])
+    descriptor = create_and_approve(store, envelope)
+
+    class ExtraFieldObserver(RecordingObserver):
+        def observe(self, binding):
+            evidence = super().observe(binding)
+            evidence["host"] = "untrusted-extra"
+            return evidence
+
+    result = make_executor(store, observer=ExtraFieldObserver()).execute(
+        descriptor["transactionId"], envelope["planHash"]
+    )
+
+    assert result.final_state == "manual_recovery_required"
+    assert "invalid-observation-shape" in result.error
+
+
+def test_execute_rejects_stored_envelope_without_plan_hash_before_result(tmp_path):
+    store = transactions.TransactionStore(tmp_path / "store")
+    envelope = build_envelope(service_ids=["notes"])
+    descriptor = create_and_approve(store, envelope)
+    plan_path = (
+        tmp_path
+        / "store"
+        / "transactions"
+        / descriptor["transactionId"]
+        / "plan.json"
+    )
+    stored = json.loads(plan_path.read_text(encoding="utf-8"))
+    del stored["planHash"]
+    plan_path.write_bytes(transactions.canonical_json_bytes(stored))
+
+    with pytest.raises(transactions.IntegrityError):
+        make_executor(store).execute(
+            descriptor["transactionId"], envelope["planHash"]
+        )
+
+
 def test_noop_services_are_observed_but_never_mutated(tmp_path):
     store = transactions.TransactionStore(tmp_path / "store")
     envelope = build_envelope(service_ids=["notes", "calendar"])
@@ -1224,10 +1282,20 @@ def test_provenance_mismatch_rejection(tmp_path):
         def verify(self, plan_hash, envelope):
             return False
 
-    executor = make_executor(store, verifier=FailingVerifier())
+    lock_root = tmp_path / "locks"
+    lock_factory = operation_locks.FileServiceLockFactory(lock_root, timeout=0.1)
+    executor = make_executor(
+        store, verifier=FailingVerifier(), lock_factory=lock_factory
+    )
 
     with pytest.raises(transactions.TransitionError, match="provenance-mismatch"):
         executor.execute(descriptor["transactionId"], envelope["planHash"])
+
+    binding = executor_mod.ExecutionBinding(
+        descriptor["transactionId"], envelope["planHash"]
+    )
+    with lock_factory.lock_services(binding, ["notes"]):
+        pass
 
 
 def test_provenance_requires_literal_true(tmp_path):

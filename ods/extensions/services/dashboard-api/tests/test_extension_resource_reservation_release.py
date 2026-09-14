@@ -1536,7 +1536,6 @@ class ProductionReachabilityBoundaryTests(unittest.TestCase):
     """Keep host reachability paired without creating a second authority."""
 
     def test_host_imports_only_the_paired_runtime(self) -> None:
-        repo = Path(__file__).resolve().parents[4]
         agent_path = BIN_DIR / "ods-host-agent.py"
         agent_source = agent_path.read_text(encoding="utf-8")
         self.assertIn("extension_resource_reservation_runtime", agent_source)
