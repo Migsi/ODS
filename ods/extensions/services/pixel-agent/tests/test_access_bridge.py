@@ -132,6 +132,7 @@ class FakeBridge(bridge.SystemdAccessBridge):
         self.native_phase = self.edge_phase = "idle"
         self.nrev, self.erev = "a" * 64, "b" * 64
         self.proof = None
+        self.probe_failure = None
         self.log = []
         self.fail = None
 
@@ -152,14 +153,17 @@ class FakeBridge(bridge.SystemdAccessBridge):
     def native(self, operation=None, token=None, *, timeout=60):
         if operation:
             self.log.append("native-" + operation)
-            if self.fail == operation: raise bridge.AccessError("injected-" + operation)
+            if self.fail == operation:
+                if operation == "probe": self.probe_failure = "core-exec"
+                raise bridge.AccessError("injected-" + operation)
             if operation == "acquire":
                 if self.active: raise bridge.AccessError("busy")
                 self.native_phase = "held"
             elif operation == "release": self.native_phase = "idle"
             elif operation == "probe": self.proof = {"mode": self.mode, "executed": True, "pid": self.pid}
         return {"available": True, "phase": self.native_phase, "revision": self.nrev,
-                "pid": self.pid, "active": self.active, "proof": self.proof}
+                "pid": self.pid, "active": self.active, "proof": self.proof,
+                "probe_failure": self.probe_failure}
 
     def edge(self, operation=None, token=None, revision=None):
         if operation:
@@ -271,7 +275,8 @@ class BridgeTests(unittest.TestCase):
 
     def test_failed_probe_retains_both_gates_and_recovery_receipt(self):
         self.runtime.fail = "probe"
-        with self.assertRaises(bridge.AccessError): self.runtime.change(self.request())
+        with self.assertRaisesRegex(bridge.AccessError, "runtime-proof-core-exec"):
+            self.runtime.change(self.request())
         self.assertEqual(self.runtime.native_phase, "held")
         self.assertEqual(self.runtime.edge_phase, "held")
         self.assertEqual(self.runtime.pending()["phase"], "error")
@@ -279,13 +284,41 @@ class BridgeTests(unittest.TestCase):
         self.runtime.fail = None
         self.assertEqual(self.runtime.change(self.request("sandboxed"))["effective_mode"], "sandboxed")
 
+    def test_probe_diagnostic_is_allowlisted_and_arbitrary_value_is_not_forwarded(self):
+        self.runtime.fail = "probe"
+        self.runtime.probe_failure = "private-path-etc-shadow"
+        original = self.runtime.native
+        def native(operation=None, token=None, *, timeout=60):
+            if operation == "probe": raise bridge.AccessError("runtime-unavailable-or-busy")
+            result = original(operation, token, timeout=timeout)
+            result["probe_failure"] = "private-path-etc-shadow"
+            return result
+        with patch.object(self.runtime, "native", side_effect=native), \
+                self.assertRaisesRegex(bridge.AccessError, "runtime-unavailable-or-busy"):
+            self.runtime.change(self.request())
+        self.assertNotIn("private-path-etc-shadow", self.runtime.pending()["error"])
+
+    def test_probe_diagnostic_requires_runtime_to_remain_held(self):
+        original = self.runtime.native
+        failed = [False]
+        def native(operation=None, token=None, *, timeout=60):
+            if operation == "probe":
+                failed[0] = True
+                raise bridge.AccessError("runtime-unavailable-or-busy")
+            result = original(operation, token, timeout=timeout)
+            if failed[0]: result.update(phase="idle", probe_failure="core-exec")
+            return result
+        with patch.object(self.runtime, "native", side_effect=native), \
+                self.assertRaisesRegex(bridge.AccessError, "runtime-unavailable-or-busy"):
+            self.runtime.change(self.request())
+
     def test_pristine_safer_probe_recovery_does_not_restart_unchanged_gateway(self):
         self.runtime.fail = "probe"
         with self.assertRaises(bridge.AccessError):
             self.runtime.change(self.request("sandboxed"))
         self.assertFalse(self.runtime.managed)
         self.assertEqual(self.runtime.pending()["phase"], "error")
-        self.assertEqual(self.runtime.pending()["error"], "injected-probe")
+        self.assertEqual(self.runtime.pending()["error"], "runtime-proof-core-exec")
         self.runtime.fail = None
         restored = self.runtime.change(self.request("sandboxed"))
         self.assertTrue(restored["runtime_verified"])

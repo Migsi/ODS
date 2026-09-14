@@ -44,6 +44,16 @@ class AccessError(Exception):
         super().__init__(code)
 
 
+PROBE_FAILURES = frozenset((
+    "probe-directory-unavailable",
+    "sandbox-resolution",
+    "core-tool-construction",
+    "core-exec",
+    "core-cancellation",
+    "filesystem-boundary",
+))
+
+
 def digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
@@ -741,7 +751,21 @@ class SystemdAccessBridge:
             if ("ProtectSystem=no" not in boundary or "ProtectHome=no" not in boundary
                     or other_settings(boundary) != other_settings(baseline)):
                 raise AccessError("service-boundary-mismatch")
-        proof = self.native("probe", token)
+        try:
+            proof = self.native("probe", token)
+        except AccessError as error:
+            # The runtime deliberately exposes only a fixed proof-stage label.
+            # Preserve that bounded diagnostic across the root coordinator so
+            # live qualification can distinguish a failed proof from a busy
+            # runtime without forwarding exception text or private paths.
+            try:
+                snapshot = self.native(timeout=10)
+                failure = snapshot.get("probe_failure") if snapshot.get("phase") == "held" else None
+            except AccessError:
+                failure = None
+            if failure in PROBE_FAILURES:
+                raise AccessError("runtime-proof-" + failure) from None
+            raise error
         if proof.get("proof", {}).get("mode") != mode: raise AccessError("runtime-proof-failed")
         verified_config = self.worker()
         if verified_config.get("configured_status") != mode:
