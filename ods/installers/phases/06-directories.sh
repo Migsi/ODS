@@ -128,6 +128,11 @@ else
                 fi
                 _phase06_step "rebind-pixel-source"
                 ai "Retiring the verified prior Pixel source before applying the new immutable source..."
+                if ! _ods_pixel_restore_transition_source \
+                    "$_phase06_pixel_owner" "$_phase06_pixel_home" "$PIXEL_SOURCE_REF" >/dev/null; then
+                    error "Could not reconstruct the exact prior Pixel source needed for safe retirement."
+                    return 1
+                fi
                 if ! ods_pixel_uninstall_managed "$INSTALL_DIR" "$_phase06_pixel_home"; then
                     error "Could not safely retire the prior ODS-managed Pixel source."
                     return 1

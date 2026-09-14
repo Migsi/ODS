@@ -196,10 +196,7 @@ finally:
 PY
 }
 
-# Return 0 when an exact ODS-managed Pixel deployment must be retired before
-# the installer copies newer source over the installed ownership evidence.
-# Return 1 when no transition is needed, and 2 for unsafe or ambiguous state.
-_ods_pixel_source_transition_required() {
+_ods_pixel_source_transition_state() {
     local owner="$1" home="$2" requested_ref="$3" marker
     marker="$home/.config/ods/pixel-managed.json"
     [[ "$requested_ref" =~ ^[0-9a-f]{40}$ ]] || return 2
@@ -219,16 +216,46 @@ if (not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)
 value = json.loads(path.read_text(encoding="utf-8"))
 source_ref = value.get("pixel_source_ref")
 requested_ref = sys.argv[3]
+state = value.get("state")
 if (value.get("schema_version") != 2 or value.get("manager") != "ods"
         or value.get("initial_active_state") != "absent"
         or value.get("install_dir") != sys.argv[2]
-        or value.get("state") not in {"ready", "installing", "deactivating"}
+        or state not in {"ready", "installing", "deactivating"}
         or not isinstance(source_ref, str)
         or not re.fullmatch(r"[0-9a-f]{40}", source_ref)
         or value.get("requested_source_ref") not in {None, source_ref, requested_ref}):
     raise SystemExit(2)
-raise SystemExit(0 if value.get("state") == "deactivating" or source_ref != requested_ref else 1)
+print(f"{state}|{source_ref}")
 PY
+}
+
+# Return 0 when an exact ODS-managed Pixel deployment must be retired before
+# the installer copies newer source over the installed ownership evidence.
+# Return 1 when no transition is needed, and 2 for unsafe or ambiguous state.
+_ods_pixel_source_transition_required() {
+    local owner="$1" home="$2" requested_ref="$3" transition state source_ref
+    transition="$(_ods_pixel_source_transition_state "$owner" "$home" "$requested_ref")" || return 2
+    IFS='|' read -r state source_ref <<<"$transition"
+    [[ "$state" =~ ^(ready|installing|deactivating)$ \
+        && "$source_ref" =~ ^[0-9a-f]{40}$ ]] || return 2
+    [[ "$state" == deactivating || "$source_ref" != "$requested_ref" ]]
+}
+
+# A failed test or operator cleanup can remove the ODS checkout while leaving
+# an interrupted, marker-bound Pixel host deployment. Reconstruct only the
+# marker's exact prior commit from the currently authorized source repository
+# before the uninstaller uses those bytes to authenticate privileged artifacts.
+_ods_pixel_restore_transition_source() {
+    local owner="$1" home="$2" requested_ref="$3" transition state source_ref source_root
+    transition="$(_ods_pixel_source_transition_state "$owner" "$home" "$requested_ref")" || return 1
+    IFS='|' read -r state source_ref <<<"$transition"
+    [[ "$state" =~ ^(ready|installing|deactivating)$ \
+        && "$source_ref" =~ ^[0-9a-f]{40}$ \
+        && ( "$state" == deactivating || "$source_ref" != "$requested_ref" ) ]] || return 1
+    source_root="${INSTALL_DIR:?}/data/pixel/source-$source_ref"
+    local PIXEL_SOURCE_REF="$source_ref"
+    _ods_pixel_source_checkout "$owner" "$home" "$source_root" >/dev/null || return 1
+    printf '%s\n' "$source_root"
 }
 
 _ods_pixel_record_verified_state() {

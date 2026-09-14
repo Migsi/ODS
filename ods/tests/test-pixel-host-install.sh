@@ -768,6 +768,34 @@ check test "$(git -C "$source_checkout" rev-parse HEAD)" = "$PIXEL_SOURCE_REF"
 check test -z "$(git -C "$source_checkout" status --porcelain)"
 check test "$(stat -c '%a' "$source_checkout/pixel")" = 644
 
+previous_source_ref="$PIXEL_SOURCE_REF"
+printf '%s\n' next >"$source_fixture/next"
+git -C "$source_fixture" add next
+git -C "$source_fixture" -c user.name=test -c user.email=test@example.invalid commit -qm next
+requested_source_ref="$(git -C "$source_fixture" rev-parse HEAD)"
+transition_home="$TEST_ROOT/transition-home"
+transition_install="$TEST_ROOT/transition-ods"
+mkdir -p "$transition_home/.config/ods" "$transition_install"
+cat >"$transition_home/.config/ods/pixel-managed.json" <<JSON
+{"schema_version":2,"manager":"ods","state":"installing","initial_active_state":"absent","install_dir":"$transition_install","pixel_source_ref":"$previous_source_ref"}
+JSON
+chmod 0600 "$transition_home/.config/ods/pixel-managed.json"
+if (
+    INSTALL_DIR="$transition_install"
+    PIXEL_SOURCE_URL="$source_fixture"
+    PIXEL_SOURCE_REF="$requested_source_ref"
+    restored="$(_ods_pixel_restore_transition_source \
+        "$owner" "$transition_home" "$requested_source_ref")"
+    [[ "$restored" == "$transition_install/data/pixel/source-$previous_source_ref" \
+        && "$(git -C "$restored" rev-parse HEAD)" == "$previous_source_ref" \
+        && -z "$(git -C "$restored" status --porcelain)" \
+        && "$PIXEL_SOURCE_REF" == "$requested_source_ref" ]]
+); then
+    pass "missing prior Pixel validation source is reconstructed from the authorized exact history"
+else
+    fail "missing prior Pixel validation source was not reconstructed safely"
+fi
+
 sudo_mask_probe="$TEST_ROOT/sudo-mask-probe"
 if (
     ods_sudo_available() { return 0; }
@@ -2396,6 +2424,10 @@ assert phase.index(handoff) < phase.index("PIXEL_SOURCE_URL=$(dotenv_quote")
 preflight = phase.index("_phase06_step \"preflight-pixel-source\"")
 checkout = phase.index("if ! _ods_pixel_source_checkout", preflight)
 assert phase.index(handoff) < preflight < checkout < phase.index("PIXEL_SOURCE_URL=$(dotenv_quote")
+rebind = phase.index("_phase06_step \"rebind-pixel-source\"")
+restore = phase.index("_ods_pixel_restore_transition_source", rebind)
+retire = phase.index("ods_pixel_uninstall_managed", restore)
+assert rebind < restore < retire < preflight
 assert "Pixel source is unavailable. Configure authorized Git access" in phase
 assert "PIXEL_SOURCE_REF \"1cb3a8a7cb58fd467fe7d0ce37057208724d6ddb\"" in phase
 assert "PIXEL_GATEWAY_PORT_VALUE=\"$(_env_get_explicit_first PIXEL_GATEWAY_PORT \"18789\")\"" in phase
