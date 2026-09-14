@@ -29,14 +29,15 @@ def _wait_for_stop(stop_event: threading.Event, timeout: float) -> bool:
 
 
 def _positive_seconds(value: object, *, code: str) -> float:
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, (int, float))
-        or not math.isfinite(value)
-        or value <= 0
-    ):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ExtensionLeaseError(code) from None
-    return float(value)
+    try:
+        seconds = float(value)
+    except (OverflowError, TypeError, ValueError):
+        raise ExtensionLeaseError(code) from None
+    if not math.isfinite(seconds) or seconds <= 0:
+        raise ExtensionLeaseError(code) from None
+    return seconds
 
 
 class LeaseRenewer:
