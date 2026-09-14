@@ -163,8 +163,17 @@ test('existing held management channel survives drained config invalidation, not
 test('invalid idle owner cannot gain a new management hold', async () => {
   const f = fixture(), owner = f.register(); changeBinding(f);
   assert.equal((await owner.readControlStatus()).available, false);
-  await assert.rejects(owner.acquireTransition('a'.repeat(64), 'b'.repeat(64)));
+  const failure = await owner.acquireTransition('a'.repeat(64), 'b'.repeat(64)).catch(error => error);
+  assert.equal(owner.classifyTransitionError(failure), 'managed-transition-invalid-owner');
   assert.equal(f.access.status().phase, 'idle'); await owner.shutdown();
+});
+
+test('only registry-created transition errors expose bounded classifications', async () => {
+  const f = fixture(), owner = f.register(); f.hold();
+  const failure = await owner.acquireTransition('b'.repeat(64), 'b'.repeat(64)).catch(error => error);
+  assert.equal(owner.classifyTransitionError(failure), 'managed-transition-access-owner-refused');
+  assert.equal(owner.classifyTransitionError(new Error('managed-transition-invalid-owner')), null);
+  await owner.shutdown();
 });
 
 test('held management recovery waits for the same routing shutdown to settle', async () => {

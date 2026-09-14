@@ -52,6 +52,11 @@ PROBE_FAILURES = frozenset((
     "core-cancellation",
     "filesystem-boundary",
 ))
+RUNTIME_TRANSITION_FAILURES = frozenset((
+    "managed-transition-busy",
+    "managed-transition-invalid-owner",
+    "managed-transition-access-owner-refused",
+))
 
 
 def digest(value):
@@ -453,8 +458,15 @@ class SystemdAccessBridge:
             connection.request("POST" if body is not None else "GET", path, body=body,
                                headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"})
             with connection.getresponse() as response:
-                if response.status != 200: raise AccessError("runtime-unavailable-or-busy")
                 raw = response.read(65537)
+                if response.status != 200:
+                    if len(raw) <= 65536:
+                        try:
+                            failure = protocol.decode_frame(raw.decode("utf-8") + "\n", 65537).get("error")
+                        except (AttributeError, ValueError, UnicodeError):
+                            failure = None
+                        if failure in RUNTIME_TRANSITION_FAILURES: raise AccessError(failure)
+                    raise AccessError("runtime-unavailable-or-busy")
             if expired.is_set() or time.monotonic() >= deadline:
                 raise AccessError("runtime-operation-timeout")
             if len(raw) > 65536: raise ValueError()
