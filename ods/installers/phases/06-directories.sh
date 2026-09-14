@@ -685,7 +685,7 @@ Fix with: sudo chown -R \$(id -u):\$(id -g) $INSTALL_DIR/config $INSTALL_DIR/dat
             error "Existing PIXEL_INGRESS_GID is invalid"
 
         PIXEL_SOURCE_URL_VALUE="$(_env_get_explicit_first PIXEL_SOURCE_URL "https://github.com/Osmantic/Pixel.git")"
-        PIXEL_SOURCE_REF_VALUE="$(_env_get_explicit_first PIXEL_SOURCE_REF "1cb3a8a7cb58fd467fe7d0ce37057208724d6ddb")"
+        PIXEL_SOURCE_REF_VALUE="$(_env_get_explicit_first PIXEL_SOURCE_REF "b33730436baf5d98bf58f7d57c090318fe19f433")"
         PIXEL_GATEWAY_PORT_VALUE="$(_env_get_explicit_first PIXEL_GATEWAY_PORT "18789")"
         PIXEL_PREVIEW_PORT_VALUE="$(_env_get_explicit_first PIXEL_PREVIEW_PORT "9437")"
         [[ "$PIXEL_GATEWAY_PORT_VALUE" =~ ^[1-9][0-9]{0,4}$ \

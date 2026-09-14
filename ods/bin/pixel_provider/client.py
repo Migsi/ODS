@@ -23,7 +23,7 @@ from .connection import normalize_connection
 from .connection_transport import probe_connection
 from .store import MAX_BYTES, StoreError, decode_document
 
-PIXEL_COMMIT = '1cb3a8a7cb58fd467fe7d0ce37057208724d6ddb'
+PIXEL_COMMIT = 'b33730436baf5d98bf58f7d57c090318fe19f433'
 # Preparation follows the current paired installer. Loading must not rewrite or
 # invalidate clients prepared with an earlier supported renderer. These exact
 # receipt identities do not certify custody of an owner's writable source tree.
