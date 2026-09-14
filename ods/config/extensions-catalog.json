@@ -1,7 +1,7 @@
 {
-  "generated_at": "2026-09-14T19:50:32Z",
+  "generated_at": "2026-09-14T20:10:53Z",
   "schema_version": "1.0.0",
-  "catalog_revision": "314d17669613f54da80fbefb30ebc0978a8a86337bf0944f547b2d615acc4fdd",
+  "catalog_revision": "22905c395b3cea350f54af9c543a93c9ec3d9d692a6fb0fed39624c4ef274b7e",
   "extensions": [
     {
       "id": "aider",
@@ -4261,7 +4261,7 @@
           "minimum": "2.0.0",
           "maximum": null
         },
-        "definitionSha256": "sha256:0c1bd5e94c498bbb09cce5caf43edf59ac2944e707663afc30b2009237704392",
+        "definitionSha256": "sha256:7b2bdcfceb5871a0f107b8fe1c2b44441e10d78367cdc1f0eb0d9a6ac15ed384",
         "composeSha256": "sha256:aebfd89f6e5ca09f515e8db5be200b772b9c597a5d6cee5352910a39651971b4",
         "definitionSource": "builtin",
         "composeFile": "compose.yaml",
@@ -4288,8 +4288,11 @@
             "amd",
             "apple",
             "cpu",
+            "intel",
+            "jetson",
             "none",
-            "nvidia"
+            "nvidia",
+            "sycl"
           ],
           "minDriverVersion": null
         },
@@ -4360,7 +4363,7 @@
         },
         "lifecycle": {
           "healthChecks": [
-            "http:/healthz"
+            "/healthz"
           ],
           "readiness": [
             "healthy"

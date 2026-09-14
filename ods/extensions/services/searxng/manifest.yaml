@@ -36,7 +36,7 @@ service:
       platforms: [linux]
       architectures: [amd64, arm64]
       container_runtimes: [docker]
-      gpu_backends: [amd, nvidia, apple, cpu, none]
+      gpu_backends: [amd, nvidia, apple, cpu, intel, sycl, jetson, none]
       min_driver_version: null
     estimates:
       download_bytes: 97736439
@@ -83,7 +83,7 @@ service:
           download_bytes: 97736439
       builds: []
     lifecycle:
-      health_checks: ["http:/healthz"]
+      health_checks: ["/healthz"]
       readiness: [healthy]
       setup_hook: null
       migration_hook: null

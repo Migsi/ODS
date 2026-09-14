@@ -232,31 +232,44 @@ def test_bundled_searxng_v2_is_the_deterministic_web_search_provider() -> None:
         "compose_file": "compose.yaml",
     }
 
-    for backend in ("amd", "nvidia", "apple", "cpu", "none"):
-        state = copy.deepcopy(HOST_STATE)
-        state["gpuBackend"] = backend
-        state_revision = hashlib.sha256(
-            planner.canonical_json_bytes(state)
-        ).hexdigest()
-        result = build(
-            [record],
-            requested_capabilities=["web-search@1"],
-            observed_state=state,
-            observed_state_revision=state_revision,
-        )
+    backends = (
+        "amd",
+        "nvidia",
+        "apple",
+        "cpu",
+        "intel",
+        "sycl",
+        "jetson",
+        "none",
+    )
+    for architecture in ("amd64", "arm64"):
+        for backend in backends:
+            state = copy.deepcopy(HOST_STATE)
+            state["architecture"] = architecture
+            state["gpuBackend"] = backend
+            state_revision = hashlib.sha256(
+                planner.canonical_json_bytes(state)
+            ).hexdigest()
+            result = build(
+                [record],
+                requested_capabilities=["web-search@1"],
+                observed_state=state,
+                observed_state_revision=state_revision,
+            )
 
-        assert result["plan"]["selectedServices"] == ["searxng"]
-        assert result["plan"]["operations"] == [
-            {"serviceId": "searxng", "action": "install"}
-        ]
-        definition = result["plan"]["definitions"][0]
-        assert definition["manifestSchemaVersion"] == "ods.services.v2"
-        assert definition["artifacts"]["images"][0]["digest"] == (
-            "sha256:754a07a64e926a1fc0a8a30cd7a07d08278188f0ef6143e38ad0b22ea8599c55"
-        )
-        assert result["plan"]["requiredConfigKeys"] == []
-        assert result["plan"]["requiredSecretKeys"] == ["SEARXNG_SECRET"]
-        assert result["plan"]["warnings"] == []
+            assert result["plan"]["selectedServices"] == ["searxng"]
+            assert result["plan"]["operations"] == [
+                {"serviceId": "searxng", "action": "install"}
+            ]
+            definition = result["plan"]["definitions"][0]
+            assert definition["manifestSchemaVersion"] == "ods.services.v2"
+            assert definition["artifacts"]["images"][0]["digest"] == (
+                "sha256:754a07a64e926a1fc0a8a30cd7a07d08278188f0ef6143e38ad0b22ea8599c55"
+            )
+            assert definition["lifecycle"]["healthChecks"] == ["/healthz"]
+            assert result["plan"]["requiredConfigKeys"] == []
+            assert result["plan"]["requiredSecretKeys"] == ["SEARXNG_SECRET"]
+            assert result["plan"]["warnings"] == []
 
 
 def test_utf8_is_unescaped_and_has_one_trailing_lf() -> None:
