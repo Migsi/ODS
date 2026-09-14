@@ -2122,7 +2122,7 @@ cmd_update() {
         fi
     elif [[ -x "$INSTALL_DIR/ods-backup.sh" ]]; then
         log "Creating pre-update backup (${_snap_label})..."
-        if ! "$INSTALL_DIR/ods-backup.sh" "$_snap_label"; then
+        if ! "$INSTALL_DIR/ods-backup.sh" --type user-data --description "$_snap_label"; then
             warn "Pre-update backup failed; proceeding without safety net."
         fi
     else

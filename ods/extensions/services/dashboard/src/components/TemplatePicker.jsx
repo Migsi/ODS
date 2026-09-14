@@ -238,7 +238,7 @@ export function TemplatePreview({ template, onClose, onApplied }) {
 
             {changes.already_enabled?.length > 0 && (
               <div>
-                <h4 className="text-xs font-medium text-theme-text-muted uppercase tracking-wider mb-1.5">Already running</h4>
+                <h4 className="text-xs font-medium text-theme-text-muted uppercase tracking-wider mb-1.5">Already available</h4>
                 <div className="flex flex-wrap gap-1.5">
                   {changes.already_enabled.map(svc => (
                     <span key={svc} className="text-xs px-2 py-1 rounded bg-green-500/10 text-green-400 border border-green-500/20">
@@ -290,7 +290,7 @@ export function TemplatePreview({ template, onClose, onApplied }) {
               <p className="text-sm text-green-400">Template applied — check extension cards for installation progress</p>
             )}
             {applied === 'already_active' && (
-              <p className="text-sm text-green-400">All services in this template are already active</p>
+              <p className="text-sm text-green-400">All services in this template are already available</p>
             )}
             {applied === 'restart_required' && (
               <>

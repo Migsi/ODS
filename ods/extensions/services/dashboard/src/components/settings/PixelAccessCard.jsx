@@ -10,10 +10,16 @@ export default function PixelAccessCard({ showHeading = true }) {
   const [confirmed, setConfirmed] = useState(false)
   const [stale, setStale] = useState(true)
   const inspection = useRef(0)
+  const pendingInspection = useRef(null)
   const mutation = useRef(false)
-  const refresh = useCallback(async ({forChange = false, preserveError = false} = {}) => {
+  const refresh = useCallback(async ({forChange = false, preserveError = false, background = false} = {}) => {
     if (mutation.current && !forChange) return
+    // Host inspections can take up to 30 seconds. A five-second poll must
+    // not supersede a still-running read, including its response body.
+    // Explicit refreshes retain their existing latest-request precedence.
+    if (background && pendingInspection.current !== null) return
     const version = ++inspection.current
+    pendingInspection.current = version
     setStale(true)
     try {
       const response = await fetch('/api/pixel/access-mode')
@@ -25,11 +31,12 @@ export default function PixelAccessCard({ showHeading = true }) {
       if (!preserveError) setError('')
       return value
     } catch { if (version === inspection.current) setError('Pixel access status is unavailable. No effective mode has been verified.') }
+    finally { if (pendingInspection.current === version) pendingInspection.current = null }
   }, [])
-  useEffect(() => { void refresh(); return () => { inspection.current++ } }, [refresh])
+  useEffect(() => { void refresh(); return () => { inspection.current++; pendingInspection.current = null } }, [refresh])
   useEffect(() => {
     if (!status?.pending && !status?.busy) return undefined
-    const timer = setInterval(() => { void refresh() }, 5000)
+    const timer = setInterval(() => { void refresh({background: true}) }, 5000)
     return () => clearInterval(timer)
   }, [status?.pending, status?.busy, refresh])
 

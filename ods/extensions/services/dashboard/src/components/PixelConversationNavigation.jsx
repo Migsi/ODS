@@ -17,8 +17,18 @@ export default function PixelConversationNavigation({ collapsed }) {
 
   const dialog = useRef(null)
   const trigger = useRef(null)
-  useEffect(() => { if (pending) dialog.current?.showModal() }, [pending])
-  function closeDelete() { dialog.current?.close(); setPending(null); setDeleteError(''); trigger.current?.focus() }
+  const newTask = useRef(null)
+  useEffect(() => {
+    if (pending) dialog.current?.showModal()
+    else if (trigger.current) {
+      // Restore after React removes the deleted row. Focusing its opener
+      // before that commit would leave keyboard users on the document body.
+      const target = trigger.current.isConnected ? trigger.current : newTask.current
+      trigger.current = null
+      target?.focus()
+    }
+  }, [pending])
+  function closeDelete() { dialog.current?.close(); setPending(null); setDeleteError('') }
   function confirmDelete() {
     window.dispatchEvent(new CustomEvent(DELETE_EVENT, {detail:{chatId:pending.chatId, complete:error => {
       if (error) setDeleteError(error)
@@ -35,7 +45,7 @@ export default function PixelConversationNavigation({ collapsed }) {
     window.addEventListener('storage', refresh)
     return () => { window.removeEventListener(LIBRARY_EVENT, refresh); window.removeEventListener('storage', refresh) }
   }, [])
-  if (collapsed) return <button className="pixel-nav-item" aria-label="New task" title="New task" onClick={() => window.dispatchEvent(new Event('ods:pixel-new-task'))}><Plus size={16}/></button>
+  if (collapsed) return <button ref={newTask} className="pixel-nav-item" aria-label="New task" title="New task" onClick={() => window.dispatchEvent(new Event('ods:pixel-new-task'))}><Plus size={16}/></button>
   const labeled = chats.map(chat => ({chat, labels:conversationLabels(chat.chatId)}))
   const visible = labeled.filter(item => item.labels.archived === showArchived)
   const pinned = visible.filter(item => item.labels.pinned).map(item => item.chat)
@@ -57,7 +67,7 @@ export default function PixelConversationNavigation({ collapsed }) {
       {deleteError && <p role="alert">{deleteError}</p>}
       <footer><button autoFocus onClick={closeDelete}>Cancel</button><button onClick={confirmDelete}>Delete chat</button></footer>
     </dialog>
-    <button className="pixel-nav-item" onClick={() => window.dispatchEvent(new Event('ods:pixel-new-task'))}><Plus size={16}/><span>New task</span></button>
+    <button ref={newTask} className="pixel-nav-item" onClick={() => window.dispatchEvent(new Event('ods:pixel-new-task'))}><Plus size={16}/><span>New task</span></button>
     <button ref={archiveToggle} className="pixel-nav-item" type="button" aria-pressed={showArchived} onClick={() => setShowArchived(value => !value)}>{showArchived ? 'Show active conversations' : `Archived (${labeled.filter(item => item.labels.archived).length})`}</button>
     <div className="pixel-original-sections">
       {pinned.length > 0 && <details className="rail-section" open><summary>Pinned{chevron}</summary>{rows(pinned, '')}</details>}

@@ -99,7 +99,9 @@ export function createPerplexicaResearchTool(deps = {}) {
     parameters: {
       type: "object", additionalProperties: false, required: ["query"],
       properties: {
-        query: { type: "string", minLength: 1, maxLength: 16000, description: "Research question, scope, and desired source checks. Include public URLs when useful." },
+        // Keep the execution limit below; encoding it as maxLength creates a
+        // repetition that llama.cpp rejects before the tool can be called.
+        query: { type: "string", minLength: 1, description: "Research question, scope, and desired source checks, at most 16000 characters. Include public URLs when useful." },
         mode: { type: "string", enum: ["speed", "balanced"], description: "speed for focused research (default); balanced for broader investigation." },
       },
     },

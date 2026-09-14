@@ -140,17 +140,18 @@ collect_backups() {
     COLLECTED_BACKUPS=()
     local entry base
     while IFS= read -r -d '' entry; do
-        base=$(basename "$entry")
-        # Prefix may span multiple hyphen-separated segments (e.g.
-        # `dashboard-my-name-`): the host agent's BACKUP_ID_RE
-        # (`^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`) accepts hyphenated labels, so
-        # match the prefix as one allowed label. This also preserves consecutive
-        # hyphens accepted by BACKUP_ID_RE instead of interpreting every
-        # hyphen as a mandatory non-empty segment. The trailing timestamp
-        # anchor still keeps unrelated operator files out of retention.
-        [[ "$base" =~ ^([A-Za-z0-9_][A-Za-z0-9_-]*-)?[0-9]{8}-[0-9]{6}(\.tar\.gz)?$ ]] || continue
-        COLLECTED_BACKUPS+=("$entry")
-    done < <(find "$BACKUP_ROOT" -maxdepth 1 \( -type d -o -name "*.tar.gz" \) -print0 2>/dev/null | sort -z -r)
+        COLLECTED_BACKUPS+=("${entry#*$'\t'}")
+    done < <(
+        while IFS= read -r -d '' entry; do
+            base=$(basename "$entry")
+            # Keep the existing ID shapes, including multi-segment labels.
+            [[ "$base" =~ ^([A-Za-z0-9_][A-Za-z0-9_-]*-)?([0-9]{8}-[0-9]{6})(\.tar\.gz)?$ ]] || continue
+            # Sort by the embedded creation timestamp before the optional
+            # label. NUL records preserve whitespace in the backup root.
+            printf '%s\t%s\0' "${BASH_REMATCH[2]}" "$entry"
+        done < <(find "$BACKUP_ROOT" -maxdepth 1 \( -type d -o -name "*.tar.gz" \) -print0 2>/dev/null) \
+            | LC_ALL=C sort -z -r
+    )
 }
 
 # Show usage

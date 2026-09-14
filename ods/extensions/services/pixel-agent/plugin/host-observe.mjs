@@ -477,7 +477,9 @@ export function createHostCommandProposeTool({
       additionalProperties: false,
       required: ["command"],
       properties: {
-        command: { type: "string", minLength: 1, maxLength: 16_384 },
+        // normalizedCommand enforces both limits before publishing a proposal.
+        // A maxLength this large cannot compile in llama.cpp's GBNF parser.
+        command: { type: "string", minLength: 1, description: "Owner-requested command, at most 16384 characters and 16384 UTF-8 bytes." },
       },
     },
     execute: async (_toolCallId, params) => {

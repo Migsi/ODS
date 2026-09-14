@@ -65,8 +65,18 @@ def parse_dotenv(path: Path) -> dict[str, str]:
         key = key.strip()
         if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
             continue
+        # Match the literal inline-comment rules used by lib/safe-env.sh.
+        # Enabling shlex comments globally would also cut URL fragments and
+        # other unquoted hashes that are part of the model contract.
+        raw_value = raw_value.strip()
+        if raw_value.startswith(("'", '"')):
+            comment = re.match(r"""^("(?:\\.|[^"\\])*"|'[^']*')\s+#""", raw_value)
+            if comment:
+                raw_value = comment.group(1)
+        else:
+            raw_value = raw_value.split(" #", 1)[0].rstrip()
         try:
-            parsed = shlex.split(raw_value.strip(), comments=False, posix=True)
+            parsed = shlex.split(raw_value, comments=False, posix=True)
         except ValueError:
             continue
         if len(parsed) <= 1:

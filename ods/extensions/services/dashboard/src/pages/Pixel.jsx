@@ -441,7 +441,12 @@ function retainedResult(events) {
 
 function loadStoredChat(selected) {
   try {
-    const stored = selected || JSON.parse(globalThis.localStorage?.getItem(CHAT_STORAGE_KEY) || 'null')
+    let stored = selected || JSON.parse(globalThis.localStorage?.getItem(CHAT_STORAGE_KEY) || 'null')
+    if (!selected && stored?.schema === 1 && SAFE_CHAT_ID.test(stored.chatId || '') && stored.persistenceVersion !== 2) {
+      // Older clients committed the library before the active pointer. Restore
+      // that authority before autosave can migrate an older pointer over it.
+      stored = readConversations().find(chat => chat.chatId === stored.chatId) || stored
+    }
     if (
       stored?.schema !== 1
       || !SAFE_CHAT_ID.test(stored.chatId || '')

@@ -30,12 +30,16 @@ function DiffLines({rows, path}) {
     start = end
   }
   const rendered = []
+  let lastOldLine = null, lastNewLine = null
   return <PixelCodeLines source={`${rows.map(row => row.text).join('\n')}\n`} language={fileLanguage(path)} renderLine={(content, index) => {
     const row = rows[index]
     if (!row) return null
-    const previous = rows[index - 1]
-    // Supplied hunks may omit unknown context. Never call those gaps unchanged.
-    const gap = previous && ((row.oldLine !== null && previous.oldLine !== null && row.oldLine > previous.oldLine + 1) || (row.newLine !== null && previous.newLine !== null && row.newLine > previous.newLine + 1))
+    // Additions have no old coordinate and removals have no new coordinate.
+    // Keep each side's last position across those rows so omitted context stays visible.
+    const gap = (row.oldLine !== null && lastOldLine !== null && row.oldLine > lastOldLine + 1)
+      || (row.newLine !== null && lastNewLine !== null && row.newLine > lastNewLine + 1)
+    if (row.oldLine !== null) lastOldLine = row.oldLine
+    if (row.newLine !== null) lastNewLine = row.newLine
     const line = <span key={index} className={`artifact-diff-line ${row.type === 'add' ? 'added' : row.type === 'remove' ? 'removed' : 'context'}`} data-line={row.type === 'remove' ? row.oldLine : row.newLine}><span className="code-line-content">{content}{row.noFinalNewline && <span className="diff-eof-marker" title="No newline at end of file"> ↵̸</span>}{index < rows.length - 1 ? '\n' : ''}</span></span>
     rendered[index] = line
     const fold = [...folds].find(([start,end]) => index >= start && index < end)

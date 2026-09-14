@@ -155,6 +155,7 @@ test: ## Run unit and contract tests
 	@echo "=== backup integrity and restore round-trip ==="
 	@bash tests/test-backup-integrity.sh
 	@bash tests/test-backup-restore-roundtrip.sh
+	@python3 tests/test-rsync-transfer-failures.py
 	@echo ""
 	@echo "=== bootstrap-upgrade spawn closes inherited FDs ==="
 	@bash tests/test-bootstrap-upgrade-close-inherited-fds.sh

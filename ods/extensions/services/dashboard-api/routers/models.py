@@ -1026,13 +1026,23 @@ async def _hf_repo_details(repo_id: str) -> dict[str, Any]:
 def _hf_local_filename(repo_id: str, remote_filename: str, revision: str) -> str:
     repo_slug = re.sub(r"[^A-Za-z0-9._-]+", "-", repo_id).strip("-._")
     basename = Path(remote_filename).name
-    stem = re.sub(r"[^A-Za-z0-9._-]+", "-", Path(basename).stem).strip("-._")
+    split = _HF_SPLIT_GGUF_RE.fullmatch(basename)
+    stem = split.group("prefix") if split else Path(basename).stem
+    stem = re.sub(r"[^A-Za-z0-9._-]+", "-", stem).strip("-._")
+    suffix = ".gguf"
+    identity = remote_filename
+    if split:
+        # llama.cpp derives sibling paths from a shared prefix followed by
+        # -00001-of-00002.gguf. Keep the digest common to the complete set and
+        # before that suffix, including when long names must be shortened.
+        suffix = f"-{split.group('part')}-of-{split.group('total')}.gguf"
+        identity = Path(remote_filename).with_name(f"{split.group('prefix')}-of-{split.group('total')}.gguf").as_posix()
     digest = hashlib.sha256(
-        f"{repo_id}\n{revision}\n{remote_filename}".encode("utf-8")
+        f"{repo_id}\n{revision}\n{identity}".encode("utf-8")
     ).hexdigest()[:8]
-    filename = f"hf-{repo_slug}-{stem}-{digest}.gguf"
+    filename = f"hf-{repo_slug}-{stem}-{digest}{suffix}"
     if len(filename) > 220:
-        filename = f"hf-{repo_slug[:60]}-{stem[:120]}-{digest}.gguf"
+        filename = f"hf-{repo_slug[:60]}-{stem[:120]}-{digest}{suffix}"
     return filename
 
 
