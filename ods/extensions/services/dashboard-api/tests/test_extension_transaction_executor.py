@@ -7,6 +7,7 @@ recording fake adapter / verifier / lock factory / observer.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import sys
 from pathlib import Path
@@ -438,6 +439,46 @@ def test_observation_with_wrong_binding_requires_manual_recovery(tmp_path):
 
     assert result.final_state == "manual_recovery_required"
     assert "adapter-plan-hash-mismatch" in result.error
+
+
+def test_observation_with_extra_fields_fails_closed(tmp_path):
+    store = transactions.TransactionStore(tmp_path / "store")
+    envelope = build_envelope(service_ids=["notes"])
+    descriptor = create_and_approve(store, envelope)
+
+    class ExtraFieldObserver(RecordingObserver):
+        def observe(self, binding):
+            evidence = super().observe(binding)
+            evidence["host"] = "untrusted-extra"
+            return evidence
+
+    result = make_executor(store, observer=ExtraFieldObserver()).execute(
+        descriptor["transactionId"], envelope["planHash"]
+    )
+
+    assert result.final_state == "manual_recovery_required"
+    assert "invalid-observation-shape" in result.error
+
+
+def test_execute_rejects_stored_envelope_without_plan_hash_before_result(tmp_path):
+    store = transactions.TransactionStore(tmp_path / "store")
+    envelope = build_envelope(service_ids=["notes"])
+    descriptor = create_and_approve(store, envelope)
+    plan_path = (
+        tmp_path
+        / "store"
+        / "transactions"
+        / descriptor["transactionId"]
+        / "plan.json"
+    )
+    stored = json.loads(plan_path.read_text(encoding="utf-8"))
+    del stored["planHash"]
+    plan_path.write_bytes(transactions.canonical_json_bytes(stored))
+
+    with pytest.raises(transactions.IntegrityError):
+        make_executor(store).execute(
+            descriptor["transactionId"], envelope["planHash"]
+        )
 
 
 def test_noop_services_are_observed_but_never_mutated(tmp_path):
