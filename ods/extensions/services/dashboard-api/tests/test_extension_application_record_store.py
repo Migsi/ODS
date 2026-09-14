@@ -439,6 +439,12 @@ class TestApplicationRecordStore:
             )
         opened.assert_not_called()
 
+    def test_lock_failure_is_stable_and_value_free(self):
+        with mock.patch.object(
+            store_mod.fcntl, "flock", side_effect=OSError("injected-secret")
+        ):
+            _assert_code("application-record-store-lock", self.store.active)
+
     def test_invalid_candidate_is_rejected_before_temp_allocation(self):
         beta = _record_dict("beta")
         alpha = _record_dict("alpha")
@@ -560,6 +566,16 @@ class TestApplicationRecordStore:
         self.snapshot_path.write_bytes(b"x" * (store_mod.MAX_FILE_BYTES + 1))
         self.snapshot_path.chmod(0o600)
         _assert_code("application-record-store-size", self.store.active)
+
+    def test_bounded_read_accepts_exact_file_limit_without_blocking(self):
+        limit_path = self.root / "limit"
+        limit_path.write_bytes(b"x" * store_mod.MAX_FILE_BYTES)
+        descriptor = os.open(limit_path, store_mod._file_read_flags())
+        try:
+            raw = store_mod._read_all(descriptor, store_mod.MAX_FILE_BYTES)
+        finally:
+            os.close(descriptor)
+        assert len(raw) == store_mod.MAX_FILE_BYTES
 
     def test_partial_write_and_file_fsync_failure_preserve_prior_snapshot(self):
         self._publish()
