@@ -8,7 +8,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 fail() { echo "[FAIL] $*"; exit 1; }
 pass() { echo "[PASS] $*"; }
 
-for required in git jq tar; do
+for required in git jq; do
     command -v "$required" >/dev/null 2>&1 || fail "$required is required"
 done
 command -v python3 >/dev/null 2>&1 || command -v python >/dev/null 2>&1 \
@@ -61,9 +61,19 @@ parser.add_argument("--candidate-revision", required=True)
 args = parser.parse_args()
 
 candidate = Path(args.candidate_dir)
-marker = (candidate / "candidate-marker.txt").read_text(encoding="utf-8").strip()
+manifest = json.loads((candidate / "manifest.json").read_text(encoding="utf-8"))
+marker = manifest["ods_version"]
 with open(os.environ["PREFLIGHT_LOG"], "a", encoding="utf-8") as handle:
-    handle.write(json.dumps({"revision": args.candidate_revision, "marker": marker}) + "\n")
+    handle.write(
+        json.dumps(
+            {
+                "revision": args.candidate_revision,
+                "marker": marker,
+                "archiveProbe": manifest.get("archive_probe"),
+            }
+        )
+        + "\n"
+    )
 with open(os.environ["UPDATE_EVENT_LOG"], "a", encoding="utf-8") as handle:
     handle.write("preflight\n")
 
@@ -123,13 +133,16 @@ done
 git -C "$TMP/beta/repository" checkout -q -b public-beta --track origin/public-beta
 
 cat > "$SEED/ods/manifest.json" <<'EOF'
-{"ods_version":"1.1.0","release":{"version":"1.1.0"}}
+{"ods_version":"1.1.0","release":{"version":"1.1.0"},"archive_probe":"$Format:%H$"}
 EOF
 cat > "$SEED/ods/config/extensions-catalog.json" <<'EOF'
 {"catalog_revision":"candidate","extensions":[]}
 EOF
 printf '%s\n' candidate > "$SEED/ods/candidate-marker.txt"
-git -C "$SEED" add ods
+cat > "$SEED/.gitattributes" <<'EOF'
+ods/manifest.json export-subst
+EOF
+git -C "$SEED" add ods .gitattributes
 git -C "$SEED" commit -q -m "candidate"
 CANDIDATE_REVISION=$(git -C "$SEED" rev-parse HEAD)
 git -C "$SEED" push -q origin main
@@ -241,7 +254,7 @@ for status in 10 11 12 42; do
         || fail "preflight status $status reached snapshot or Docker mutation"
     [[ "$(jq -r '.revision' "$TMP/$name/preflight.log")" == "$CANDIDATE_REVISION" ]] \
         || fail "preflight status $status was not bound to the exact candidate"
-    [[ "$(jq -r '.marker' "$TMP/$name/preflight.log")" == candidate ]] \
+    [[ "$(jq -r '.marker' "$TMP/$name/preflight.log")" == 1.1.0 ]] \
         || fail "preflight status $status did not inspect the candidate tree"
     if find "$TMP/$name/runtime-tmp" -mindepth 1 -maxdepth 1 \
         -type d -name 'ods-update-candidate.*' | grep -q .; then
@@ -251,16 +264,24 @@ done
 pass "all non-ready preflight states fail before installed checkout and runtime mutation"
 
 prepare_runtime_state beta assistant-first
+[[ "$(git -C "$TMP/beta/repository/ods" rev-parse \
+    --abbrev-ref --symbolic-full-name '@{upstream}')" == origin/public-beta ]] \
+    || fail "public-beta fixture lost its configured upstream"
 run_update beta 0
 [[ "$RUN_STATUS" -eq 0 ]] || {
     cat "$TMP/beta/update.out"
     fail "configured public-beta upstream update failed"
 }
-[[ "$(git -C "$TMP/beta/repository/ods" rev-parse HEAD)" == "$BETA_REVISION" ]] \
-    || fail "configured public-beta checkout crossed to the main branch"
+beta_actual_revision=$(git -C "$TMP/beta/repository/ods" rev-parse HEAD)
+if [[ "$beta_actual_revision" != "$BETA_REVISION" ]]; then
+    printf 'expected public-beta revision: %s\n' "$BETA_REVISION"
+    printf 'actual installed revision: %s\n' "$beta_actual_revision"
+    cat "$TMP/beta/update.out"
+    fail "configured public-beta checkout crossed to the main branch"
+fi
 [[ "$(jq -r '.revision' "$TMP/beta/preflight.log")" == "$BETA_REVISION" ]] \
     || fail "public-beta preflight was not bound to its configured upstream"
-[[ "$(jq -r '.marker' "$TMP/beta/preflight.log")" == public-beta-candidate ]] \
+[[ "$(jq -r '.marker' "$TMP/beta/preflight.log")" == 1.0.5 ]] \
     || fail "public-beta update inspected the wrong candidate subtree"
 pass "configured public-beta checkouts remain on their exact upstream channel"
 
@@ -298,6 +319,10 @@ set -e
 }
 [[ "$(git -C "$ready_install" rev-parse HEAD)" == "$CANDIDATE_REVISION" ]] \
     || fail "ready update did not apply the preflighted exact candidate"
+[[ "$(jq -r '.marker' "$TMP/ready/preflight.log")" == 1.1.0 ]] \
+    || fail "ready update did not inspect the exact candidate manifest blob"
+[[ "$(jq -r '.archiveProbe' "$TMP/ready/preflight.log")" == '$Format:%H$' ]] \
+    || fail "candidate attributes transformed the bytes assessed by preflight"
 ready_first=$(sed -n '1p' "$TMP/ready/events.log" | tr -d '\r')
 ready_second=$(sed -n '2p' "$TMP/ready/events.log" | tr -d '\r')
 [[ "$ready_first" == preflight && "$ready_second" == snapshot ]] \

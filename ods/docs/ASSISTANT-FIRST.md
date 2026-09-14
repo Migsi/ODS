@@ -93,12 +93,13 @@ or core update. For Assistant First source checkouts, `ods-update.sh update`
 fetches the configured `origin/*` upstream branch into a private disposable Git
 repository. An unconfigured or detached checkout falls back to `main`, then
 `master`; a configured branch never silently crosses channels. The updater
-materializes only the installed source subtree,
+materializes the assessed manifest and catalog from their exact Git blob bytes,
 runs this gate against the exact fetched object, and stops before a rollback
 snapshot, installed Git-object import, checkout, migration, image, or service
 change unless the result is ready. A ready candidate is imported from the
 disposable repository after the snapshot and applied with a verified
-fast-forward; there is no second network fetch that could change the candidate.
+fast-forward; there is no archive substitution or second network fetch that
+could change the assessed candidate bytes.
 Full, Core, and Custom retain their established source-update path.
 
 A result requiring extension changes still stops for a separately generated and
