@@ -361,6 +361,7 @@ if not isinstance(sys.argv[8], str) or not isinstance(sys.argv[9], str):
 value["state"] = sys.argv[6]
 value["pixel_source_ref"] = sys.argv[4]
 value.pop("requested_source_ref", None)
+value.pop("requested_contract_sha256", None)
 value["contract_sha256"] = sys.argv[5]
 value["configuration_sha256"] = hashlib.sha256(b"ods-pixel-openclaw-v1\0" + canonical_config).hexdigest()
 value["active_release_version"] = version
@@ -2520,9 +2521,11 @@ PY
 }
 
 _ods_pixel_mark_installing() {
-    local owner="$1" home="$2" marker
+    local owner="$1" home="$2" requested_contract_sha256="${3:-}" marker
+    [[ -z "$requested_contract_sha256" || "$requested_contract_sha256" =~ ^[0-9a-f]{64}$ ]] || return 1
     marker="$home/.config/ods/pixel-managed.json"
-    ods_pixel_run_as_owner "$owner" "$home" python3 - "$marker" "${INSTALL_DIR:?}" "${PIXEL_SOURCE_REF:?}" <<'PY'
+    ods_pixel_run_as_owner "$owner" "$home" python3 - "$marker" "${INSTALL_DIR:?}" \
+        "${PIXEL_SOURCE_REF:?}" "$requested_contract_sha256" <<'PY'
 import json, os, pathlib, stat, sys, tempfile
 
 path = pathlib.Path(sys.argv[1])
@@ -2538,7 +2541,10 @@ value["state"] = "installing"
 if all(key in value for key in (
         "active_release_version", "release_identity_sha256", "install_manifest_sha256",
         "sandbox_image", "sandbox_image_id")):
+    if len(sys.argv[4]) != 64 or any(character not in "0123456789abcdef" for character in sys.argv[4]):
+        raise SystemExit("active Pixel transition requires the exact requested contract")
     value["requested_source_ref"] = sys.argv[3]
+    value["requested_contract_sha256"] = sys.argv[4]
 else:
     value["pixel_source_ref"] = sys.argv[3]
 fd, temporary = tempfile.mkstemp(prefix=".pixel-managed.", dir=path.parent)
@@ -4585,7 +4591,7 @@ ods_pixel_install_default_agent() {
     if _ods_pixel_verified_source_matches "$owner" "$home"; then
         same_verified_source=true
     fi
-    _ods_pixel_mark_installing "$owner" "$home" || return 1
+    _ods_pixel_mark_installing "$owner" "$home" "$contract_sha256" || return 1
     if ! _ods_pixel_enable_chat_endpoint "$owner" "$home"; then
         ai_bad "Could not enable Pixel's loopback chat endpoint."
         return 1

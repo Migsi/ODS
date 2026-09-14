@@ -251,8 +251,9 @@ if _ods_pixel_verified_source_matches "$owner" "$home"; then
 else
     pass "mismatched verified Pixel source rejected for extension refresh"
 fi
-_ods_pixel_mark_installing "$owner" "$home"
-check python3 -c 'import json,sys; v=json.load(open(sys.argv[1])); assert v["pixel_source_ref"] == sys.argv[2] and v["requested_source_ref"] == sys.argv[3] and v["state"] == "installing"' "$marker" "$original_source_ref" "$PIXEL_SOURCE_REF"
+requested_contract_sha256="$(printf 'd%.0s' {1..64})"
+_ods_pixel_mark_installing "$owner" "$home" "$requested_contract_sha256"
+check python3 -c 'import json,sys; v=json.load(open(sys.argv[1])); assert v["pixel_source_ref"] == sys.argv[2] and v["requested_source_ref"] == sys.argv[3] and v["requested_contract_sha256"] == sys.argv[4] and v["state"] == "installing"' "$marker" "$original_source_ref" "$PIXEL_SOURCE_REF" "$requested_contract_sha256"
 PIXEL_SOURCE_REF="$original_source_ref"
 chmod 0644 "$marker"
 if _ods_pixel_managed_contract_matches "$owner" "$home" "$contract_sha256"; then
@@ -288,10 +289,11 @@ else
 fi
 rm -f "$candidate"
 check _ods_pixel_assert_managed_state "$owner" "$home"
-_ods_pixel_mark_installing "$owner" "$home"
-check python3 -c 'import json,sys; v=json.load(open(sys.argv[1])); assert v["state"] == "installing" and v["pixel_source_ref"] == sys.argv[2] and v["contract_sha256"] == sys.argv[3]' "$marker" "$PIXEL_SOURCE_REF" "$contract_sha256"
+_ods_pixel_mark_installing "$owner" "$home" "$contract_sha256"
+check python3 -c 'import json,sys; v=json.load(open(sys.argv[1])); assert v["state"] == "installing" and v["pixel_source_ref"] == sys.argv[2] and v["contract_sha256"] == sys.argv[3] and v["requested_contract_sha256"] == sys.argv[3]' "$marker" "$PIXEL_SOURCE_REF" "$contract_sha256"
 check _ods_pixel_managed_contract_matches "$owner" "$home" "$contract_sha256"
 _ods_pixel_mark_ready "$owner" "$home" "$contract_sha256" "$pixel_root"
+check python3 -c 'import json,sys; v=json.load(open(sys.argv[1])); assert v["state"] == "ready" and "requested_source_ref" not in v and "requested_contract_sha256" not in v' "$marker"
 
 ambient_home="$TEST_ROOT/ambient-home"
 mkdir -p "$ambient_home/.openclaw"

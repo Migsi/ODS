@@ -925,6 +925,70 @@ PY
 done
 
 write_ops_fixture
+python3 - "$HOME_DIR/.config/ods/pixel-managed.json" <<'PY'
+import json, pathlib, sys
+path = pathlib.Path(sys.argv[1])
+value = json.loads(path.read_text())
+value["state"] = "installing"
+value["requested_source_ref"] = value["pixel_source_ref"]
+value["requested_contract_sha256"] = value["contract_sha256"]
+value["contract_sha256"] = "f" * 64
+path.write_text(json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n")
+PY
+chmod 0600 "$HOME_DIR/.config/ods/pixel-managed.json"
+if ods_pixel_uninstall_managed "$INSTALL_DIR" "$HOME_DIR"; then
+    [[ ! -e "$HOME_DIR/.config/ods/pixel-managed.json" \
+        && ! -e "$OPS_INSTALL" && ! -e "$LIBEXEC_DIR/ods-pixel-system-observe.py" ]] \
+        && pass "same-source installing transition accepts its complete replacement v9 contract after full root-byte validation" \
+        || fail "same-source installing transition cleanup was incomplete"
+else
+    fail "same-source installing transition retained a stale prior contract and could not be cleaned"
+fi
+
+write_ops_fixture
+python3 - "$HOME_DIR/.config/ods/pixel-managed.json" <<'PY'
+import json, pathlib, sys
+path = pathlib.Path(sys.argv[1])
+value = json.loads(path.read_text())
+value["state"] = "installing"
+value["requested_source_ref"] = value["pixel_source_ref"]
+value["contract_sha256"] = "f" * 64
+path.write_text(json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n")
+PY
+chmod 0600 "$HOME_DIR/.config/ods/pixel-managed.json"
+if ods_pixel_uninstall_managed "$INSTALL_DIR" "$HOME_DIR"; then
+    fail "same-source installing transition accepted an unbound replacement contract"
+else
+    [[ -e "$HOME_DIR/.config/ods/pixel-managed.json" \
+        && -e "$OPS_INSTALL" && -e "$LIBEXEC_DIR/ods-pixel-system-observe.py" \
+        && ! -s "$SYSTEMCTL_LOG" && ! -s "$DOCKER_LOG" ]] \
+        && pass "same-source installing transition requires its requested contract binding" \
+        || fail "unbound same-source installing transition caused partial mutation"
+fi
+
+write_ops_fixture
+python3 - "$HOME_DIR/.config/ods/pixel-managed.json" <<'PY'
+import json, pathlib, sys
+path = pathlib.Path(sys.argv[1])
+value = json.loads(path.read_text())
+value["state"] = "installing"
+value["requested_source_ref"] = "e" * 40
+value["requested_contract_sha256"] = value["contract_sha256"]
+value["contract_sha256"] = "f" * 64
+path.write_text(json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n")
+PY
+chmod 0600 "$HOME_DIR/.config/ods/pixel-managed.json"
+if ods_pixel_uninstall_managed "$INSTALL_DIR" "$HOME_DIR"; then
+    fail "cross-source installing transition accepted an unbound replacement contract"
+else
+    [[ -e "$HOME_DIR/.config/ods/pixel-managed.json" \
+        && -e "$OPS_INSTALL" && -e "$LIBEXEC_DIR/ods-pixel-system-observe.py" \
+        && ! -s "$SYSTEMCTL_LOG" && ! -s "$DOCKER_LOG" ]] \
+        && pass "cross-source installing transition remains bound to its prior verified contract" \
+        || fail "cross-source installing transition caused partial mutation"
+fi
+
+write_ops_fixture
 rm -f -- "$LIBEXEC_DIR/ods-pixel-system-observe.py"
 legacy_contract_sha256="$(python3 - \
     "$HOME_DIR/.config/pixel-deployment/onboarding.json" \

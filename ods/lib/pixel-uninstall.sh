@@ -895,6 +895,7 @@ if workspace_preview_contract_present:
     regular(workspace_preview_owner_unit, owner_uid, 2 * 1024 * 1024, private=True)
 system_observer_source_present = system_observer_source.exists() or system_observer_source.is_symlink()
 system_observer_contract_present = False
+current_v9_digest = None
 if system_observer_source_present:
     observer_info = regular(system_observer_source, owner_uid, 2 * 1024 * 1024)
     if observer_info.st_mode & 0o022:
@@ -1058,11 +1059,30 @@ if onboarding.exists():
                                         ):
                                             v9.update(len(payload).to_bytes(8, "big"))
                                             v9.update(payload)
-                                        v9_digest = v9.hexdigest()
-                                        accepted_contracts.add(v9_digest)
-                                        system_observer_contract_present = value.get("contract_sha256") == v9_digest
-        if value.get("contract_sha256") not in accepted_contracts:
+                                        current_v9_digest = v9.hexdigest()
+                                        accepted_contracts.add(current_v9_digest)
+                                        system_observer_contract_present = value.get("contract_sha256") == current_v9_digest
+        # During an exact-source reinstall, _ods_pixel_mark_installing records
+        # the requested source and contract but intentionally keeps the
+        # previously verified contract until the replacement route completes
+        # its live proof.
+        # A failure in that interval leaves the new complete v9 owner contract
+        # beside the old marker digest. Permit that one bounded transition to
+        # reach the remaining root-artifact validation below. Every system
+        # byte still has to match this exact source before any service stops or
+        # file removal; ready deployments and cross-source upgrades remain
+        # bound to the marker digest.
+        transitional_contract = (
+            state == "installing"
+            and value.get("schema_version") == 2
+            and value.get("requested_source_ref") == source_ref
+            and current_v9_digest is not None
+            and value.get("requested_contract_sha256") == current_v9_digest
+        )
+        if value.get("contract_sha256") not in accepted_contracts and not transitional_contract:
             raise SystemExit("Pixel onboarding drifted from its ODS marker")
+        if transitional_contract:
+            system_observer_contract_present = True
 elif cleanup[0] != "none" and state != "deactivating":
     raise SystemExit("ODS-managed active Pixel onboarding contract is missing")
 
