@@ -4335,6 +4335,41 @@ def test_serialized_extension_operation_reports_unsafe_guard_without_details(
     assert "secret-path-or-inode-detail" not in str(raised.value.detail)
 
 
+def test_transaction_factory_contends_with_single_extension_route_lock(
+    tmp_path, monkeypatch,
+):
+    """Composite and legacy mutations must use the exact same service lock inode."""
+    from extension_operation_locks import (
+        FileServiceLockFactory,
+        ServiceLockTimeout,
+        operation_lock_directory,
+    )
+    from extension_transaction_executor import ExecutionBinding
+    from routers import extensions as ext_module
+
+    data_dir = tmp_path / "data"
+    data_dir.mkdir(mode=0o700)
+    if os.name == "posix":
+        data_dir.chmod(0o700)
+    operation_lock_directory(data_dir)
+    primary_lock = data_dir / ".extensions-lock"
+    monkeypatch.setattr(
+        ext_module,
+        "_extensions_lock_candidates",
+        lambda: [primary_lock],
+    )
+    factory = FileServiceLockFactory(data_dir, timeout=0.05)
+    binding = ExecutionBinding("txn-cross-path", "a" * 64)
+
+    with ext_module._extension_operation_lock("aider"):
+        with pytest.raises(ServiceLockTimeout):
+            with factory.lock_services(binding, ["aider"]):
+                pytest.fail("transaction lock bypassed the route lock")
+
+    with factory.lock_services(binding, ["aider"]):
+        pass
+
+
 class TestUpdateHardening(TestUpdateExtension):
     """Gates and sync-echo hardening for the transactional update path."""
 
