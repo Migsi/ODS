@@ -303,6 +303,14 @@ test('only the existing access owner can identify a probe; untrusted hints canno
   await owner.finish({}, forged); await owner.shutdown();
 });
 
+test('only the existing access owner can bypass command admission for its held proof', async () => {
+  const f = fixture(), owner = f.register(); f.hold();
+  assert.equal(owner.beforeCommandRun({commandId: 'proof-command'}, {runId: 'trusted-probe'}), undefined);
+  assert.deepEqual(owner.beforeCommandRun({commandId: 'forged-command'}, {runId: 'ordinary', probe: true}),
+    {action: 'block', reason: 'ods-command-admission-unavailable'});
+  assert.equal(f.runs.size, 0); await owner.shutdown();
+});
+
 test('foreign session or mutated original context cannot release a selected run', async () => {
   const f = fixture(), owner = f.register(), ctx = context(); await owner.select({}, ctx); await owner.admit({}, ctx);
   ctx.sessionId = randomUUID(); await assert.rejects(owner.finish({}, ctx));

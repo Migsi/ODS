@@ -226,6 +226,13 @@ export function createManagedRuntimeRegistry({environment = process.env,
             return {status: 'active', binding: JSON.parse(current.binding)};
           },
           beforeCommandRun(event, context) {
+            // The access proof deliberately executes two fixed, internally
+            // prepared commands while admission is held.  Feeding those
+            // commands back through ordinary managed command admission makes
+            // the shared access owner reject its own proof.  Only the access
+            // runtime can identify this unforgeable run; user-supplied hints
+            // do not bypass command accounting.
+            if (probe(context)) return undefined;
             if (!valid()) return {action: 'block', reason: 'ods-command-admission-unavailable'};
             return commands.beforeCommandRun(event, context);
           },
