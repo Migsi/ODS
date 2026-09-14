@@ -820,16 +820,17 @@ def _publish_bundle(root_descriptor: int, final_name: str, bundle: bytes) -> boo
                 _fail("artifact-stage-integrity")
         _unlink_authentic_temp(root_descriptor, temp_name, sealed)
         temp_info = None
-        if published:
-            try:
+        try:
+            if published:
                 final_info = os.stat(
                     final_name,
                     dir_fd=root_descriptor,
                     follow_symlinks=False,
                 )
-                os.fsync(root_descriptor)
-            except OSError:
-                _fail("artifact-stage-io-error")
+            os.fsync(root_descriptor)
+        except OSError:
+            _fail("artifact-stage-io-error")
+        if published:
             if (
                 (final_info.st_dev, final_info.st_ino)
                 != (sealed.st_dev, sealed.st_ino)

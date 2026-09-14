@@ -132,6 +132,22 @@ grep -q "Another ODS update or extension mutation is in progress" \
 ! grep -q "Starting ODS update" "$TMP/update-busy.out" \
     || fail "contended update entered the mutation window"
 
+set +e
+HOME="$TMP/home" ODS_MUTATION_GUARD_TIMEOUT=0.05 \
+    ODS_MUTATION_GUARD_FD=1 timeout 15 \
+    bash "$INSTALL/ods-update.sh" update \
+    >"$TMP/update-spoofed-fd.out" 2>&1
+spoofed_fd_status=$?
+set -e
+[[ "$spoofed_fd_status" -eq 75 ]] \
+    || fail "spoofed guard descriptor returned $spoofed_fd_status instead of 75"
+grep -q "Another ODS update or extension mutation is in progress" \
+    "$TMP/update-spoofed-fd.out" \
+    || fail "spoofed guard descriptor bypassed canonical contention"
+! grep -q "Starting ODS update" "$TMP/update-spoofed-fd.out" \
+    || fail "spoofed guard descriptor entered the mutation window"
+pass "an arbitrary open descriptor cannot impersonate the mutation guard"
+
 run_update_command rollback "$TMP/rollback-busy.out"
 [[ "$RUN_STATUS" -eq 75 ]] \
     || fail "rollback contention returned $RUN_STATUS instead of 75"
