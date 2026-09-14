@@ -3292,11 +3292,6 @@ manager_socket = manager_socket_root + "/extension-manager.sock"
 manager_program = "/opt/pixel-ops-broker/ods-extension-manager.py"
 system_observer = "/usr/local/libexec/ods-pixel-system-observe.py"
 system_observer_source = pathlib.Path(system_observer_source_raw)
-python_binary = str(pathlib.Path("/usr/bin/python3").resolve(strict=True))
-hostname_binary = "/usr/bin/hostname"
-uname_binary = "/usr/bin/uname"
-cat_binary = "/usr/bin/cat"
-uptime_binary = "/usr/bin/uptime"
 
 def required_binary(name):
     candidate = shutil.which(name)
@@ -3304,6 +3299,11 @@ def required_binary(name):
         raise SystemExit(f"required Pixel Operations executable is unavailable: {name}")
     return str(pathlib.Path(candidate).resolve(strict=True))
 
+python_binary = str(pathlib.Path("/usr/bin/python3").resolve(strict=True))
+hostname_binary = required_binary("hostname")
+uname_binary = required_binary("uname")
+cat_binary = required_binary("cat")
+uptime_binary = required_binary("uptime")
 ps_binary = required_binary("ps")
 systemctl_binary = required_binary("systemctl")
 lscpu_binary = required_binary("lscpu")
