@@ -284,6 +284,16 @@ class BridgeTests(unittest.TestCase):
         self.runtime.fail = None
         self.assertEqual(self.runtime.change(self.request("sandboxed"))["effective_mode"], "sandboxed")
 
+    def test_native_admission_failure_identifies_bounded_transition_stage(self):
+        original = self.runtime.native
+        def native(operation=None, token=None, *, timeout=60):
+            if operation == "acquire": raise bridge.AccessError("runtime-unavailable-or-busy")
+            return original(operation, token, timeout=timeout)
+        with patch.object(self.runtime, "native", side_effect=native), \
+                self.assertRaisesRegex(bridge.AccessError, "runtime-initial-acquire-unavailable"):
+            self.runtime.change(self.request())
+        self.assertEqual(self.runtime.pending()["error"], "runtime-initial-acquire-unavailable")
+
     def test_probe_diagnostic_is_allowlisted_and_arbitrary_value_is_not_forwarded(self):
         self.runtime.fail = "probe"
         self.runtime.probe_failure = "private-path-etc-shadow"

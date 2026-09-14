@@ -1039,14 +1039,22 @@ class SystemdAccessBridge:
                 atomic_json(self.state / "transition.json", pending)
             token = pending["token"]
             try:
+                def native_at(stage, operation=None, operation_token=None, *, timeout=60):
+                    try:
+                        return self.native(operation, operation_token, timeout=timeout)
+                    except AccessError as error:
+                        if error.code == "runtime-unavailable-or-busy":
+                            raise AccessError("runtime-" + stage + "-unavailable") from None
+                        raise
+
                 if snapshot["_edge"]["phase"] == "idle": pending["edge_revision"] = snapshot["_edge"]["revision"]
                 edge = self.edge("recover" if snapshot["_edge"]["phase"] == "interrupted" else "acquire", token, pending["edge_revision"])
                 pending["edge_revision"] = edge["revision"]
                 atomic_json(self.state / "transition.json", pending)
-                self.native("acquire", token)
+                native_at("initial-acquire", "acquire", token)
 
                 def busy():
-                    native = self.native("acquire", token)
+                    native = native_at("drain-acquire", "acquire", token)
                     edge = self.edge("acquire", token, pending["edge_revision"])
                     return native.get("phase") != "held" or edge.get("phase") != "held" or bool(native.get("active") or edge.get("streams"))
 
@@ -1056,7 +1064,7 @@ class SystemdAccessBridge:
                     agents = [agent for agent in current.get("agents", {}).get("list", []) if agent.get("id") == "pixel"]
                     if len(agents) != 1: return False
                     self.dropin_for(agents[0].get("sandbox", {}).get("mode") == "off" and agents[0].get("tools", {}).get("exec", {}).get("host") == "gateway")
-                    old_pid = self.native()["pid"]
+                    old_pid = native_at("pre-restart-read")["pid"]
                     self.command(["systemctl", "restart", UNIT], timeout=60)
                     # The pinned runtime can take over a minute to initialize
                     # on a supported guest. Observe the same restarted process;
@@ -1064,10 +1072,10 @@ class SystemdAccessBridge:
                     deadline = time.monotonic() + 120
                     while time.monotonic() < deadline:
                         try:
-                            status = self.native(timeout=min(3, max(0.1, deadline - time.monotonic())))
+                            status = native_at("restart-read", timeout=min(3, max(0.1, deadline - time.monotonic())))
                             if status.get("available") and status.get("pid") != old_pid and status.get("phase") == "held":
                                 # The same durable token must still own the restarted gateway.
-                                self.native("acquire", token, timeout=3)
+                                native_at("restart-acquire", "acquire", token, timeout=3)
                                 health = self.http(self.native_origin, "/health", self.native_key, timeout=3)
                                 return health.get("ok") is True
                         except AccessError: pass
@@ -1095,7 +1103,7 @@ class SystemdAccessBridge:
                 self.verify_held_mode(token, request["mode"])
                 pending["phase"] = "releasing"
                 atomic_json(self.state / "transition.json", pending)
-                self.native("release", token)
+                native_at("release", "release", token)
                 pending["phase"] = "native-released"
                 atomic_json(self.state / "transition.json", pending)
                 self.edge("release", token, pending["edge_revision"])
