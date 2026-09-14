@@ -36,6 +36,8 @@ OPS_POLICY="$OPS_POLICY_DIR/policy.json"
 OPS_INSTALL="$TEST_ROOT/opt/pixel-ops-broker"
 OPS_STATE="$TEST_ROOT/var/lib/pixel-ops-broker"
 PREVIEW_STATE="$TEST_ROOT/var/lib/ods-pixel-preview"
+ACCESS_STATE="$TEST_ROOT/var/lib/ods-pixel-access"
+ACCESS_PROBE_BASE="$TEST_ROOT/var/lib/ods-pixel-access-probes"
 OPS_IDENTITY_LOG="$TEST_ROOT/ops-identity.log"
 OPS_PASSWD_STATE="$TEST_ROOT/ops-passwd"
 OPS_GROUP_STATE="$TEST_ROOT/ops-group"
@@ -118,6 +120,8 @@ export ODS_PIXEL_UNINSTALL_OPS_POLICY="$OPS_POLICY"
 export ODS_PIXEL_UNINSTALL_OPS_INSTALL_DIR="$OPS_INSTALL"
 export ODS_PIXEL_UNINSTALL_OPS_STATE_DIR="$OPS_STATE"
 export ODS_PIXEL_UNINSTALL_PREVIEW_STATE_DIR="$PREVIEW_STATE"
+export ODS_PIXEL_UNINSTALL_ACCESS_STATE_DIR="$ACCESS_STATE"
+export ODS_PIXEL_UNINSTALL_ACCESS_PROBE_DIR="$ACCESS_PROBE_BASE"
 ODS_PIXEL_UNINSTALL_ROOT_UID="$(id -u)"
 ODS_PIXEL_UNINSTALL_ROOT_GID="$(id -g)"
 ODS_PIXEL_UNINSTALL_OPS_UID="$(id -u)"
@@ -194,7 +198,8 @@ fi
 
 write_fixture() {
     rm -rf "$SYSTEMD_DIR" "$ETC_DIR" "$LIBEXEC_DIR" "$HOME_DIR" "$INSTALL_DIR" \
-        "$OPS_POLICY_DIR" "$OPS_INSTALL" "$OPS_STATE" "$PREVIEW_STATE"
+        "$OPS_POLICY_DIR" "$OPS_INSTALL" "$OPS_STATE" "$PREVIEW_STATE" \
+        "$ACCESS_STATE" "$ACCESS_PROBE_BASE"
     rm -f -- "$OPS_ENV" "$OPS_IDENTITY_LOG" "$OPS_PASSWD_STATE" "$OPS_GROUP_STATE"
     : >"$SYSTEMCTL_LOG"
     : >"$DOCKER_LOG"
@@ -249,6 +254,76 @@ PIXEL_STATUS_FILE=/run/ods-pixel/ods-status.json
 ENV
     chmod 0644 "$SYSTEMD_DIR/openclaw-gateway.service" "$SYSTEMD_DIR/pixel-ingress.service"
     chmod 0640 "$ETC_DIR/pixel-agent.env"
+}
+
+write_access_fixture() {
+    write_fixture
+    local access_program="$LIBEXEC_DIR/ods-pixel-access"
+    local access_dropin_dir="$SYSTEMD_DIR/openclaw-gateway.service.d"
+    local owner_uid relative source
+    owner_uid="$(id -u)"
+    mkdir -p "$INSTALL_DIR/bin/pixel_settings" "$INSTALL_DIR/bin/pixel_provider" \
+        "$access_program/pixel_settings" "$access_program/pixel_provider" \
+        "$access_dropin_dir" "$ACCESS_STATE" "$ACCESS_PROBE_BASE/$owner_uid"
+    local -a access_sources=(
+        "extensions/services/pixel-agent/host/access_mode_server.py"
+        "extensions/services/pixel-agent/host/access_mode_worker.py"
+        "extensions/services/pixel-agent/host/pixel_access_mode.py"
+        "extensions/services/pixel-agent/host/access_mode_config.py"
+        "extensions/services/pixel-agent/host/settings_transaction.py"
+        "extensions/services/pixel-agent/host/provider_transaction.py"
+        "bin/pixel_access_bridge.py"
+        "bin/pixel_access_client.py"
+        "bin/pixel_access_reconcile.py"
+        "bin/pixel_model_transition.py"
+        "bin/pixel_access_protocol.py"
+        "bin/pixel_settings/__init__.py"
+        "bin/pixel_settings/contract.py"
+        "bin/pixel_settings/projection.py"
+        "bin/pixel_settings/runtime.py"
+        "bin/pixel_settings/coordinator.py"
+        "bin/pixel_provider/__init__.py"
+        "bin/pixel_provider/config.py"
+        "bin/pixel_provider/store.py"
+        "bin/pixel_provider/activation_config.py"
+        "bin/pixel_provider/managed_deployment.py"
+        "bin/pixel_provider/service_environment.py"
+        "bin/pixel_provider/service_activation.py"
+        "bin/pixel_provider/runtime_custody.py"
+        "bin/pixel_provider/coordinator.py"
+    )
+    for relative in "${access_sources[@]}"; do
+        source="$ROOT_DIR/$relative"
+        cp "$source" "$INSTALL_DIR/$relative"
+        case "$relative" in
+            extensions/services/pixel-agent/host/*) cp "$source" "$access_program/${relative##*/}" ;;
+            bin/pixel_settings/*) cp "$source" "$access_program/pixel_settings/${relative##*/}" ;;
+            bin/pixel_provider/*) cp "$source" "$access_program/pixel_provider/${relative##*/}" ;;
+            bin/*) cp "$source" "$access_program/${relative##*/}" ;;
+        esac
+    done
+    cp "$ROOT_DIR/extensions/services/pixel-agent/host/ods-pixel-access.service" \
+        "$INSTALL_DIR/extensions/services/pixel-agent/host/ods-pixel-access.service"
+    cp "$INSTALL_DIR/extensions/services/pixel-agent/host/ods-pixel-access.service" \
+        "$SYSTEMD_DIR/ods-pixel-access.service"
+    cat > "$ETC_DIR/pixel-access.json" <<JSON
+{"install_dir":"$INSTALL_DIR","owner":"$(id -un)","openclaw_bin":"$MOCK_BIN/openclaw","gateway_port":18789,"settings_data_dir":null}
+JSON
+    : > "$ACCESS_STATE/lock"
+    printf '%s\n' '{"boundary":"fixture"}' > "$ACCESS_STATE/service-baseline.json"
+    printf '%s\n' '{"phase":"error"}' > "$ACCESS_STATE/transition.json"
+    printf '%s\n' '[Service]' 'ProtectSystem=false' 'ProtectHome=false' \
+        > "$access_dropin_dir/90-ods-full-access.conf"
+    printf '%s\n' fixture > "$ACCESS_PROBE_BASE/$owner_uid/sentinel-123e4567-e89b-12d3-a456-426614174000"
+    chmod 0755 "$access_program" "$access_program/pixel_settings" "$access_program/pixel_provider"
+    chmod 0644 "$access_program"/*.py "$access_program/pixel_settings"/*.py \
+        "$access_program/pixel_provider"/*.py "$SYSTEMD_DIR/ods-pixel-access.service" \
+        "$access_dropin_dir/90-ods-full-access.conf"
+    chmod 0600 "$ETC_DIR/pixel-access.json" "$ACCESS_STATE/lock" \
+        "$ACCESS_STATE/service-baseline.json" "$ACCESS_STATE/transition.json"
+    chmod 0700 "$ACCESS_STATE" "$ACCESS_PROBE_BASE/$owner_uid"
+    chmod 0711 "$ACCESS_PROBE_BASE"
+    chmod 0600 "$ACCESS_PROBE_BASE/$owner_uid/sentinel-123e4567-e89b-12d3-a456-426614174000"
 }
 
 write_active_fixture() {
@@ -1413,6 +1488,90 @@ else
         && ! -s "$SYSTEMCTL_LOG" ]] \
         && pass "root artifact drift fails before any mutation" \
         || fail "root artifact drift caused partial cleanup"
+fi
+
+write_access_fixture
+printf '%s\n' '[Service]' 'Environment=OPERATOR_OWNED=1' \
+    > "$SYSTEMD_DIR/openclaw-gateway.service.d/99-operator.conf"
+chmod 0644 "$SYSTEMD_DIR/openclaw-gateway.service.d/99-operator.conf"
+if ods_pixel_uninstall_managed "$INSTALL_DIR" "$HOME_DIR" \
+    && [[ ! -e "$SYSTEMD_DIR/ods-pixel-access.service" \
+        && ! -e "$LIBEXEC_DIR/ods-pixel-access" \
+        && ! -e "$ETC_DIR/pixel-access.json" \
+        && ! -e "$ACCESS_STATE" \
+        && ! -e "$ACCESS_PROBE_BASE/$(id -u)" \
+        && ! -e "$SYSTEMD_DIR/openclaw-gateway.service.d/90-ods-full-access.conf" \
+        && -e "$SYSTEMD_DIR/openclaw-gateway.service.d/99-operator.conf" ]]; then
+    access_stop_line="$(grep -n '^disable --now ods-pixel-access.service$' "$SYSTEMCTL_LOG" | cut -d: -f1)"
+    gateway_stop_line="$(grep -n '^disable --now openclaw-gateway.service$' "$SYSTEMCTL_LOG" | cut -d: -f1)"
+    if [[ "$access_stop_line" =~ ^[0-9]+$ && "$gateway_stop_line" =~ ^[0-9]+$ \
+        && "$access_stop_line" -lt "$gateway_stop_line" ]]; then
+        pass "Pixel access cleanup is exact, owner-scoped, and stops its coordinator before the gateway"
+    else
+        fail "Pixel access services were not stopped in the required order"
+    fi
+else
+    fail "verified Pixel access artifacts were not removed completely"
+fi
+
+write_access_fixture
+python3 - "$HOME_DIR/.config/ods/pixel-managed.json" <<'PY'
+import json, pathlib, sys
+path = pathlib.Path(sys.argv[1])
+value = json.loads(path.read_text())
+value["state"] = "installing"
+path.write_text(json.dumps(value) + "\n")
+PY
+chmod 0600 "$HOME_DIR/.config/ods/pixel-managed.json"
+rm -f "$SYSTEMD_DIR/ods-pixel-access.service" \
+    "$LIBEXEC_DIR/ods-pixel-access/pixel_provider/coordinator.py"
+if ods_pixel_uninstall_managed "$INSTALL_DIR" "$HOME_DIR" \
+    && [[ ! -e "$LIBEXEC_DIR/ods-pixel-access" && ! -e "$ACCESS_STATE" ]]; then
+    pass "exact interrupted Pixel access installation is resumable"
+else
+    fail "exact interrupted Pixel access installation was not cleaned"
+fi
+
+write_access_fixture
+printf '%s\n' '# drifted' > "$LIBEXEC_DIR/ods-pixel-access/pixel_access_bridge.py"
+chmod 0644 "$LIBEXEC_DIR/ods-pixel-access/pixel_access_bridge.py"
+if ods_pixel_uninstall_managed "$INSTALL_DIR" "$HOME_DIR"; then
+    fail "drifted Pixel access program was accepted"
+else
+    [[ -e "$LIBEXEC_DIR/ods-pixel-access/pixel_access_bridge.py" \
+        && -e "$ACCESS_STATE" && ! -s "$SYSTEMCTL_LOG" ]] \
+        && pass "Pixel access program drift fails before service mutation" \
+        || fail "Pixel access program drift caused partial cleanup"
+fi
+
+write_access_fixture
+python3 - "$ETC_DIR/pixel-access.json" <<'PY'
+import json, pathlib, sys
+path = pathlib.Path(sys.argv[1])
+value = json.loads(path.read_text())
+value["install_dir"] = "/tmp/foreign-ods"
+path.write_text(json.dumps(value) + "\n")
+PY
+chmod 0600 "$ETC_DIR/pixel-access.json"
+if ods_pixel_uninstall_managed "$INSTALL_DIR" "$HOME_DIR"; then
+    fail "foreign Pixel access configuration was accepted"
+else
+    [[ -e "$SYSTEMD_DIR/ods-pixel-access.service" && -e "$ACCESS_STATE" \
+        && ! -s "$SYSTEMCTL_LOG" ]] \
+        && pass "foreign Pixel access configuration fails before mutation" \
+        || fail "foreign Pixel access configuration caused partial cleanup"
+fi
+
+write_access_fixture
+printf '%s\n' 'foreign' > "$LIBEXEC_DIR/ods-pixel-access/operator-owned.txt"
+chmod 0644 "$LIBEXEC_DIR/ods-pixel-access/operator-owned.txt"
+if ods_pixel_uninstall_managed "$INSTALL_DIR" "$HOME_DIR"; then
+    fail "foreign Pixel access program artifact was accepted"
+else
+    [[ -e "$LIBEXEC_DIR/ods-pixel-access/operator-owned.txt" && -e "$ACCESS_STATE" \
+        && ! -s "$SYSTEMCTL_LOG" ]] \
+        && pass "foreign Pixel access artifact fails before mutation" \
+        || fail "foreign Pixel access artifact caused partial cleanup"
 fi
 
 write_fixture

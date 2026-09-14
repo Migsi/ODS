@@ -15,6 +15,260 @@ if ! declare -F log_error >/dev/null 2>&1; then
     log_error() { printf '[ERROR] %s\n' "$*" >&2; }
 fi
 
+_ods_pixel_access_validate_or_remove() {
+    local action="$1"
+    shift
+    sudo python3 - "$action" "$@" <<'PY'
+import errno
+import json
+import os
+import pathlib
+import re
+import shutil
+import stat
+import sys
+
+(
+    action,
+    install_raw,
+    marker_state,
+    owner_name,
+    owner_uid_raw,
+    owner_gid_raw,
+    root_uid_raw,
+    root_gid_raw,
+    unit_raw,
+    program_raw,
+    config_raw,
+    state_raw,
+    probe_base_raw,
+    dropin_raw,
+) = sys.argv[1:]
+
+if action not in {"verify", "remove"}:
+    raise SystemExit("invalid Pixel access cleanup action")
+if marker_state not in {"installing", "ready", "deactivating"}:
+    raise SystemExit("invalid Pixel access marker state")
+owner_uid, owner_gid = int(owner_uid_raw), int(owner_gid_raw)
+root_uid, root_gid = int(root_uid_raw), int(root_gid_raw)
+install = pathlib.Path(install_raw)
+unit = pathlib.Path(unit_raw)
+program = pathlib.Path(program_raw)
+config = pathlib.Path(config_raw)
+state_root = pathlib.Path(state_raw)
+probe_base = pathlib.Path(probe_base_raw)
+probe_owner = probe_base / str(owner_uid)
+dropin = pathlib.Path(dropin_raw)
+
+
+def present(path: pathlib.Path) -> bool:
+    return path.exists() or path.is_symlink()
+
+
+def directory(path: pathlib.Path, uid: int, gid: int, *, exact_mode=None):
+    info = path.lstat()
+    if (not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode)
+            or info.st_uid != uid or info.st_gid != gid or info.st_mode & 0o022
+            or (exact_mode is not None and stat.S_IMODE(info.st_mode) != exact_mode)):
+        raise SystemExit(f"unsafe managed Pixel access directory: {path}")
+    return info
+
+
+def regular(path: pathlib.Path, uid: int, gid: int, maximum: int, *, private: bool = False):
+    info = path.lstat()
+    if (not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)
+            or info.st_nlink != 1 or info.st_uid != uid or info.st_gid != gid
+            or info.st_size > maximum or info.st_mode & 0o022
+            or (private and info.st_mode & 0o077)):
+        raise SystemExit(f"unsafe managed Pixel access file: {path}")
+    return info
+
+
+def source_file(path: pathlib.Path, maximum: int):
+    info = path.lstat()
+    if (not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)
+            or info.st_nlink != 1 or info.st_uid != owner_uid
+            or info.st_size > maximum or info.st_mode & 0o022):
+        raise SystemExit(f"unsafe ODS Pixel access source: {path}")
+    return info
+
+
+unit_source = install / "extensions/services/pixel-agent/host/ods-pixel-access.service"
+sources = {
+    "access_mode_server.py": install / "extensions/services/pixel-agent/host/access_mode_server.py",
+    "access_mode_worker.py": install / "extensions/services/pixel-agent/host/access_mode_worker.py",
+    "pixel_access_mode.py": install / "extensions/services/pixel-agent/host/pixel_access_mode.py",
+    "access_mode_config.py": install / "extensions/services/pixel-agent/host/access_mode_config.py",
+    "settings_transaction.py": install / "extensions/services/pixel-agent/host/settings_transaction.py",
+    "provider_transaction.py": install / "extensions/services/pixel-agent/host/provider_transaction.py",
+    "pixel_access_bridge.py": install / "bin/pixel_access_bridge.py",
+    "pixel_access_client.py": install / "bin/pixel_access_client.py",
+    "pixel_access_reconcile.py": install / "bin/pixel_access_reconcile.py",
+    "pixel_model_transition.py": install / "bin/pixel_model_transition.py",
+    "pixel_access_protocol.py": install / "bin/pixel_access_protocol.py",
+}
+for name in ("__init__.py", "contract.py", "projection.py", "runtime.py", "coordinator.py"):
+    sources[f"pixel_settings/{name}"] = install / "bin/pixel_settings" / name
+for name in (
+    "__init__.py", "config.py", "store.py", "activation_config.py",
+    "managed_deployment.py", "service_environment.py", "service_activation.py",
+    "runtime_custody.py", "coordinator.py",
+):
+    sources[f"pixel_provider/{name}"] = install / "bin/pixel_provider" / name
+
+artifacts = (unit, program, config, state_root, probe_owner, dropin)
+if not any(present(path) for path in artifacts):
+    print("absent")
+    raise SystemExit(0)
+
+if present(unit):
+    regular(unit, root_uid, root_gid, 256 * 1024)
+    source_file(unit_source, 256 * 1024)
+    if unit.read_bytes() != unit_source.read_bytes():
+        raise SystemExit("installed Pixel access unit drifted from this ODS install")
+
+if present(program):
+    directory(program, root_uid, root_gid)
+    allowed_dirs = {
+        pathlib.PurePosixPath("pixel_settings"),
+        pathlib.PurePosixPath("pixel_provider"),
+        pathlib.PurePosixPath("__pycache__"),
+        pathlib.PurePosixPath("pixel_settings/__pycache__"),
+        pathlib.PurePosixPath("pixel_provider/__pycache__"),
+    }
+    seen = set()
+    for current, directories, files in os.walk(program, topdown=True, followlinks=False):
+        current_path = pathlib.Path(current)
+        directory(current_path, root_uid, root_gid)
+        for name in directories:
+            child = current_path / name
+            relative = pathlib.PurePosixPath(child.relative_to(program).as_posix())
+            if relative not in allowed_dirs:
+                raise SystemExit(f"unexpected Pixel access program directory: {relative}")
+            directory(child, root_uid, root_gid)
+        for name in files:
+            child = current_path / name
+            relative = child.relative_to(program).as_posix()
+            if relative in sources:
+                source = sources[relative]
+                source_file(source, 2 * 1024 * 1024)
+                regular(child, root_uid, root_gid, 2 * 1024 * 1024)
+                if child.read_bytes() != source.read_bytes():
+                    raise SystemExit(f"installed Pixel access program drifted: {relative}")
+                seen.add(relative)
+                continue
+            parent = pathlib.PurePosixPath(relative).parent
+            match = re.fullmatch(r"([A-Za-z0-9_]+)\.cpython-[0-9]{2,3}(?:\.opt-[0-9]+)?\.pyc", name)
+            source_parent = parent.parent if parent.name == "__pycache__" else None
+            source_relative = str(source_parent / f"{match.group(1)}.py") if match and source_parent is not None else ""
+            if source_relative == ".":
+                source_relative = f"{match.group(1)}.py"
+            if not match or parent.name != "__pycache__" or source_relative not in sources:
+                raise SystemExit(f"unexpected Pixel access program file: {relative}")
+            regular(child, root_uid, root_gid, 16 * 1024 * 1024)
+    if marker_state == "ready" and seen != set(sources):
+        raise SystemExit("ready Pixel access program bundle is partial")
+
+config_present = present(config)
+if config_present:
+    regular(config, root_uid, root_gid, 64 * 1024, private=True)
+    value = json.loads(config.read_text(encoding="utf-8"))
+    if (not isinstance(value, dict)
+            or set(value) != {"install_dir", "owner", "openclaw_bin", "gateway_port", "settings_data_dir"}
+            or value.get("install_dir") != str(install.resolve())
+            or value.get("owner") != owner_name
+            or not isinstance(value.get("openclaw_bin"), str)
+            or not pathlib.Path(value["openclaw_bin"]).is_absolute()
+            or isinstance(value.get("gateway_port"), bool)
+            or not isinstance(value.get("gateway_port"), int)
+            or not 1 <= value["gateway_port"] <= 65535
+            or not (value.get("settings_data_dir") is None
+                    or (isinstance(value.get("settings_data_dir"), str)
+                        and pathlib.Path(value["settings_data_dir"]).is_absolute()))):
+        raise SystemExit("Pixel access configuration does not bind this ODS install")
+
+# Dynamic privileged state is removable only when the immutable configuration
+# above binds it to this exact install and owner. A state-only remnant is
+# intentionally left untouched because its custody cannot be inferred safely.
+if any(present(path) for path in (state_root, probe_owner, dropin)) and not config_present:
+    raise SystemExit("Pixel access state lacks an install-bound configuration")
+
+if present(dropin):
+    regular(dropin, root_uid, root_gid, 4096)
+    if dropin.read_text(encoding="utf-8") != "[Service]\nProtectSystem=false\nProtectHome=false\n":
+        raise SystemExit("unrecognized Pixel full-access drop-in")
+
+state_limits = {
+    "lock": 4096,
+    "transition.json": 8 * 1024 * 1024,
+    "verified.json": 256 * 1024,
+    "service-baseline.json": 64 * 1024,
+    "model-completed.json": 256 * 1024,
+    "settings-verified.json": 256 * 1024,
+    "provider-root-plan.json": 8 * 1024 * 1024,
+    "provider-root-managed.json": 8 * 1024 * 1024,
+    "provider-verified.json": 512 * 1024,
+    "provider-service-environment.json": 1024 * 1024,
+}
+if present(state_root):
+    directory(state_root, root_uid, root_gid, exact_mode=0o700)
+    for child in state_root.iterdir():
+        if child.name not in state_limits:
+            raise SystemExit(f"unexpected Pixel access state: {child.name}")
+        regular(child, root_uid, root_gid, state_limits[child.name], private=True)
+        if child.name != "lock":
+            parsed = json.loads(child.read_text(encoding="utf-8"))
+            if not isinstance(parsed, dict):
+                raise SystemExit(f"invalid Pixel access state: {child.name}")
+
+if present(probe_owner):
+    directory(probe_base, root_uid, root_gid, exact_mode=0o711)
+    directory(probe_owner, owner_uid, owner_gid, exact_mode=0o700)
+    for child in probe_owner.iterdir():
+        if (not re.fullmatch(r"sentinel-[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}", child.name)):
+            raise SystemExit(f"unexpected Pixel access probe artifact: {child.name}")
+        regular(child, owner_uid, owner_gid, 64 * 1024)
+
+if marker_state == "ready" and not all(present(path) for path in (unit, program, config, state_root)):
+    raise SystemExit("ready Pixel access deployment is partial")
+
+if action == "verify":
+    print("present")
+    raise SystemExit(0)
+
+mount_roots = [path.resolve() for path in (program, state_root, probe_owner) if present(path)]
+try:
+    mount_lines = pathlib.Path("/proc/self/mountinfo").read_text(encoding="utf-8").splitlines()
+except OSError as error:
+    raise SystemExit("cannot inspect mounts before Pixel access cleanup") from error
+for line in mount_lines:
+    fields = line.split()
+    if len(fields) < 5:
+        raise SystemExit("invalid mount table while cleaning Pixel access state")
+    mount_text = fields[4]
+    for encoded, decoded in ((r"\040", " "), (r"\011", "\t"), (r"\012", "\n"), (r"\134", "\\")):
+        mount_text = mount_text.replace(encoded, decoded)
+    mount = pathlib.Path(os.path.abspath(mount_text))
+    if any(mount == root or root in mount.parents for root in mount_roots):
+        raise SystemExit(f"mount inside Pixel access cleanup root: {mount}")
+
+for path in (dropin, config, unit):
+    if present(path):
+        path.unlink()
+for path in (program, state_root, probe_owner):
+    if present(path):
+        shutil.rmtree(path)
+try:
+    dropin.parent.rmdir()
+except FileNotFoundError:
+    pass
+except OSError as error:
+    if error.errno not in {errno.ENOTEMPTY, errno.EEXIST}:
+        raise
+print("removed")
+PY
+}
+
 ods_pixel_uninstall_managed() {
     local install_dir="$1" owner_home="$2"
     local marker="$owner_home/.config/ods/pixel-managed.json"
@@ -44,6 +298,13 @@ ods_pixel_uninstall_managed() {
     local workspace_preview_state="${ODS_PIXEL_UNINSTALL_PREVIEW_STATE_DIR:-/var/lib/ods-pixel-preview}"
     local system_observer_program="$libexec_dir/ods-pixel-system-observe.py"
     local system_observer_source="$install_dir/extensions/services/pixel-agent/host/system_observe.py"
+    local access_unit="$systemd_dir/ods-pixel-access.service"
+    local access_program="$libexec_dir/ods-pixel-access"
+    local access_config="$etc_dir/pixel-access.json"
+    local access_state="${ODS_PIXEL_UNINSTALL_ACCESS_STATE_DIR:-/var/lib/ods-pixel-access}"
+    local access_probe_base="${ODS_PIXEL_UNINSTALL_ACCESS_PROBE_DIR:-/var/lib/ods-pixel-access-probes}"
+    local access_dropin_dir="$systemd_dir/openclaw-gateway.service.d"
+    local access_dropin="$access_dropin_dir/90-ods-full-access.conf"
     local ops_user="pixel-ops-broker"
     local ops_group="pixel-ops"
     local ops_unit="$systemd_dir/pixel-ops-broker.service"
@@ -81,7 +342,7 @@ ods_pixel_uninstall_managed() {
     local ops_plan="absent||||" ops_state_status ops_uid ops_gid ops_user_present ops_group_present
     local ops_passwd_entry="" ops_group_entry="" ops_user_group_ids="" ops_user_group_names="" ops_artifacts_present=false
     local pixel_lock_fd="" owner_uid
-    local root_artifacts_present=false owner_gid
+    local root_artifacts_present=false owner_gid owner_name access_artifacts_present=false access_plan="absent"
 
     [[ "$install_dir" == /* && "$install_dir" != / && -d "$install_dir" && ! -L "$install_dir" ]] || {
         log_error "Refusing Pixel cleanup for an invalid ODS install directory"
@@ -98,7 +359,8 @@ ods_pixel_uninstall_managed() {
         "$extension_manager_unit" "$extension_manager_program" \
         "$artifact_promoter_unit" "$artifact_promoter_program" \
         "$workspace_preview_unit" "$workspace_preview_program" "$workspace_preview_state" \
-        "$system_observer_program"; do
+        "$system_observer_program" "$access_unit" "$access_program" "$access_config" \
+        "$access_state" "$access_probe_base" "$access_dropin_dir" "$access_dropin"; do
         [[ "$path" == /* && "$path" != / ]] || {
             log_error "Refusing Pixel Operations cleanup for an invalid absolute target"
             return 1
@@ -121,6 +383,15 @@ ods_pixel_uninstall_managed() {
         log_error "Refusing Pixel workspace preview cleanup for an unexpected state root"
         return 1
     }
+    [[ "$access_unit" == "$systemd_dir/ods-pixel-access.service" \
+        && "$access_program" == "$libexec_dir/ods-pixel-access" \
+        && "$access_config" == "$etc_dir/pixel-access.json" \
+        && "${access_state##*/}" == ods-pixel-access \
+        && "${access_probe_base##*/}" == ods-pixel-access-probes \
+        && "$access_dropin" == "$access_dropin_dir/90-ods-full-access.conf" ]] || {
+        log_error "Refusing Pixel access cleanup for unexpected targets"
+        return 1
+    }
 
     if [[ ! -e "$marker" && ! -L "$marker" ]]; then
         return 0
@@ -132,6 +403,7 @@ ods_pixel_uninstall_managed() {
     # fails closed instead of deleting an ambient or operator-modified service.
     owner_uid="$(id -u)"
     owner_gid="$(id -g)"
+    owner_name="$(id -un)"
     if ! cleanup_plan="$(python3 - \
         "$marker" "$install_dir" "$owner_home" "$(id -u)" "$root_uid" \
         "$gateway_unit" "$ingress_unit" "$ingress_env" "$ingress_program" "$source_program" \
@@ -1449,6 +1721,30 @@ PY
         }
     fi
 
+    if [[ -e "$access_unit" || -L "$access_unit" \
+        || -e "$access_program" || -L "$access_program" \
+        || -e "$access_config" || -L "$access_config" \
+        || -e "$access_state" || -L "$access_state" \
+        || -e "$access_probe_base/$owner_uid" || -L "$access_probe_base/$owner_uid" \
+        || -e "$access_dropin" || -L "$access_dropin" ]]; then
+        command -v sudo >/dev/null 2>&1 || {
+            log_error "sudo is required to validate ODS-managed Pixel access artifacts"
+            return 1
+        }
+        if ! access_plan="$(_ods_pixel_access_validate_or_remove verify \
+            "$install_dir" "$marker_state" "$owner_name" "$owner_uid" "$owner_gid" \
+            "$root_uid" "$root_gid" "$access_unit" "$access_program" "$access_config" \
+            "$access_state" "$access_probe_base" "$access_dropin")"; then
+            log_error "ODS-managed Pixel access validation failed; leaving every Pixel artifact untouched"
+            return 1
+        fi
+        [[ "$access_plan" == present ]] || {
+            log_error "ODS-managed Pixel access cleanup plan is invalid"
+            return 1
+        }
+        access_artifacts_present=true
+    fi
+
     (
     local candidate_image observed_image shared_image_present=true sandbox_container_list
     local retired_container retired_config_container="" retired_config_path=""
@@ -1582,7 +1878,7 @@ PY
         || -e "$workspace_preview_program" || -L "$workspace_preview_program" \
         || -e "$system_observer_program" || -L "$system_observer_program" \
         || -e "$workspace_preview_state" || -L "$workspace_preview_state" \
-        || "$ops_artifacts_present" == true ]]; then
+        || "$ops_artifacts_present" == true || "$access_artifacts_present" == true ]]; then
         root_artifacts_present=true
         command -v sudo >/dev/null 2>&1 || {
             log_error "sudo is required to remove ODS-managed Pixel system artifacts"
@@ -1592,12 +1888,17 @@ PY
 
     if [[ -e "$gateway_unit" || -e "$ingress_unit" || -e "$extension_manager_unit" \
         || -e "$artifact_promoter_unit" || -e "$workspace_preview_unit" \
-        || -e "$ops_unit" ]]; then
+        || -e "$ops_unit" || -e "$access_unit" ]]; then
         # Stop the ingress before the gateway it proxies to. Keep these as
         # separate calls so the shutdown order is an enforced contract rather
         # than an argument-order hint to systemctl. An interrupted first install
         # can have created the gateway before it creates ingress, so only ask
         # systemd to disable unit files whose exact reviewed artifacts exist.
+        if [[ -e "$access_unit" ]] \
+            && ! timeout 30s sudo systemctl disable --now ods-pixel-access.service; then
+            log_error "Could not stop ODS-managed Pixel system services; no Pixel files were removed"
+            return 1
+        fi
         if [[ -e "$ingress_unit" ]] \
             && ! timeout 30s sudo systemctl disable --now pixel-ingress.service; then
             log_error "Could not stop ODS-managed Pixel system services; no Pixel files were removed"
@@ -1628,7 +1929,8 @@ PY
             log_error "Could not stop ODS-managed Pixel system services; no Pixel files were removed"
             return 1
         fi
-        if systemctl is-active --quiet openclaw-gateway.service \
+        if systemctl is-active --quiet ods-pixel-access.service \
+            || systemctl is-active --quiet openclaw-gateway.service \
             || systemctl is-active --quiet pixel-ingress.service \
             || systemctl is-active --quiet pixel-extension-manager.service \
             || systemctl is-active --quiet pixel-artifact-promoter.service \
@@ -1967,6 +2269,15 @@ PY
     fi
 
     if [[ "$root_artifacts_present" == "true" ]]; then
+        if [[ "$access_artifacts_present" == true ]]; then
+            if [[ "$(_ods_pixel_access_validate_or_remove remove \
+                "$install_dir" "$marker_state" "$owner_name" "$owner_uid" "$owner_gid" \
+                "$root_uid" "$root_gid" "$access_unit" "$access_program" "$access_config" \
+                "$access_state" "$access_probe_base" "$access_dropin")" != removed ]]; then
+                log_error "Could not remove the verified ODS-managed Pixel access artifacts"
+                return 1
+            fi
+        fi
         if [[ -e "$workspace_preview_state" || -L "$workspace_preview_state" ]]; then
             if ! sudo python3 - "$workspace_preview_state" "$owner_uid" <<'PY'
 import os, pathlib, shutil, stat, sys
@@ -2007,7 +2318,12 @@ PY
             || -e "$extension_manager_program" || -e "$artifact_promoter_unit" \
             || -e "$artifact_promoter_program" || -e "$workspace_preview_unit" \
             || -e "$workspace_preview_program" || -e "$system_observer_program" \
-            || -e "$workspace_preview_state" ]]; then
+            || -e "$workspace_preview_state" || -e "$access_unit" || -L "$access_unit" \
+            || -e "$access_program" || -L "$access_program" \
+            || -e "$access_config" || -L "$access_config" \
+            || -e "$access_state" || -L "$access_state" \
+            || -e "$access_probe_base/$owner_uid" || -L "$access_probe_base/$owner_uid" \
+            || -e "$access_dropin" || -L "$access_dropin" ]]; then
             log_error "ODS-managed Pixel system artifact cleanup was incomplete"
             return 1
         fi
