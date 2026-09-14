@@ -418,11 +418,44 @@ def test_ambiguous_worker_reconciles_host_completed_terminal() -> None:
         result = lifecycle.apply_one(
             BINDING, {"serviceId": "aider", "action": "install"}
         )
+        replay = lifecycle.apply_one(
+            BINDING, {"serviceId": "aider", "action": "install"}
+        )
 
     assert result["completed"] is True
     assert result["evidenceHash"] == EVIDENCE_HASH
+    assert replay == result
     assert calls == 1
     assert "finish:apply:aider:completed" not in receipts.calls
+
+
+def test_ambiguous_worker_rejects_mismatched_completed_terminal() -> None:
+    events: list[str] = []
+    receipts = StubReceipts()
+
+    def ambiguous_after_mismatched_finish(
+        _grant: LeaseGrant, work: LifecycleWorkRequest
+    ) -> LifecycleWorkResult:
+        mismatched = _started(work.operation_key, "f" * 64, work.service_ids)
+        receipts.states[work.operation_key] = (
+            mismatched,
+            _terminal(mismatched, "completed", EVIDENCE_HASH),
+        )
+        raise ExtensionLeaseError(
+            "host-work-operation-ambiguous", ambiguous=True
+        )
+
+    lifecycle, lock_factory = adapter(
+        events, receipts, ambiguous_after_mismatched_finish
+    )
+    with lock_factory.lock_services(BINDING, ["aider"]):
+        with pytest.raises(ReceiptedLifecycleAdapterError) as caught:
+            lifecycle.apply_one(
+                BINDING, {"serviceId": "aider", "action": "install"}
+            )
+
+    assert caught.value.code == "lifecycle-receipt-request-mismatch"
+    assert not any(call.startswith("finish:apply:aider") for call in receipts.calls)
 
 
 def test_ambiguous_worker_reconciles_host_failed_terminal() -> None:
