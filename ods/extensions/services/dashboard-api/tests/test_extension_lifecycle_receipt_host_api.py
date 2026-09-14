@@ -450,6 +450,39 @@ def test_exact_key_sets_are_enforced(host_server, host_request):
         assert status == 400, changes
 
 
+def test_plan_hash_is_validated_before_store_construction(host_server, host_request):
+    agent, _listener = host_server
+    requests = (
+        ("/v1/extension/lifecycle-receipt/begin", begin_request),
+        ("/v1/extension/lifecycle-receipt/finish", finish_request),
+        ("/v1/extension/lifecycle-receipt/snapshot", snapshot_request),
+    )
+    invalid_hashes = (
+        None,
+        True,
+        1,
+        [],
+        {},
+        "",
+        "3" * 63,
+        "3" * 65,
+        "g" * 64,
+        "A" * 64,
+        PLAN_HASH + "\n",
+    )
+
+    for path, request_factory in requests:
+        for plan_hash in invalid_hashes:
+            status, result = host_request(
+                path, request_factory(planHash=plan_hash)
+            )
+            assert status == 422, (path, plan_hash)
+            assert result == {
+                "error": {"code": "invalid-lifecycle-receipt-request"}
+            }
+            assert agent._lifecycle_receipt_store is None
+
+
 def test_lease_keys_and_caller_paths_are_never_accepted(host_server, host_request):
     agent, _listener = host_server
 
