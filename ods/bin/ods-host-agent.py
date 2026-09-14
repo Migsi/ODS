@@ -2008,6 +2008,25 @@ def load_env(env_path: Path) -> dict:
         if "=" in line:
             key, _, val = line.partition("=")
             raw_value = val.strip()
+            # Match the dashboard's single-line dotenv writer without shell
+            # expansion. shlex drops bare Windows path backslashes and keeps
+            # a backslash before $ inside double quotes.
+            quoted = re.fullmatch(r'"((?:\\.|[^"\\])*)"(?:\s+#.*)?', raw_value)
+            if quoted:
+                env[key.strip()] = (
+                    quoted.group(1).replace('\\"', '"')
+                    .replace('\\$', '$').replace('\\\\', '\\')
+                )
+                continue
+            quoted = re.fullmatch(r"'([^']*)'(?:\s+#.*)?", raw_value)
+            if quoted:
+                env[key.strip()] = quoted.group(1)
+                continue
+            if raw_value[:1] not in {"'", '"'}:
+                env[key.strip()] = raw_value.split(" #", 1)[0].rstrip()
+                continue
+            # Preserve legacy concatenated shell quotes emitted by the host
+            # agent's own writer. Never evaluate substitutions or commands.
             try:
                 parsed = shlex.split(raw_value, comments=False, posix=True)
             except ValueError:
@@ -6237,6 +6256,18 @@ def _read_extension_lease_body(handler) -> dict | None:
     )
 
 
+def _read_extension_mutation_body(handler) -> dict | None:
+    """Read one strict bounded object before inspecting optional lease evidence."""
+    return _read_bounded_json_object(
+        handler,
+        max_body=MAX_BODY,
+        framing_code="invalid-extension-mutation-request-framing",
+        size_code="extension-mutation-request-size",
+        incomplete_code="incomplete-extension-mutation-request",
+        invalid_code="invalid-extension-mutation-request",
+    )
+
+
 def validate_service_id(handler, body: dict) -> str | None:
     sid = body.get("service_id", "")
     if not isinstance(sid, str) or not SERVICE_ID_RE.match(sid):
@@ -8974,7 +9005,7 @@ class AgentHandler(BaseHTTPRequestHandler):
         """
         if not check_auth(self):
             return
-        body = read_json_body(self)
+        body = _read_extension_mutation_body(self)
         if body is None:
             return
         lease_evidence = _parse_extension_mutation_lease(self, body)

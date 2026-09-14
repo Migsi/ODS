@@ -216,6 +216,31 @@ def test_capacity_exhaustion_fails_before_requesting_another_service_lock():
     manager.release(first["leaseId"], "first-" + "x" * 32, TRANSACTION_ID, PLAN_HASH)
 
 
+def test_expired_lease_frees_capacity_before_requesting_next_service_lock():
+    clock = FakeClock()
+    ids = iter(["lease-" + "a" * 32, "lease-" + "b" * 32])
+    tokens = iter(["first-" + "x" * 32, "second-" + "x" * 32])
+    manager, lock_map, _events = make_manager(
+        clock=clock,
+        lease_ids=ids,
+        token_factory=lambda: next(tokens),
+        max_active_leases=1,
+    )
+    first = acquire(manager, ("documents",), ttl_seconds=1)
+    clock.advance(1)
+
+    second = acquire(manager, ("voice",))
+
+    assert second["leaseId"] == "lease-" + "b" * 32
+    assert not lock_map["documents"].locked()
+    assert lock_map["voice"].locked()
+    with pytest.raises(leases.LeaseExpired, match="lease-not-active"):
+        manager.describe(first["leaseId"])
+    manager.release(
+        second["leaseId"], "second-" + "x" * 32, TRANSACTION_ID, PLAN_HASH
+    )
+
+
 def test_token_and_binding_mismatch_cannot_use_or_release_lease():
     manager, lock_map, _events = make_manager()
     grant = acquire(manager, ("documents",))
@@ -272,6 +297,18 @@ def test_renew_extends_but_never_changes_the_binding_or_services():
     assert renewed["transactionId"] == TRANSACTION_ID
     assert manager.sweep() == []
     assert lock_map["documents"].locked()
+
+
+def test_renew_at_exact_deadline_fails_closed_and_releases_locks():
+    clock = FakeClock()
+    manager, lock_map, _events = make_manager(clock=clock)
+    grant = acquire(manager, ("documents",), ttl_seconds=1)
+    clock.advance(1)
+
+    with pytest.raises(leases.LeaseExpired, match="lease-not-active"):
+        manager.renew(grant["leaseId"], TOKEN, TRANSACTION_ID, PLAN_HASH)
+
+    assert not lock_map["documents"].locked()
 
 
 def test_expiry_releases_locks_and_lease_cannot_be_revived():
@@ -412,6 +449,27 @@ def test_second_lease_for_same_service_is_rejected_until_release():
     manager.release(first["leaseId"], TOKEN, TRANSACTION_ID, PLAN_HASH)
     second = acquire(manager, ("documents",))
     assert second["leaseId"] == "lease-" + "b" * 32
+
+
+def test_disjoint_service_leases_coexist_and_release_independently():
+    ids = iter(["lease-" + "a" * 32, "lease-" + "b" * 32])
+    tokens = iter(["first-" + "x" * 32, "second-" + "x" * 32])
+    manager, lock_map, _events = make_manager(
+        lease_ids=ids,
+        token_factory=lambda: next(tokens),
+    )
+    first = acquire(manager, ("documents",))
+    second = acquire(manager, ("voice",))
+
+    assert lock_map["documents"].locked()
+    assert lock_map["voice"].locked()
+    manager.release(first["leaseId"], "first-" + "x" * 32, TRANSACTION_ID, PLAN_HASH)
+    assert not lock_map["documents"].locked()
+    assert lock_map["voice"].locked()
+    manager.release(
+        second["leaseId"], "second-" + "x" * 32, TRANSACTION_ID, PLAN_HASH
+    )
+    assert not lock_map["voice"].locked()
 
 
 def test_active_lease_tokens_cannot_be_reused_across_grants():
