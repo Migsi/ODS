@@ -164,6 +164,20 @@ def test_happy_path_produces_identity():
         identity.service_id = "x"  # type: ignore
 
 
+def test_produce_rejects_lone_surrogate_version_with_stable_error():
+    cmd = _bound_command()
+    material = cmd.plan_material
+    definition = replace(material.definitions[0], version="\ud800")
+    tampered = replace(
+        cmd,
+        plan_material=replace(material, definitions=(definition,)),
+    )
+
+    with pytest.raises(app_id.ApplicationIdentityError) as exc:
+        app_id.produce_application_identity(tampered)
+    assert exc.value.code == "version-required"
+
+
 def test_happy_path_identity_is_deterministic():
     cmd = _bound_command()
     id1 = app_id.produce_application_identity(cmd)
@@ -452,6 +466,14 @@ def test_malformed_label_invalid_transaction_id():
 def test_version_control_character_is_rejected():
     labels = _make_labels()
     labels[app_id.LABEL_NAMESPACE + ".version"] = "1.2.3\nsecret"
+    with pytest.raises(app_id.ApplicationIdentityError) as exc:
+        app_id.parse_observed_labels(labels)
+    assert exc.value.code == "label-value-invalid"
+
+
+def test_observed_lone_surrogate_version_has_stable_value_free_error():
+    labels = _make_labels()
+    labels[app_id.LABEL_NAMESPACE + ".version"] = "\udfff"
     with pytest.raises(app_id.ApplicationIdentityError) as exc:
         app_id.parse_observed_labels(labels)
     assert exc.value.code == "label-value-invalid"
