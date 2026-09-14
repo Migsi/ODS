@@ -13,15 +13,15 @@ BIN_DIR = Path(__file__).resolve().parents[4] / "bin"
 if str(BIN_DIR) not in sys.path:
     sys.path.insert(0, str(BIN_DIR))
 
-import extension_resource_reservation_store as reservations  # noqa: E402
-from extension_lifecycle_plan import (  # noqa: E402
+import extension_resource_reservation_store as reservations  # noqa: E402, RUF100
+from extension_lifecycle_plan import (  # noqa: E402, RUF100
     PLAN_MATERIAL_SCHEMA,
     LifecyclePlanMaterial,
     PlannedDefinition,
     PlannedHostPort,
     PlannedOperation,
 )
-from extension_lifecycle_work import (  # noqa: E402
+from extension_lifecycle_work import (  # noqa: E402, RUF100
     LifecycleWorkCommand,
     LifecycleWorkValidationError,
 )
