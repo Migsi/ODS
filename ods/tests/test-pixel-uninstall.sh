@@ -264,11 +264,13 @@ write_access_fixture() {
     write_fixture
     local access_program="$LIBEXEC_DIR/ods-pixel-access"
     local access_dropin_dir="$SYSTEMD_DIR/openclaw-gateway.service.d"
+    local access_runtime_state="$HOME_DIR/.openclaw/.ods-access-runtime"
     local owner_uid relative source
     owner_uid="$(id -u)"
     mkdir -p "$INSTALL_DIR/bin/pixel_settings" "$INSTALL_DIR/bin/pixel_provider" \
         "$access_program/pixel_settings" "$access_program/pixel_provider" \
-        "$access_dropin_dir" "$ACCESS_STATE" "$ACCESS_PROBE_BASE/$owner_uid"
+        "$access_dropin_dir" "$ACCESS_STATE" "$ACCESS_PROBE_BASE/$owner_uid" \
+        "$access_runtime_state"
     local -a access_sources=(
         "extensions/services/pixel-agent/host/access_mode_server.py"
         "extensions/services/pixel-agent/host/access_mode_worker.py"
@@ -319,6 +321,10 @@ JSON
     printf '%s\n' '[Service]' 'ProtectSystem=false' 'ProtectHome=false' \
         > "$access_dropin_dir/90-ods-full-access.conf"
     printf '%s\n' fixture > "$ACCESS_PROBE_BASE/$owner_uid/sentinel-123e4567-e89b-12d3-a456-426614174000"
+    printf '%s\n' '{"version":1,"phase":"held","revision":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","tokenHash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}' \
+        > "$access_runtime_state/state.json"
+    printf '%s\n' '{"pid":999999}' > "$access_runtime_state/process.json"
+    : > "$access_runtime_state/.process-claim"
     chmod 0755 "$access_program" "$access_program/pixel_settings" "$access_program/pixel_provider"
     chmod 0644 "$access_program"/*.py "$access_program/pixel_settings"/*.py \
         "$access_program/pixel_provider"/*.py "$SYSTEMD_DIR/ods-pixel-access.service" \
@@ -328,6 +334,8 @@ JSON
     chmod 0700 "$ACCESS_STATE" "$ACCESS_PROBE_BASE/$owner_uid"
     chmod 0711 "$ACCESS_PROBE_BASE"
     chmod 0600 "$ACCESS_PROBE_BASE/$owner_uid/sentinel-123e4567-e89b-12d3-a456-426614174000"
+    chmod 0600 "$access_runtime_state/state.json" "$access_runtime_state/process.json" \
+        "$access_runtime_state/.process-claim"
 }
 
 write_active_fixture() {
@@ -1604,6 +1612,7 @@ if ods_pixel_uninstall_managed "$INSTALL_DIR" "$HOME_DIR" \
         && ! -e "$ETC_DIR/pixel-access.json" \
         && ! -e "$ACCESS_STATE" \
         && ! -e "$ACCESS_PROBE_BASE/$(id -u)" \
+        && ! -e "$HOME_DIR/.openclaw/.ods-access-runtime" \
         && ! -e "$SYSTEMD_DIR/openclaw-gateway.service.d/90-ods-full-access.conf" \
         && -e "$SYSTEMD_DIR/openclaw-gateway.service.d/99-operator.conf" ]]; then
     access_stop_line="$(grep -n '^disable --now ods-pixel-access.service$' "$SYSTEMCTL_LOG" | cut -d: -f1)"

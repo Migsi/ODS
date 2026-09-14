@@ -347,10 +347,11 @@ export function createAccessRuntime({directory = path.join(os.homedir(), '.openc
     // conversation data.  Distinguishing the owner class is essential on first
     // boot where a leaked startup run and a detached command require different
     // recovery paths.
-    if (runs.size) throw transitionError('native-transition-active-run');
-    if (tools.size) throw transitionError('native-transition-active-tool');
-    if (detached.size) throw transitionError('native-transition-detached-process');
-    if (!['idle','interrupted'].includes(state.phase)) throw transitionError('native-transition-phase-busy');
+    if (runs.size) throw transitionError('native-transition-busy-active-run');
+    if (tools.size) throw transitionError('native-transition-busy-active-tool');
+    if (detached.size) throw transitionError('native-transition-busy-detached-process');
+    if (state.phase === 'held') throw transitionError('native-transition-busy-held');
+    if (!['idle','interrupted'].includes(state.phase)) throw transitionError('native-transition-busy-phase');
     state.phase = 'held'; state.tokenHash = hash(token); proof = null; changed(); return status();
   }
   function owns(token) { return !failed && hex(token) && state.phase === 'held' && state.tokenHash === hash(token); }

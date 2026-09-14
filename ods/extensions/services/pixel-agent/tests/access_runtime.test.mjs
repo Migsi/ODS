@@ -465,7 +465,7 @@ test('native transition refusal distinguishes unavailable and busy state', () =>
   failure = null;
   try { busy.acquire(token, busy.status().revision); } catch (error) { failure = error; }
   assert.ok(failure);
-  assert.equal(busy.classifyTransitionError(failure), 'native-transition-active-run');
+  assert.equal(busy.classifyTransitionError(failure), 'native-transition-busy-active-run');
 });
 
 test('native transition refusal distinguishes active tools and detached processes', () => {
@@ -473,7 +473,7 @@ test('native transition refusal distinguishes active tools and detached processe
   toolBusy.beforeTool({toolCallId: 'tool-1'}, {});
   let failure;
   try { toolBusy.acquire(token, toolBusy.status().revision); } catch (error) { failure = error; }
-  assert.equal(toolBusy.classifyTransitionError(failure), 'native-transition-active-tool');
+  assert.equal(toolBusy.classifyTransitionError(failure), 'native-transition-busy-active-tool');
 
   const detachedBusy = createAccessRuntime(fixture());
   detachedBusy.beforeTool({toolCallId: 'exec-1'}, {});
@@ -482,7 +482,15 @@ test('native transition refusal distinguishes active tools and detached processe
   }}}, {});
   failure = null;
   try { detachedBusy.acquire(token, detachedBusy.status().revision); } catch (error) { failure = error; }
-  assert.equal(detachedBusy.classifyTransitionError(failure), 'native-transition-detached-process');
+  assert.equal(detachedBusy.classifyTransitionError(failure), 'native-transition-busy-detached-process');
+});
+
+test('native transition refusal distinguishes a foreign held lease', () => {
+  const runtime = createAccessRuntime(fixture());
+  runtime.acquire('b'.repeat(64), runtime.status().revision);
+  let failure;
+  try { runtime.acquire(token, runtime.status().revision); } catch (error) { failure = error; }
+  assert.equal(runtime.classifyTransitionError(failure), 'native-transition-busy-held');
 });
 
 test('direct tools and detached exec keep transition busy after agent end', () => {

@@ -324,6 +324,7 @@ ods_pixel_uninstall_managed() {
     local ops_owner_extension_catalog="$install_dir/data/pixel/extension-catalog.json"
     local ops_extension_source_program="$install_dir/extensions/services/pixel-agent/host/extension_search.py"
     local openclaw_config="$owner_home/.openclaw/openclaw.json"
+    local access_runtime_state="$owner_home/.openclaw/.ods-access-runtime"
     local exec_control="$owner_home/.openclaw/.ods-exec-control"
     local gateway_env="$owner_home/.config/pixel-agent/gateway.env"
     local onboarding="$owner_home/.config/pixel-deployment/onboarding.json"
@@ -2389,6 +2390,39 @@ for item in root.iterdir():
 root.rmdir()
 PY
     fi
+    # The native admission lease is deliberately durable across gateway
+    # restarts.  It must not survive removal of the exact ODS-managed gateway:
+    # a failed access reproof can otherwise leave a held token whose protected
+    # coordinator journal is removed below, permanently blocking the next clean
+    # install.  The gateway is already stopped, and remove only the runtime's
+    # closed, owner-private fixed-shape state directory.
+    if [[ -e "$access_runtime_state" || -L "$access_runtime_state" ]]; then
+        if ! python3 - "$access_runtime_state" <<'PY'
+import os, pathlib, re, stat, sys
+
+root = pathlib.Path(sys.argv[1])
+info = root.lstat()
+if (not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode)
+        or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700):
+    raise SystemExit("unsafe Pixel access runtime cleanup directory")
+allowed = {"state.json", "process.json", ".process-claim"}
+for item in root.iterdir():
+    item_info = item.lstat()
+    temporary = bool(re.fullmatch(r"\.state-[0-9a-f]{64}", item.name))
+    if (item.name not in allowed and not temporary):
+        raise SystemExit("unknown Pixel access runtime cleanup artifact")
+    if (not stat.S_ISREG(item_info.st_mode) or stat.S_ISLNK(item_info.st_mode)
+            or item_info.st_nlink != 1 or item_info.st_uid != os.getuid()
+            or stat.S_IMODE(item_info.st_mode) != 0o600 or item_info.st_size > 4096):
+        raise SystemExit("unsafe Pixel access runtime cleanup artifact")
+    item.unlink()
+root.rmdir()
+PY
+        then
+            log_error "Could not remove the verified Pixel access runtime state"
+            return 1
+        fi
+    fi
     if [[ "$retire_openclaw_config" == true ]]; then
         if [[ ! -e "$retired_configs" && ! -L "$retired_configs" ]]; then
             mkdir -m 0700 -- "$retired_configs" || {
@@ -2438,7 +2472,8 @@ PY
         || -e "$extension_manager_owner_unit" || -L "$extension_manager_owner_unit" \
         || -e "$artifact_promoter_owner_unit" || -L "$artifact_promoter_owner_unit" \
         || -e "$workspace_preview_owner_unit" || -L "$workspace_preview_owner_unit" \
-        || -e "$exec_control" || -L "$exec_control" ]]; then
+        || -e "$exec_control" || -L "$exec_control" \
+        || -e "$access_runtime_state" || -L "$access_runtime_state" ]]; then
         log_error "ODS-managed Pixel owner artifact cleanup was incomplete"
         return 1
     fi
