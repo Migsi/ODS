@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """Focused contract tests for post-restart Pixel access-mode reproof."""
 import copy
+import contextlib
 import importlib.util
+import io
+import json
 import pathlib
 import sys
 import unittest
@@ -98,6 +101,39 @@ class ReconcileTests(unittest.TestCase):
             return (200, before) if operation == "status" else (200, before)
         with self.assertRaises(RuntimeError):
             reconcile.reconcile(request)
+
+    def test_unsafe_state_retains_only_bounded_projection(self):
+        unsafe = projection(effective_mode="unknown", runtime_verified=False,
+                            reason="transition-recovery-required",
+                            revision="b" * 64, private_value="do-not-log")
+        with self.assertRaises(reconcile.ReconcileError) as raised:
+            reconcile.reconcile(lambda _operation, _body=None: (200, unsafe))
+        diagnostic = raised.exception.diagnostic()
+        self.assertEqual(diagnostic["stage"], "unsafe-state")
+        self.assertEqual(diagnostic["projection"]["reason"], "transition-recovery-required")
+        self.assertNotIn("revision", diagnostic["projection"])
+        self.assertNotIn("private_value", diagnostic["projection"])
+
+    def test_main_emits_structured_change_failure_without_private_fields(self):
+        before = projection(effective_mode="unknown", runtime_verified=False,
+                            reason="runtime-proof-required")
+        rejected = projection(effective_mode="unknown", runtime_verified=False,
+                              reason="transition-recovery-required",
+                              private_value="do-not-log")
+        calls = []
+        def request(operation, _body=None):
+            calls.append(operation)
+            return (200, before) if operation == "status" else (409, rejected)
+        output = io.StringIO()
+        with contextlib.redirect_stderr(output):
+            self.assertEqual(reconcile.main(request), 1)
+        diagnostic = json.loads(output.getvalue())
+        self.assertEqual(diagnostic["error"], "pixel-access-reproof-failed")
+        self.assertEqual(diagnostic["stage"], "change-failed")
+        self.assertEqual(diagnostic["httpStatus"], 409)
+        self.assertEqual(diagnostic["projection"]["reason"], "transition-recovery-required")
+        self.assertNotIn("private_value", output.getvalue())
+        self.assertEqual(calls, ["status", "change"])
 
 
 if __name__ == "__main__":

@@ -10,6 +10,37 @@ from pathlib import Path
 sys.dont_write_bytecode = True
 PROGRAM = Path(__file__).resolve().parent
 HEX = re.compile(r"^[a-f0-9]{64}$")
+DIAGNOSTIC_FIELDS = ("available", "scope", "configured_mode", "effective_mode",
+                     "runtime_verified", "busy", "pending", "reason")
+
+
+def diagnostic_projection(value):
+    if not isinstance(value, dict):
+        return {}
+    result = {}
+    for key in DIAGNOSTIC_FIELDS:
+        item = value.get(key)
+        if item is None or type(item) is bool:
+            result[key] = item
+        elif (isinstance(item, str) and len(item) <= 96
+              and all(32 <= ord(char) < 127 for char in item)):
+            result[key] = item
+    return result
+
+
+class ReconcileError(RuntimeError):
+    def __init__(self, stage, *, status=None, projection=None):
+        super().__init__(stage)
+        self.stage = stage
+        self.status = status if type(status) is int and 100 <= status <= 599 else None
+        self.projection = diagnostic_projection(projection)
+
+    def diagnostic(self):
+        value = {"error": "pixel-access-reproof-failed", "stage": self.stage,
+                 "projection": self.projection}
+        if self.status is not None:
+            value["httpStatus"] = self.status
+        return value
 
 
 def protected(path):
@@ -35,7 +66,7 @@ def ready(value):
 def reconcile(request=request_access):
     status, value = request("status")
     if status != 200:
-        raise RuntimeError("Pixel access status unavailable")
+        raise ReconcileError("status-unavailable", status=status, projection=value)
     if ready(value):
         return value, False
     mode = value.get("configured_mode")
@@ -44,7 +75,7 @@ def reconcile(request=request_access):
             and value.get("runtime_verified") is False and value.get("busy") is False
             and value.get("pending") is False and value.get("reason") == "runtime-proof-required"
             and isinstance(value.get("revision"), str) and HEX.fullmatch(value["revision"])):
-        raise RuntimeError("Pixel access state is not safe for automatic reproof")
+        raise ReconcileError("unsafe-state", projection=value)
     status, value = request("change", {
         "mode": mode,
         "revision": value["revision"],
@@ -54,18 +85,24 @@ def reconcile(request=request_access):
         "confirmed": mode == "full-access",
     })
     if status != 200 or not ready(value):
-        raise RuntimeError("Pixel access runtime reproof failed")
+        raise ReconcileError("change-failed", status=status, projection=value)
     return value, True
 
 
-def main():
+def main(request=request_access):
     try:
-        value, changed = reconcile()
+        value, changed = reconcile(request)
         print(json.dumps({"result": "reproved" if changed else "already-ready",
                           "mode": value["effective_mode"]}, separators=(",", ":")))
         return 0
-    except Exception:
-        print("Pixel access runtime could not be safely re-proved", file=sys.stderr)
+    except ReconcileError as error:
+        print(json.dumps(error.diagnostic(), separators=(",", ":"), sort_keys=True),
+              file=sys.stderr)
+        return 1
+    except Exception as error:
+        print(json.dumps({"error": "pixel-access-reproof-failed", "stage": "client-exception",
+                          "exceptionType": type(error).__name__},
+                         separators=(",", ":"), sort_keys=True), file=sys.stderr)
         return 1
 
 
