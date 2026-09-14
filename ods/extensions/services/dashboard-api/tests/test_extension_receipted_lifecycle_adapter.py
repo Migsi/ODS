@@ -392,6 +392,39 @@ def test_failed_worker_is_receipted_once_and_terminal_failure_is_not_retried() -
     assert receipts.states["apply:aider"][1].outcome == "failed"
 
 
+def test_ambiguous_worker_failure_stays_started_for_observation() -> None:
+    events: list[str] = []
+    calls = 0
+    receipts = StubReceipts()
+
+    def uncertain(
+        _grant: LeaseGrant, _work: LifecycleWorkRequest
+    ) -> LifecycleWorkResult:
+        nonlocal calls
+        calls += 1
+        raise ExtensionLeaseError(
+            "host-work-operation-ambiguous", ambiguous=True
+        )
+
+    lifecycle, lock_factory = adapter(events, receipts, uncertain)
+    operation = {"serviceId": "aider", "action": "install"}
+    with lock_factory.lock_services(BINDING, ["aider"]):
+        with pytest.raises(ReceiptedLifecycleAdapterError) as first:
+            lifecycle.apply_one(BINDING, operation)
+        with pytest.raises(ReceiptedLifecycleAdapterError) as replay:
+            lifecycle.apply_one(BINDING, operation)
+
+    assert first.value.code == "lifecycle-host-work-operation-ambiguous"
+    assert first.value.ambiguous is True
+    assert replay.value.code == "lifecycle-receipt-recovery-required"
+    assert replay.value.ambiguous is True
+    assert calls == 1
+    started, terminal = receipts.states["apply:aider"]
+    assert started.kind == "started"
+    assert terminal is None
+    assert not any(call.startswith("finish:apply:aider:") for call in receipts.calls)
+
+
 def test_begin_ambiguity_converges_only_when_this_call_published_started() -> None:
     events: list[str] = []
     seen: list[LifecycleWorkRequest] = []
