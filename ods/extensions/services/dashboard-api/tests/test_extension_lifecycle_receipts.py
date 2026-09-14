@@ -643,6 +643,67 @@ def test_zero_byte_write_is_closed_and_cleans_temp(tmp_path, monkeypatch):
     assert list(Path(store.root).iterdir()) == []
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX publication contract")
+def test_cleanup_error_is_not_masked_by_close_error(tmp_path, monkeypatch):
+    store = _store(tmp_path)
+    real_close = receipts.os.close
+
+    def fail_cleanup(*_args, **_kwargs):
+        raise receipts.LifecycleReceiptError(
+            "receipt-io-error", "primary cleanup failure"
+        )
+
+    def close_then_fail(fd):
+        real_close(fd)
+        raise OSError("secondary close failure")
+
+    monkeypatch.setattr(receipts, "_unlink_temp_if_ours", fail_cleanup)
+    monkeypatch.setattr(receipts.os, "close", close_then_fail)
+
+    with pytest.raises(receipts.LifecycleReceiptError) as caught:
+        store.begin(TRANSACTION_ID, PLAN_HASH, "stage", REQUEST_HASH, SERVICE_IDS)
+    assert caught.value.code == "receipt-io-error"
+    assert "primary cleanup failure" in str(caught.value)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX publication contract")
+def test_read_error_is_not_masked_by_close_error(tmp_path, monkeypatch):
+    store = _store(tmp_path)
+    store.begin(TRANSACTION_ID, PLAN_HASH, "stage", REQUEST_HASH, SERVICE_IDS)
+    started_path, _ = _paths(store)
+    real_close = receipts.os.close
+
+    def fail_read(*_args, **_kwargs):
+        raise receipts.LifecycleIntegrityError("primary read failure")
+
+    def close_then_fail(fd):
+        real_close(fd)
+        raise OSError("secondary close failure")
+
+    monkeypatch.setattr(receipts.os, "read", fail_read)
+    monkeypatch.setattr(receipts.os, "close", close_then_fail)
+
+    with pytest.raises(receipts.LifecycleIntegrityError, match="primary read failure"):
+        receipts._read_published_receipt(str(started_path))
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX publication contract")
+def test_successful_read_close_error_is_typed(tmp_path, monkeypatch):
+    store = _store(tmp_path)
+    store.begin(TRANSACTION_ID, PLAN_HASH, "stage", REQUEST_HASH, SERVICE_IDS)
+    started_path, _ = _paths(store)
+    real_close = receipts.os.close
+
+    def close_then_fail(fd):
+        real_close(fd)
+        raise OSError("close failure")
+
+    monkeypatch.setattr(receipts.os, "close", close_then_fail)
+    _assert_code(
+        "receipt-io-error", receipts._read_published_receipt, str(started_path)
+    )
+
+
 def test_identical_begin_converges_across_processes(tmp_path):
     store = _store(tmp_path)
     root = str(store.root)
