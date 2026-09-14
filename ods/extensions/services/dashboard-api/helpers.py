@@ -18,7 +18,7 @@ import aiohttp
 import httpx
 
 from config import SERVICES, INSTALL_DIR, DATA_DIR, LLM_BACKEND, read_live_env_value
-from env_values import strip_matching_quotes
+from env_values import parse_env_value
 from host_agent_client import AgentClientError, async_request_json as request_agent_json
 from models import ServiceStatus, DiskUsage, ModelInfo, BootstrapStatus
 from service_health_dns import ServiceHealthResolver
@@ -137,6 +137,15 @@ async def _get_httpx_client() -> httpx.AsyncClient:
         if _httpx_client is None or _httpx_client.is_closed:
             _httpx_client = httpx.AsyncClient(timeout=5.0)
     return _httpx_client
+
+
+async def shutdown_llm_client() -> None:
+    """Close the pooled LLM client after application users have stopped."""
+    global _httpx_client, _httpx_client_lock
+    if _httpx_client is not None:
+        await _httpx_client.aclose()
+        _httpx_client = None
+    _httpx_client_lock = None
 
 
 def _service_status_from_config(service_id: str, config: dict, status: str) -> ServiceStatus:
@@ -844,7 +853,7 @@ def get_model_info() -> Optional[ModelInfo]:
                     key = key.strip()
                     if not key:
                         continue
-                    value = strip_matching_quotes(value)
+                    value = parse_env_value(value)
                     env_values[key] = value
 
             model_name = env_values.get("LLM_MODEL")
