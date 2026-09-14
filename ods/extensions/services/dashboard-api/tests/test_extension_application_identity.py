@@ -23,9 +23,9 @@ BIN_DIR = Path(__file__).resolve().parents[4] / "bin"
 if str(BIN_DIR) not in sys.path:
     sys.path.insert(0, str(BIN_DIR))
 
-import extension_application_identity as app_id
-import extension_lifecycle_plan as lifecycle_plan
-import extension_lifecycle_work as lifecycle_work
+import extension_application_identity as app_id  # noqa: E402, RUF100
+import extension_lifecycle_plan as lifecycle_plan  # noqa: E402, RUF100
+import extension_lifecycle_work as lifecycle_work  # noqa: E402, RUF100
 
 # ---------------------------------------------------------------------------
 # Fixtures
