@@ -393,6 +393,30 @@ def test_store_bootstrap_is_idempotent_and_first_commit_hash_chains_from_it(
     assert written["lockfile"]["lastCommittedTransaction"] is not None
 
 
+def test_store_bootstrap_accepts_safe_concurrent_root_creation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    parent = tmp_path / "assistant-first"
+    parent.mkdir()
+    store = lockfile.ExtensionLockfileStore(parent / "desired-state")
+    real_mkdir = Path.mkdir
+    raced = False
+
+    def mkdir_after_concurrent_creator(path: Path, *args, **kwargs) -> None:
+        nonlocal raced
+        if path == store.root and not raced:
+            raced = True
+            real_mkdir(path, *args, **kwargs)
+            raise FileExistsError(path)
+        real_mkdir(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", mkdir_after_concurrent_creator)
+
+    assert store.bootstrap(empty()["lockfile"]) == empty()
+    assert raced is True
+    assert store.read() == empty()
+
+
 def test_store_bootstrap_rejects_transaction_derived_candidate(tmp_path: Path) -> None:
     store = lockfile.ExtensionLockfileStore(tmp_path / "assistant-first")
     with pytest.raises(lockfile.ExtensionLockfileError, match="not-bootstrap-lockfile"):

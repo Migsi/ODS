@@ -455,7 +455,7 @@ class TransactionExecutor:
                 "restore",
                 binding,
             )
-        except Exception:
+        except Exception:  # noqa: BLE001 - any restore uncertainty quarantines claims
             recovery_ok = False
 
         # Release is attempted only when compensation, restore, and all prior
@@ -465,7 +465,7 @@ class TransactionExecutor:
         if recovery_ok:
             try:
                 final_applied = self._observed_applied(binding, mutable_ops)
-            except Exception:
+            except Exception:  # noqa: BLE001 - any observation uncertainty quarantines
                 final_applied = []
                 recovery_ok = False
 
@@ -480,7 +480,7 @@ class TransactionExecutor:
                         "release",
                         binding,
                     )
-                except Exception:
+                except Exception:  # noqa: BLE001 - any release uncertainty quarantines
                     recovery_ok = False
             elif recovery_ok:
                 # Fresh observation shows applied services remain; release
