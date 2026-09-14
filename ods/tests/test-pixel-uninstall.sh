@@ -306,6 +306,7 @@ write_ops_fixture() {
     write_active_fixture
     local source_ref="d2a2b6be552126f294fb30ee5fb46872acf82c89"
     local source="$INSTALL_DIR/data/pixel/source-$source_ref"
+    local release="$HOME_DIR/.local/share/pixel/releases/4.3.14"
     local uid gid contract_sha256
     uid="$(id -u)"
     gid="$(id -g)"
@@ -317,6 +318,8 @@ write_ops_fixture() {
 {"schemaVersion":2,"deployment":"ods-default","download":{"stagingRoot":"$OPS_STATE/artifacts"},"targets":{"broker":{"backend":"local","writableRoots":["$OPS_STATE/artifacts"]}},"authority":{"defaultLevel":"propose"}}
 JSON
     chmod 0600 "$INSTALL_DIR/data/pixel/operations-policy.json"
+    cp "$INSTALL_DIR/data/pixel/operations-policy.json" "$source/.generated/ops-policy.json"
+    chmod 0600 "$source/.generated/ops-policy.json"
     cat >"$INSTALL_DIR/data/pixel/extension-catalog.json" <<'JSON'
 {"extensions":[{"category":"optional","dependsOn":[],"description":"Fixture extension.","featureNames":[],"gpuBackends":[],"id":"fixture","name":"Fixture","optionalConfiguration":[],"requiredConfiguration":[],"tags":[]}],"kind":"ods-pixel-extension-catalog","schemaVersion":1,"sourceSha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
 JSON
@@ -450,6 +453,39 @@ ENV
     printf 'pixel-ops-broker:x:%s:%s:Pixel Operations Broker:%s:/usr/sbin/nologin\n' \
         "$uid" "$gid" "$OPS_STATE" >"$OPS_PASSWD_STATE"
     printf 'pixel-ops:x:%s:\n' "$gid" >"$OPS_GROUP_STATE"
+    (
+        cd "$source"
+        sha256sum \
+            .generated/pixel-ops-broker.service \
+            .generated/ops-broker.env \
+            .generated/ops-policy.json \
+            >"$release/deployment-inputs.sha256"
+    )
+    chmod 0600 "$release/deployment-inputs.sha256"
+    printf '%s  %s\n' \
+        "$(sha256sum "$release/deployment-inputs.sha256" | awk '{print $1}')" \
+        ./deployment-inputs.sha256 >>"$release/install-manifest.sha256"
+    python3 - \
+        "$HOME_DIR/.config/ods/pixel-managed.json" \
+        "$HOME_DIR/.local/share/pixel/runtime-attestation.json" \
+        "$release/install-manifest.sha256" <<'PY'
+import hashlib
+import json
+import pathlib
+import sys
+
+marker_path, attestation_path, manifest_path = map(pathlib.Path, sys.argv[1:])
+manifest_sha256 = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+marker = json.loads(marker_path.read_text(encoding="utf-8"))
+marker["install_manifest_sha256"] = manifest_sha256
+marker_path.write_text(json.dumps(marker, sort_keys=True, separators=(",", ":")) + "\n")
+attestation = json.loads(attestation_path.read_text(encoding="utf-8"))
+attestation["release"]["installManifestSha256"] = manifest_sha256
+attestation_path.write_text(json.dumps(attestation, sort_keys=True, separators=(",", ":")) + "\n")
+PY
+    chmod 0600 \
+        "$HOME_DIR/.config/ods/pixel-managed.json" \
+        "$HOME_DIR/.local/share/pixel/runtime-attestation.json"
     python3 - "$HOME_DIR/.config/pixel-deployment/onboarding.json" \
         "$INSTALL_DIR/data/pixel/operations-policy.json" <<'PY'
 import json, pathlib, sys
@@ -494,6 +530,59 @@ PY
     chmod 0600 "$HOME_DIR/.config/ods/pixel-managed.json"
     : >"$SYSTEMCTL_LOG"
     : >"$OPS_IDENTITY_LOG"
+}
+
+write_interrupted_ops_receipt_fixture() {
+    write_ops_fixture
+    local source_ref="d2a2b6be552126f294fb30ee5fb46872acf82c89"
+    local source="$INSTALL_DIR/data/pixel/source-$source_ref"
+    python3 - "$HOME_DIR/.config/ods/pixel-managed.json" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+original = json.loads(path.read_text(encoding="utf-8"))
+path.write_text(json.dumps({
+    "schema_version": 2,
+    "manager": "ods",
+    "state": "installing",
+    "initial_active_state": "absent",
+    "install_dir": original["install_dir"],
+    "pixel_source_ref": original["pixel_source_ref"],
+}, sort_keys=True, separators=(",", ":")) + "\n")
+PY
+    chmod 0600 "$HOME_DIR/.config/ods/pixel-managed.json"
+    rm -f -- \
+        "$HOME_DIR/.local/share/pixel/runtime-attestation.json" \
+        "$source/.generated/pixel-ops-broker.service" \
+        "$source/.generated/ops-broker.env" \
+        "$source/.generated/ops-policy.json" \
+        "$INSTALL_DIR/data/pixel/operations-policy.json" \
+        "$INSTALL_DIR/data/pixel/extension-catalog.json" \
+        "$INSTALL_DIR/data/pixel/extension-manager.service" \
+        "$INSTALL_DIR/data/pixel/artifact-promoter.service" \
+        "$INSTALL_DIR/data/pixel/workspace-preview.service" \
+        "$INSTALL_DIR/bin/ods-pixel-approve" \
+        "$INSTALL_DIR/extensions/services/pixel-agent/host/extension_search.py" \
+        "$INSTALL_DIR/extensions/services/pixel-agent/host/artifact_promoter.py" \
+        "$INSTALL_DIR/extensions/services/pixel-agent/host/system_observe.py" \
+        "$INSTALL_DIR/extensions/services/pixel-agent/host/pixel-ops-broker-ods.conf" \
+        "$OPS_DROPIN" \
+        "$OPS_INSTALL/ods-extension-search.py" \
+        "$OPS_INSTALL/ods-extension-catalog.json" \
+        "$OPS_INSTALL/ods-extension-manager.py" \
+        "$LIBEXEC_DIR/ods-pixel-extension-manager.py" \
+        "$LIBEXEC_DIR/ods-pixel-artifact-promoter.py" \
+        "$LIBEXEC_DIR/ods-pixel-workspace-preview.py" \
+        "$LIBEXEC_DIR/ods-pixel-system-observe.py" \
+        "$SYSTEMD_DIR/pixel-extension-manager.service" \
+        "$SYSTEMD_DIR/pixel-artifact-promoter.service" \
+        "$SYSTEMD_DIR/pixel-workspace-preview.service"
+    rmdir -- "$OPS_DROPIN_DIR"
+    : >"$SYSTEMCTL_LOG"
+    : >"$OPS_IDENTITY_LOG"
+    : >"$DOCKER_LOG"
 }
 
 write_fixture
@@ -690,6 +779,75 @@ if ods_pixel_uninstall_managed "$INSTALL_DIR" "$HOME_DIR"; then
 else
     fail "verified Operations Broker deployment could not be removed"
 fi
+
+write_interrupted_ops_receipt_fixture
+if ods_pixel_uninstall_managed "$INSTALL_DIR" "$HOME_DIR"; then
+    if [[ ! -e "$SYSTEMD_DIR/pixel-ops-broker.service" \
+        && ! -e "$OPS_ENV" && ! -e "$OPS_POLICY_DIR" \
+        && ! -e "$OPS_INSTALL" && ! -e "$OPS_STATE" \
+        && ! -e "$OPS_PASSWD_STATE" && ! -e "$OPS_GROUP_STATE" \
+        && ! -e "$HOME_DIR/.config/ods/pixel-managed.json" \
+        && ! -e "$HOME_DIR/.local/share/pixel/current" \
+        && -e "$DOCKER_STATE" ]]; then
+        pass "interrupted Operations cleanup uses the release-bound deployment receipt without removing unbound images"
+    else
+        fail "interrupted receipt-bound Operations cleanup left partial or over-broad state"
+    fi
+else
+    fail "interrupted Operations cleanup rejected its exact release-bound deployment receipt"
+fi
+
+for receipt_failure in missing receipt-drift duplicate unit-drift ready-source-missing; do
+    if [[ "$receipt_failure" == ready-source-missing ]]; then
+        write_ops_fixture
+        source="$INSTALL_DIR/data/pixel/source-d2a2b6be552126f294fb30ee5fb46872acf82c89"
+        rm -f -- "$source/.generated/pixel-ops-broker.service"
+    else
+        write_interrupted_ops_receipt_fixture
+        release="$HOME_DIR/.local/share/pixel/releases/4.3.14"
+        receipt="$release/deployment-inputs.sha256"
+        case "$receipt_failure" in
+            missing)
+                rm -f -- "$receipt"
+                ;;
+            receipt-drift)
+                printf '%s\n' '# drift' >>"$receipt"
+                ;;
+            duplicate)
+                duplicate_line="$(grep -F '  .generated/pixel-ops-broker.service' "$receipt")"
+                printf '%s\n' "$duplicate_line" >>"$receipt"
+                receipt_sha256="$(sha256sum "$receipt" | awk '{print $1}')"
+                python3 - "$release/install-manifest.sha256" "$receipt_sha256" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+digest = sys.argv[2]
+lines = path.read_text(encoding="ascii").splitlines()
+matches = [index for index, line in enumerate(lines) if line.endswith("  ./deployment-inputs.sha256")]
+if len(matches) != 1:
+    raise SystemExit("fixture release manifest lacks one deployment-input receipt")
+lines[matches[0]] = f"{digest}  ./deployment-inputs.sha256"
+path.write_text("\n".join(lines) + "\n", encoding="ascii")
+PY
+                ;;
+            unit-drift)
+                printf '%s\n' '# drift' >>"$SYSTEMD_DIR/pixel-ops-broker.service"
+                ;;
+        esac
+    fi
+    if ods_pixel_uninstall_managed "$INSTALL_DIR" "$HOME_DIR"; then
+        fail "interrupted Operations receipt failure $receipt_failure was accepted"
+    else
+        [[ -L "$HOME_DIR/.local/share/pixel/current" \
+            && -e "$HOME_DIR/.config/ods/pixel-managed.json" \
+            && -e "$SYSTEMD_DIR/pixel-ops-broker.service" \
+            && -e "$OPS_STATE" && -e "$OPS_PASSWD_STATE" \
+            && ! -s "$SYSTEMCTL_LOG" && ! -s "$DOCKER_LOG" ]] \
+            && pass "interrupted Operations receipt failure $receipt_failure fails closed before mutation" \
+            || fail "interrupted Operations receipt failure $receipt_failure caused partial mutation"
+    fi
+done
 
 write_ops_fixture
 rm -f -- "$LIBEXEC_DIR/ods-pixel-system-observe.py"

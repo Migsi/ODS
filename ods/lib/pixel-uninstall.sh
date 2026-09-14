@@ -1039,9 +1039,13 @@ PY
             "$ops_dropin" "$ops_dropin_source" \
             "$install_dir/data/pixel/source-$pixel_source_ref/.generated/pixel-ops-broker.service" \
             "$install_dir/data/pixel/source-$pixel_source_ref/.generated/ops-broker.env" \
-            "$install_dir/data/pixel/source-$pixel_source_ref/deploy/ops-broker/broker.py" <<'PY'
+            "$install_dir/data/pixel/source-$pixel_source_ref/deploy/ops-broker/broker.py" \
+            "$release_path/install-manifest.sha256" \
+            "$release_path/deployment-inputs.sha256" "$install_manifest_sha256" <<'PY'
+import hashlib
 import os
 import pathlib
+import re
 import stat
 import sys
 
@@ -1078,6 +1082,9 @@ import sys
     expected_unit_raw,
     expected_env_raw,
     expected_program_raw,
+    release_manifest_raw,
+    deployment_inputs_raw,
+    expected_release_manifest_sha256,
 ) = sys.argv[1:]
 
 root_uid = int(root_uid_raw)
@@ -1103,6 +1110,8 @@ expected_dropin = pathlib.Path(expected_dropin_raw)
 expected_unit = pathlib.Path(expected_unit_raw)
 expected_env = pathlib.Path(expected_env_raw)
 expected_program = pathlib.Path(expected_program_raw)
+release_manifest = pathlib.Path(release_manifest_raw)
+deployment_inputs = pathlib.Path(deployment_inputs_raw)
 
 
 def exists(path: pathlib.Path) -> bool:
@@ -1196,11 +1205,85 @@ def owner_source(
         raise SystemExit(f"unsafe ODS Pixel Operations source: {path}")
 
 
+def checksum_records(path: pathlib.Path, maximum: int) -> dict[str, str]:
+    if not exists(path):
+        raise SystemExit(f"missing Pixel checksum receipt: {path}")
+    owner_source(path, maximum, private=True)
+    records = {}
+    try:
+        lines = path.read_text(encoding="ascii").splitlines()
+    except UnicodeError as error:
+        raise SystemExit(f"invalid Pixel checksum receipt encoding: {path}") from error
+    if not lines:
+        raise SystemExit(f"empty Pixel checksum receipt: {path}")
+    for line in lines:
+        if (len(line) < 67 or not re.fullmatch(r"[0-9a-f]{64}", line[:64])
+                or line[64:66] != "  "):
+            raise SystemExit(f"malformed Pixel checksum receipt: {path}")
+        name = line[66:]
+        if (not name or any(ord(character) < 32 or ord(character) == 127 for character in name)
+                or name in records):
+            raise SystemExit(f"ambiguous Pixel checksum receipt: {path}")
+        records[name] = line[:64]
+    return records
+
+
+release_records = None
+deployment_records = None
+
+
+def deployment_receipt(name: str) -> str:
+    global release_records, deployment_records
+    if marker_state not in {"installing", "deactivating"}:
+        raise SystemExit("ready Pixel Operations artifacts require their exact owner source")
+    if not re.fullmatch(r"[0-9a-f]{64}", expected_release_manifest_sha256):
+        raise SystemExit("invalid Pixel release manifest binding")
+    if deployment_records is None:
+        release_records = checksum_records(release_manifest, 2 * 1024 * 1024)
+        if hashlib.sha256(release_manifest.read_bytes()).hexdigest() != expected_release_manifest_sha256:
+            raise SystemExit("Pixel release manifest changed before Operations validation")
+        receipt_names = [
+            candidate for candidate in ("./deployment-inputs.sha256", "deployment-inputs.sha256")
+            if candidate in release_records
+        ]
+        if len(receipt_names) != 1:
+            raise SystemExit("Pixel release manifest lacks one exact deployment-input receipt")
+        owner_source(deployment_inputs, 2 * 1024 * 1024, private=True)
+        if (hashlib.sha256(deployment_inputs.read_bytes()).hexdigest()
+                != release_records[receipt_names[0]]):
+            raise SystemExit("Pixel deployment-input receipt drifted from the release manifest")
+        deployment_records = checksum_records(deployment_inputs, 2 * 1024 * 1024)
+    if name not in deployment_records:
+        raise SystemExit(f"Pixel deployment-input receipt lacks {name}")
+    return deployment_records[name]
+
+
+def exact_source_or_receipt(
+    artifact: pathlib.Path,
+    source: pathlib.Path,
+    receipt_name: str,
+    maximum: int,
+    drift_message: str,
+    source_private: bool = False,
+) -> None:
+    if exists(source):
+        owner_source(source, maximum, private=source_private)
+        if artifact.read_bytes() != source.read_bytes():
+            raise SystemExit(drift_message)
+        return
+    if hashlib.sha256(artifact.read_bytes()).hexdigest() != deployment_receipt(receipt_name):
+        raise SystemExit(drift_message)
+
+
 if exists(unit):
     exact_file(unit, root_uid, root_gid, 0o644, 256 * 1024)
-    owner_source(expected_unit, 256 * 1024)
-    if unit.read_bytes() != expected_unit.read_bytes():
-        raise SystemExit("Pixel Operations Broker unit drifted from the exact generated source")
+    exact_source_or_receipt(
+        unit,
+        expected_unit,
+        ".generated/pixel-ops-broker.service",
+        256 * 1024,
+        "Pixel Operations Broker unit drifted from the exact generated source or receipt",
+    )
 if exists(dropin):
     exact_file(dropin, root_uid, root_gid, 0o644, 64 * 1024)
     owner_source(expected_dropin, 64 * 1024)
@@ -1219,14 +1302,23 @@ elif dropin_source_present and marker_state == "ready":
     raise SystemExit("ready Pixel Operations Broker ODS drop-in is missing")
 if exists(environment):
     exact_file(environment, root_uid, broker_gid, 0o640, 64 * 1024)
-    owner_source(expected_env, 64 * 1024)
-    if environment.read_bytes() != expected_env.read_bytes():
-        raise SystemExit("Pixel Operations Broker environment drifted from the exact generated source")
+    exact_source_or_receipt(
+        environment,
+        expected_env,
+        ".generated/ops-broker.env",
+        64 * 1024,
+        "Pixel Operations Broker environment drifted from the exact generated source or receipt",
+    )
 if exists(policy):
     exact_file(policy, root_uid, broker_gid, 0o640, 2 * 1024 * 1024)
-    owner_source(owner_policy, 2 * 1024 * 1024, private=True)
-    if policy.read_bytes() != owner_policy.read_bytes():
-        raise SystemExit("Pixel Operations Broker policy drifted from the ODS private policy")
+    exact_source_or_receipt(
+        policy,
+        owner_policy,
+        ".generated/ops-policy.json",
+        2 * 1024 * 1024,
+        "Pixel Operations Broker policy drifted from the exact ODS policy source or receipt",
+        source_private=True,
+    )
 if exists(install_dir):
     info = install_dir.lstat()
     contents = {item.name for item in install_dir.iterdir()}
