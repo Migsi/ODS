@@ -448,6 +448,10 @@ def test_configuration_routes_are_authenticated_bounded_and_value_safe(api):
         "secretValues": {"NOTES_API_KEY": secret},
     }
     assert api.client.post(path, json=body).status_code == 401
+    assert api.client.post(path, json=body, headers=api.headers).status_code == 403
+    api.client.cookies.set(
+        "ods-session", session_signer.issue_scoped("owner", ttl_seconds=60)
+    )
     response = api.client.post(path, json=body, headers=api.headers)
     assert response.status_code == 201
     assert response.headers["cache-control"] == "no-store"
@@ -468,6 +472,9 @@ def test_configuration_routes_are_authenticated_bounded_and_value_safe(api):
 
 
 def test_configuration_submission_rejects_extra_authority(api):
+    api.client.cookies.set(
+        "ods-session", session_signer.issue_scoped("owner", ttl_seconds=60)
+    )
     response = api.client.post(
         f"/api/extensions/transactions/{TX_ID}/configuration",
         json={
@@ -486,6 +493,9 @@ def test_configuration_submission_rejects_extra_authority(api):
 
 def test_configuration_parser_and_internal_failures_never_echo_secret(api):
     path = f"/api/extensions/transactions/{TX_ID}/configuration"
+    api.client.cookies.set(
+        "ods-session", session_signer.issue_scoped("owner", ttl_seconds=60)
+    )
     secret = "do-not-echo-parser-secret"
     schema_hash = "9" * 64
     idempotency_key = "8" * 64
@@ -521,6 +531,26 @@ def test_configuration_parser_and_internal_failures_never_echo_secret(api):
     assert failed.status_code == 503
     assert failed.json() == {"error": {"code": "configuration-unavailable"}}
     assert secret not in failed.text
+
+
+@pytest.mark.parametrize("scope", ["guest", "admin"])
+def test_only_owner_cookie_can_submit_configuration(scope, api):
+    api.client.cookies.set(
+        "ods-session", session_signer.issue_scoped(scope, ttl_seconds=60)
+    )
+    response = api.client.post(
+        f"/api/extensions/transactions/{TX_ID}/configuration",
+        json={
+            "planHash": PLAN_HASH,
+            "schemaHash": "9" * 64,
+            "idempotencyKey": "8" * 64,
+            "values": {},
+            "secretValues": {"NOTES_API_KEY": "must-not-be-staged"},
+        },
+        headers=api.headers,
+    )
+    assert response.status_code == 403
+    assert api.configuration.submit_calls == []
 
 
 def test_execute_requires_api_key_and_passes_only_id_and_hash(api):
@@ -583,6 +613,33 @@ def test_main_csrf_blocks_cross_origin_owner_approval(test_client, monkeypatch):
     response = test_client.post(
         f"/api/extensions/transactions/{TX_ID}/approval",
         json={"planHash": PLAN_HASH},
+        headers={
+            "Origin": "https://evil.invalid",
+            "Sec-Fetch-Site": "cross-site",
+        },
+    )
+
+    assert response.status_code == 403
+    assert response.json() == {
+        "detail": "Cross-origin state-changing request rejected."
+    }
+
+
+def test_main_csrf_blocks_cross_origin_owner_configuration(test_client, monkeypatch):
+    monkeypatch.setenv("ODS_ASSISTANT_TRANSACTIONS_ENABLED", "true")
+    session_signer._set_secret_for_tests("phase4c-session-secret")
+    owner_cookie = session_signer.issue_scoped("owner", ttl_seconds=60)
+    test_client.cookies.set("ods-session", owner_cookie)
+
+    response = test_client.post(
+        f"/api/extensions/transactions/{TX_ID}/configuration",
+        json={
+            "planHash": PLAN_HASH,
+            "schemaHash": "9" * 64,
+            "idempotencyKey": "8" * 64,
+            "values": {},
+            "secretValues": {},
+        },
         headers={
             "Origin": "https://evil.invalid",
             "Sec-Fetch-Site": "cross-site",
