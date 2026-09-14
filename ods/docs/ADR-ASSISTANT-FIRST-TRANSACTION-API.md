@@ -68,12 +68,15 @@ receipts return the stored plan hash from the executor result rather than
 independently reflecting request input.
 
 Single-extension Dashboard mutations and the composite executor now share one
-file-lock implementation and namespace under
-`<ODS_DATA_DIR>/.extension-operation-locks`. Service IDs are validated before
-path creation, filenames are SHA-256-derived, symlinked directories and files
-fail closed, and composite lock sets are deduplicated and acquired in lexical
-service-ID order before caller code can run. A bounded composite acquisition
-unwinds every already-held lock if any later lock times out.
+per-service file-lock implementation and namespace under the selected durable
+lock parent (`<ODS_DATA_DIR>` or its existing writable config fallback).
+Service IDs are validated before path creation, filenames are SHA-256-derived,
+symlinked directories and files fail closed, and composite lock sets are
+deduplicated and acquired in lexical service-ID order before caller code can
+run. A bounded composite acquisition unwinds every already-held lock if any
+later lock times out. The existing global `.extensions-lock` remains an
+additional legacy filesystem mutex; it is not the transaction collision
+boundary.
 
 `ServiceLockFactory` receives the same immutable `(transaction ID, plan hash)`
 binding as lifecycle adapters and observations. The local file-lock factory
