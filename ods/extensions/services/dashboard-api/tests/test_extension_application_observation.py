@@ -30,11 +30,11 @@ BIN_DIR = Path(__file__).resolve().parents[4] / "bin"
 if str(BIN_DIR) not in sys.path:
     sys.path.insert(0, str(BIN_DIR))
 
-import extension_application_identity as app_id
-import extension_application_observation as obs_mod
-import extension_lifecycle_plan as lifecycle_plan
-import extension_lifecycle_receipts as receipts_mod
-import extension_lifecycle_work as lifecycle_work
+import extension_application_identity as app_id  # noqa: E402, RUF100
+import extension_application_observation as obs_mod  # noqa: E402, RUF100
+import extension_lifecycle_plan as lifecycle_plan  # noqa: E402, RUF100
+import extension_lifecycle_receipts as receipts_mod  # noqa: E402, RUF100
+import extension_lifecycle_work as lifecycle_work  # noqa: E402, RUF100
 
 # ---------------------------------------------------------------------------
 # Constants / fixtures
@@ -404,6 +404,15 @@ def test_applied_started_only():
     assert result.identity_sha256 == identity.identity_sha256
     assert result.record_sha256 is not None
     assert len(result.containers) == 2
+
+
+def test_non_apply_command_is_rejected_before_classification():
+    command = replace(_bound_command(), operation_key=f"purge:{SERVICE_ID}")
+    evidence = _build_evidence(snapshot=_absent_snapshot())
+
+    with pytest.raises(obs_mod.ApplicationObservationError) as exc:
+        obs_mod.observe_application(command, evidence)
+    assert exc.value.code == "command-identity-invalid"
 
 
 def test_applied_started_only_single_container():
@@ -1276,9 +1285,8 @@ def test_module_not_imported_by_runtime():
         if isinstance(node, ast.Import):
             for alias in node.names:
                 imports.append(alias.name)
-        elif isinstance(node, ast.ImportFrom):
-            if node.module:
-                imports.append(node.module)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imports.append(node.module)
     for imp in imports:
         assert "ods-host-agent" not in imp
         assert "main" not in imp
@@ -1295,9 +1303,8 @@ def test_module_no_side_effects():
         if isinstance(node, ast.Import):
             for alias in node.names:
                 imports.append(alias.name)
-        elif isinstance(node, ast.ImportFrom):
-            if node.module:
-                imports.append(node.module)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imports.append(node.module)
     forbidden = {
         "subprocess", "socket", "http", "requests", "urllib",
         "threading", "multiprocessing", "asyncio", "httpx",

@@ -22,12 +22,11 @@ ODS_ROOT = Path(__file__).resolve().parents[4]
 if str(BIN_DIR) not in sys.path:
     sys.path.insert(0, str(BIN_DIR))
 
-import extension_application_identity as app_identity  # noqa: E402
-import extension_application_observation as observation  # noqa: E402
-import extension_application_record_store as store_mod  # noqa: E402
-import extension_lifecycle_plan as lifecycle_plan  # noqa: E402
-import extension_lifecycle_work as lifecycle_work  # noqa: E402
-
+import extension_application_identity as app_identity  # noqa: E402, RUF100
+import extension_application_observation as observation  # noqa: E402, RUF100
+import extension_application_record_store as store_mod  # noqa: E402, RUF100
+import extension_lifecycle_plan as lifecycle_plan  # noqa: E402, RUF100
+import extension_lifecycle_work as lifecycle_work  # noqa: E402, RUF100
 
 SUPPORTED = (
     os.name == "posix"
@@ -202,7 +201,7 @@ def _publish_process(root: str, service_id: str, config: str, gate, output) -> N
         output.put(("ok", result.outcome, result.record.record_sha256))
     except store_mod.ApplicationRecordStoreError as error:
         output.put(("error", error.code))
-    except BaseException as error:  # pragma: no cover - diagnostic boundary
+    except BaseException as error:  # noqa: BLE001, RUF100  # pragma: no cover
         output.put(("unexpected", type(error).__name__))
 
 
@@ -519,6 +518,31 @@ class TestApplicationRecordStore:
             self.snapshot_path.chmod(0o644)
         _assert_code("application-record-store-custody", self.store.active)
 
+    def test_snapshot_uid_mismatch_is_rejected_with_a_stable_error(self):
+        self._publish()
+        snapshot = self.snapshot_path.stat()
+        real_fstat = store_mod.os.fstat
+
+        def mismatched_snapshot_uid(descriptor: int):
+            result = real_fstat(descriptor)
+            if (result.st_dev, result.st_ino) != (snapshot.st_dev, snapshot.st_ino):
+                return result
+            return SimpleNamespace(
+                st_dev=result.st_dev,
+                st_ino=result.st_ino,
+                st_mode=result.st_mode,
+                st_nlink=result.st_nlink,
+                st_uid=result.st_uid + 1,
+                st_size=result.st_size,
+                st_mtime_ns=result.st_mtime_ns,
+                st_ctime_ns=result.st_ctime_ns,
+            )
+
+        with mock.patch.object(
+            store_mod.os, "fstat", side_effect=mismatched_snapshot_uid
+        ):
+            _assert_code("application-record-store-custody", self.store.active)
+
     def test_device_snapshot_is_rejected_when_creation_is_permitted(self):
         self._publish()
         self.snapshot_path.unlink()
@@ -576,6 +600,53 @@ class TestApplicationRecordStore:
         finally:
             os.close(descriptor)
         assert len(raw) == store_mod.MAX_FILE_BYTES
+
+    def test_maximum_record_count_parses_and_next_create_is_nonmutating(self):
+        maximum_version = "\U0010ffff" * 128
+
+        def maximum_service_id(index: int) -> str:
+            prefix = f"s{index:03d}-"
+            return prefix + "s" * (64 - len(prefix))
+
+        def maximum_containers(service_id: str) -> tuple[str, ...]:
+            names = []
+            for index in range(observation.MAX_CONTAINERS):
+                prefix = f"{service_id}-{index:02d}-"
+                names.append(prefix + "x" * (128 - len(prefix)))
+            return tuple(names)
+
+        records = [
+            _record_dict(
+                maximum_service_id(index),
+                version=maximum_version,
+                containers=maximum_containers(maximum_service_id(index)),
+            )
+            for index in range(store_mod.MAX_RECORDS)
+        ]
+        raw = _canonical({"schema": store_mod.STORE_SCHEMA, "records": records})
+        # Every producer-variable field is at its maximum: 64-character identity
+        # service IDs, 128 four-byte Unicode scalars in version, and 32 unique
+        # 128-character container names per record. The canonical schema therefore
+        # cannot produce a valid snapshot at the larger file-size boundary.
+        assert len(raw) < store_mod.MAX_FILE_BYTES
+        self.snapshot_path.write_bytes(raw)
+        self.snapshot_path.chmod(0o600)
+
+        assert len(self.store.active()) == store_mod.MAX_RECORDS
+        before = self.snapshot_path.read_bytes()
+        before_stat = self.snapshot_path.stat()
+        _assert_code(
+            "application-record-store-size",
+            lambda: self._publish(
+                service_id="overflow", containers=("overflow-api",)
+            ),
+        )
+        after_stat = self.snapshot_path.stat()
+        assert self.snapshot_path.read_bytes() == before
+        assert (after_stat.st_ino, after_stat.st_mtime_ns) == (
+            before_stat.st_ino,
+            before_stat.st_mtime_ns,
+        )
 
     def test_partial_write_and_file_fsync_failure_preserve_prior_snapshot(self):
         self._publish()
@@ -771,9 +842,7 @@ class TestApplicationRecordStore:
                 if isinstance(node, ast.Import) and any(
                     alias.name == "extension_application_record_store"
                     for alias in node.names
-                ):
-                    importers.append(path.relative_to(ODS_ROOT).as_posix())
-                elif (
+                ) or (
                     isinstance(node, ast.ImportFrom)
                     and node.module == "extension_application_record_store"
                 ):

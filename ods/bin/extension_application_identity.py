@@ -195,12 +195,7 @@ def _build_identity(
         compose_sha256 = COMPOSE_DIGEST_SENTINEL
 
     version = definition.version
-    if (
-        not isinstance(version, str)
-        or not version
-        or len(version) > 128
-        or any(ord(character) < 32 or ord(character) == 127 for character in version)
-    ):
+    if not _valid_version(version):
         _bad("version-required")
 
     # Compute identity SHA-256 over canonical bytes of the preceding fields
@@ -271,7 +266,12 @@ def _valid_version(value: Any) -> bool:
         isinstance(value, str)
         and bool(value)
         and len(value) <= 128
-        and not any(ord(character) < 32 or ord(character) == 127 for character in value)
+        and not any(
+            ord(character) < 32
+            or ord(character) == 127
+            or 0xD800 <= ord(character) <= 0xDFFF
+            for character in value
+        )
     )
 
 

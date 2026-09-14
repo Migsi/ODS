@@ -30,7 +30,6 @@ from extension_application_observation import (
 )
 from extension_lifecycle_work import LifecycleWorkCommand, LifecycleWorkError
 
-
 STORE_SCHEMA = "ods.extension-application-records.v1"
 SNAPSHOT_NAME = "application-state.json"
 MAX_RECORDS = 256
@@ -707,13 +706,13 @@ class ApplicationRecordStore:
 
 
 __all__ = [
+    "MAX_FILE_BYTES",
+    "MAX_RECORDS",
+    "SNAPSHOT_NAME",
+    "STORE_SCHEMA",
     "ApplicationRecord",
     "ApplicationRecordStore",
     "ApplicationRecordStoreError",
-    "MAX_FILE_BYTES",
-    "MAX_RECORDS",
     "PublishResult",
     "RemoveResult",
-    "SNAPSHOT_NAME",
-    "STORE_SCHEMA",
 ]
