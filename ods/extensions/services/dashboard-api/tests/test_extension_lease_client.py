@@ -120,6 +120,7 @@ def test_renew_status_and_release_keep_token_in_body_only() -> None:
     released = client.release(renewed)
 
     assert renewed.binding is BINDING
+    assert renewed._token is current._token
     assert status.active is True
     assert released.released is True
     assert [call[1].rsplit("/", 1)[-1] for call in calls] == [
@@ -181,6 +182,8 @@ def test_invalid_binding_is_rejected_before_request(value) -> None:
     [
         ([], 600),
         ("aider", 600),
+        (b"aider", 600),
+        ({"aider": True}, 600),
         (["Bad ID"], 600),
         (["a" * 129], 600),
         ([f"service-{index}" for index in range(129)], 600),
@@ -218,6 +221,7 @@ def test_invalid_acquire_values_are_rejected_before_request(service_ids, ttl) ->
             True,
             False,
         ),
+        (503, None, "lease-operation-ambiguous", False, True),
         (500, None, "lease-operation-ambiguous", False, True),
     ],
 )

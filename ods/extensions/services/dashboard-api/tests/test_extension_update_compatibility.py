@@ -423,6 +423,20 @@ def test_stale_installed_version_and_catalog_revision_are_rejected() -> None:
         assess(source, entries, candidate_catalog_revision="9" * 64)
 
 
+def test_candidate_ods_version_regression_is_rejected() -> None:
+    source = source_lockfile(
+        locked_extension("app", minimum="2.0.0", maximum="3.1.0"),
+        ods_version="2.6.0",
+    )
+    entries = [catalog_entry("app", minimum="2.0.0", maximum="3.1.0")]
+
+    with pytest.raises(
+        update_compatibility.ExtensionUpdateCompatibilityError,
+        match="candidate-ods-version-regression",
+    ):
+        assess(source, entries, candidate_ods_version="2.5.9")
+
+
 def test_invalid_or_duplicate_candidate_catalog_is_rejected() -> None:
     source = source_lockfile(locked_extension("app"))
     entries = [catalog_entry("app"), catalog_entry("app")]

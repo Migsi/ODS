@@ -199,6 +199,34 @@ class ArtifactStageStoreTests(unittest.TestCase):
         self.assertTrue(duplicate.duplicate)
         self.assertEqual(duplicate.bundle_sha256, result.bundle_sha256)
 
+    def test_duplicate_replay_retries_failed_directory_durability(self) -> None:
+        manifest = b"name: demo\n"
+        definition = planned_definition("demo", manifest)
+        command = bound_command((definition,))
+        verified = verified_definition(definition, manifest)
+        real_fsync = os.fsync
+
+        def reject_directory_sync(descriptor: int) -> None:
+            if stat.S_ISDIR(os.fstat(descriptor).st_mode):
+                raise OSError(errno.EIO, "directory sync failed")
+            real_fsync(descriptor)
+
+        with mock.patch.object(
+            staging.os, "fsync", side_effect=reject_directory_sync
+        ):
+            self.assert_code(
+                "artifact-stage-io-error",
+                lambda: self.store.stage(command, (verified,)),
+            )
+            self.final_file()
+            self.assert_code(
+                "artifact-stage-io-error",
+                lambda: self.store.stage(command, (verified,)),
+            )
+
+        duplicate = self.store.stage(command, (verified,))
+        self.assertTrue(duplicate.duplicate)
+
     def test_ordered_batch_nested_compose_and_noop_exclusion(self) -> None:
         first_manifest = b"name: first\n"
         second_manifest = b"name: second\n"

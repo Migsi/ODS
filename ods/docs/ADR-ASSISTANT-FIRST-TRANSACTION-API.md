@@ -86,6 +86,8 @@ symlinked or multiply-linked files and unsafe ownership/modes fail closed, and
 composite lock sets are deduplicated and acquired in lexical service-ID order
 before caller code can run. A bounded acquisition unwinds every already-held
 lock if any later lock times out.
+The existing global `.extensions-lock` remains an additional legacy filesystem
+mutex; it is not the Assistant First transaction collision boundary.
 
 `ServiceLockFactory` receives the same immutable `(transaction ID, plan hash)`
 binding as lifecycle adapters and observations. The local file-lock factory
