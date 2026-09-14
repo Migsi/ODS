@@ -156,9 +156,12 @@ never replayed blindly because the prior worker may already have run; it stops
 with explicit recovery-required ambiguity until durable host observation can
 decide the result. Begin and finish ambiguity use bounded snapshot convergence,
 and the worker is never rerun merely because terminal publication was
-uncertain. Empty mutation batches are receiptless no-ops. Production still has
-no adapter importer and retains `executor=None`; host mutation and observation
-adapters remain required before activation.
+uncertain. An ambiguous worker result also leaves the started receipt
+non-terminal for observation instead of publishing a false failed outcome;
+only a proven worker failure publishes a terminal failed receipt. Empty
+mutation batches are receiptless no-ops. Production still has no adapter
+importer and retains `executor=None`; host mutation and observation adapters
+remain required before activation.
 
 Phase 5G-F adds the dormant synchronous Dashboard-side host-work client that
 can satisfy the receipt-bound adapter's worker seam. It accepts only a typed,

@@ -137,6 +137,29 @@ class CatalogTests(unittest.TestCase):
         changed[0]["planning"]["definitionSource"] = "library"
         self.assertNotEqual(first, generator.catalog_revision(changed))
 
+    def test_v1_planning_projection_is_restricted_to_legacy_fields(self):
+        self.manifest(self.services, "legacy")
+        entry = generator.generate_catalog(self.library, self.services)[0]
+        self.assertEqual(entry["manifest_schema_version"], "ods.services.v1")
+        self.assertEqual(
+            set(entry["planning"]),
+            {
+                "serviceType",
+                "version",
+                "dataSchemaVersion",
+                "odsCompatibility",
+                "definitionSha256",
+                "composeSha256",
+                "definitionSource",
+                "composeFile",
+                "dependsOn",
+                "legacy",
+            },
+        )
+        self.assertEqual(entry["planning"]["definitionSource"], "builtin")
+        self.assertEqual(entry["planning"]["composeFile"], "compose.yaml")
+        self.assertTrue(entry["planning"]["legacy"])
+
     def test_definition_digest_is_independent_of_checkout_newlines(self):
         document = self.root / "definition.yaml"
         document.write_bytes(b"service:\n  id: stable\n  enabled: true\n")

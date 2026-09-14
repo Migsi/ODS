@@ -148,6 +148,7 @@ except Exception:  # pragma: no cover - import environment dependent
 _LIFECYCLE_RECEIPT_SCHEMA = "ods.extension-lifecycle-receipt-api.v1"
 _LIFECYCLE_RECEIPT_MAX_BODY = 32 * 1024
 _LIFECYCLE_RECEIPT_ROOT_NAME = ".assistant-lifecycle-receipts"
+_LIFECYCLE_RECEIPT_PLAN_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 
 _BEGIN_RECEIPT_KEYS = frozenset({
     "schema", "transactionId", "planHash", "operationKey",
@@ -2084,6 +2085,25 @@ def load_env(env_path: Path) -> dict:
         if "=" in line:
             key, _, val = line.partition("=")
             raw_value = val.strip()
+            # Match the dashboard's single-line dotenv writer without shell
+            # expansion. shlex drops bare Windows path backslashes and keeps
+            # a backslash before $ inside double quotes.
+            quoted = re.fullmatch(r'"((?:\\.|[^"\\])*)"(?:\s+#.*)?', raw_value)
+            if quoted:
+                env[key.strip()] = (
+                    quoted.group(1).replace('\\"', '"')
+                    .replace('\\$', '$').replace('\\\\', '\\')
+                )
+                continue
+            quoted = re.fullmatch(r"'([^']*)'(?:\s+#.*)?", raw_value)
+            if quoted:
+                env[key.strip()] = quoted.group(1)
+                continue
+            if raw_value[:1] not in {"'", '"'}:
+                env[key.strip()] = raw_value.split(" #", 1)[0].rstrip()
+                continue
+            # Preserve legacy concatenated shell quotes emitted by the host
+            # agent's own writer. Never evaluate substitutions or commands.
             try:
                 parsed = shlex.split(raw_value, comments=False, posix=True)
             except ValueError:
@@ -5759,6 +5779,8 @@ _PUBLIC_PROCESS_FAILURES = {
     "extension_hook_failed": "Extension hook failed; review host logs",
     "extension_install_failed": "Extension installation failed; review host logs",
     "extension_retry_failed": "Extension retry failed; review host logs",
+    "extension_toggle_failed": "Extension state change failed; review host logs",
+    "extension_config_sync_failed": "Extension configuration sync failed; review host logs",
     "extension_hook_runtime_missing": "Extension hook requires a supported Bash runtime",
     "extension_not_found": "Extension files are unavailable; review installed extension state",
     "inference_sharing_failed": "Inference sharing operation failed; reload state before retrying",
@@ -6645,6 +6667,18 @@ def _snapshot_receipt_dict(receipt) -> dict | None:
     if isinstance(receipt, _extension_lifecycle_receipts.TerminalReceipt):
         return _receipt_dict_from_terminal(receipt)
     return _receipt_dict_from_started(receipt)
+
+
+def _read_extension_mutation_body(handler) -> dict | None:
+    """Read one strict bounded object before inspecting optional lease evidence."""
+    return _read_bounded_json_object(
+        handler,
+        max_body=MAX_BODY,
+        framing_code="invalid-extension-mutation-request-framing",
+        size_code="extension-mutation-request-size",
+        incomplete_code="incomplete-extension-mutation-request",
+        invalid_code="invalid-extension-mutation-request",
+    )
 
 
 def validate_service_id(handler, body: dict) -> str | None:
@@ -7710,6 +7744,17 @@ class AgentHandler(BaseHTTPRequestHandler):
         if (
             body.get("schema") != _LIFECYCLE_RECEIPT_SCHEMA
             or set(body) != required
+        ):
+            _receipt_store_response(
+                self,
+                422,
+                {"error": {"code": "invalid-lifecycle-receipt-request"}},
+            )
+            return
+        plan_hash = body["planHash"]
+        if (
+            not isinstance(plan_hash, str)
+            or _LIFECYCLE_RECEIPT_PLAN_HASH_RE.fullmatch(plan_hash) is None
         ):
             _receipt_store_response(
                 self,
@@ -9658,7 +9703,7 @@ class AgentHandler(BaseHTTPRequestHandler):
     def _handle_core_recreate(self):
         if not check_auth(self):
             return
-        body = read_json_body(self)
+        body = _read_extension_mutation_body(self)
         if body is None:
             return
         lease_evidence = _parse_extension_mutation_lease(self, body)
@@ -9715,7 +9760,7 @@ class AgentHandler(BaseHTTPRequestHandler):
     def _handle_extension(self, action: str):
         if not check_auth(self):
             return
-        body = read_json_body(self)
+        body = _read_extension_mutation_body(self)
         if body is None:
             return
         lease_evidence = _parse_extension_mutation_lease(self, body)
@@ -9787,7 +9832,7 @@ class AgentHandler(BaseHTTPRequestHandler):
         """
         if not check_auth(self):
             return
-        body = read_json_body(self)
+        body = _read_extension_mutation_body(self)
         if body is None:
             return
         lease_evidence = _parse_extension_mutation_lease(self, body)
@@ -9836,7 +9881,16 @@ class AgentHandler(BaseHTTPRequestHandler):
         except _ExtensionMutationAdmissionRejected:
             return
         except OSError as exc:
-            json_response(self, 500, {"error": f"Failed to {action} extension: {exc}"})
+            logger.warning(
+                "Failed to %s extension %s (%s)",
+                action,
+                sid,
+                type(exc).__name__,
+            )
+            json_response(self, 500, {
+                "error": _public_process_failure("extension_toggle_failed"),
+                "error_code": "extension_toggle_failed",
+            })
             return
 
         logger.info("%sd extension compose: %s", action, sid)
@@ -9858,7 +9912,7 @@ class AgentHandler(BaseHTTPRequestHandler):
         """
         if not check_auth(self):
             return
-        body = read_json_body(self)
+        body = _read_extension_mutation_body(self)
         if body is None:
             return
         lease_evidence = _parse_extension_mutation_lease(self, body)
@@ -9973,7 +10027,15 @@ class AgentHandler(BaseHTTPRequestHandler):
         try:
             install_config.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
-            return 500, {"error": f"Failed to prepare config dir: {exc}"}
+            logger.warning(
+                "Failed to prepare config directory for %s (%s)",
+                sid,
+                type(exc).__name__,
+            )
+            return 500, {
+                "error": _public_process_failure("extension_config_sync_failed"),
+                "error_code": "extension_config_sync_failed",
+            }
 
         target_candidate = install_config / sid
         if target_candidate.is_symlink():
@@ -10018,8 +10080,14 @@ class AgentHandler(BaseHTTPRequestHandler):
                 )
             synced.append(sid)
         except OSError as exc:
+            logger.warning(
+                "Failed to copy extension config for %s (%s)",
+                sid,
+                type(exc).__name__,
+            )
             return 500, {
-                "error": f"Failed to copy {sid}/config/{sid}: {exc}",
+                "error": _public_process_failure("extension_config_sync_failed"),
+                "error_code": "extension_config_sync_failed",
             }
         # Mark .sh files executable in the synced service tree.
         for root, _dirs, files in os.walk(str(target)):
@@ -10032,7 +10100,11 @@ class AgentHandler(BaseHTTPRequestHandler):
                             | stat_mod.S_IXUSR | stat_mod.S_IXGRP | stat_mod.S_IXOTH,
                         )
                     except OSError as exc:
-                        logger.warning("chmod +x failed for %s: %s", fpath, exc)
+                        logger.warning(
+                            "chmod +x failed for extension config %s (%s)",
+                            sid,
+                            type(exc).__name__,
+                        )
 
         logger.info(
             "synced config for extension %s (%d in-scope, %d out-of-scope ignored)",
@@ -10322,7 +10394,15 @@ class AgentHandler(BaseHTTPRequestHandler):
         # macOS: validate bash version >= 4.0
         bash_ok, bash_msg = _check_bash_version()
         if not bash_ok:
-            json_response(self, 500, {"error": f"Cannot run hook: {bash_msg}"})
+            logger.warning(
+                "Hook runtime preflight failed for %s (%s)",
+                service_id,
+                "version" if "too old" in bash_msg else "unavailable",
+            )
+            json_response(self, 500, {
+                "error": _public_process_failure("extension_hook_runtime_missing"),
+                "error_code": "extension_hook_runtime_missing",
+            })
             return
 
         # Read manifest for service port
