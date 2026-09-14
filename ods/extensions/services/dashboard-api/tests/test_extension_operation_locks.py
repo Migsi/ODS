@@ -285,6 +285,14 @@ def test_hardlinked_lock_file_is_rejected(tmp_path):
     assert target.read_bytes() == b"unchanged"
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX mode assertion")
+def test_new_lock_file_is_owner_only(tmp_path):
+    lock_path = locks.operation_lock_path(tmp_path, "documents")
+
+    with locks.exclusive_file_lock(lock_path):
+        assert lock_path.stat().st_mode & 0o777 == 0o600
+
+
 def test_symlinked_lock_directory_is_rejected(tmp_path):
     outside = tmp_path / "outside"
     outside.mkdir()
