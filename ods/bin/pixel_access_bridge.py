@@ -803,9 +803,36 @@ class SystemdAccessBridge:
             if self.pending() is not None:
                 raise AccessError("transition-recovery-required")
             snapshot = self.inspect()
-            if (not snapshot["runtime_verified"]
-                    or snapshot["configured_mode"] != snapshot["effective_mode"]
-                    or snapshot["configured_mode"] not in ("full-access", "sandboxed")):
+            configured_mode = snapshot["configured_mode"]
+            trusted_snapshot = (
+                snapshot["available"] is True
+                and snapshot["scope"] == "owner-host"
+                and configured_mode in ("full-access", "sandboxed")
+                and snapshot["pending"] is False
+                and isinstance(snapshot["revision"], str)
+                and HEX.fullmatch(snapshot["revision"]) is not None
+            )
+            runtime_ready = (
+                trusted_snapshot
+                and snapshot["runtime_verified"] is True
+                and snapshot["effective_mode"] == configured_mode
+                and snapshot["reason"] is None
+            )
+            # A gateway process restart deliberately invalidates verified.json.
+            # Admit only that exact, idle fail-closed projection; ambiguous,
+            # busy, pending, unavailable, or differently configured states
+            # must still require explicit recovery. The runtime is re-proved
+            # below only after both admission gates are durably held, avoiding
+            # an open-admission window between recovery and model mutation.
+            stale_runtime_proof = (
+                trusted_snapshot
+                and snapshot["effective_mode"] == "unknown"
+                and snapshot["runtime_verified"] is False
+                and snapshot["busy"] is False
+                and snapshot["reason"] == "runtime-proof-required"
+            )
+            if (configured_mode not in ("full-access", "sandboxed")
+                    or not (runtime_ready or stale_runtime_proof)):
                 raise AccessError("runtime-proof-required")
             if (snapshot["_native"].get("phase") != "idle"
                     or snapshot["_edge"].get("phase") != "idle"):
@@ -833,6 +860,10 @@ class SystemdAccessBridge:
                     if time.monotonic() >= deadline:
                         raise AccessError("runtime-busy")
                     time.sleep(1)
+                # Re-prove the configured mode while both native and external
+                # admission remain closed. A failed proof leaves the durable
+                # model journal and both gates held for explicit recovery.
+                self.verify_held_mode(pending["token"], configured_mode)
                 pending["phase"] = "held"
                 atomic_json(self.state / "transition.json", pending)
                 return {"status": "held", "transaction_id": pending["transaction_id"]}

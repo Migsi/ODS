@@ -38,6 +38,12 @@ class FakeBridge(SystemdAccessBridge):
         self.fail_native = None
         self.fail_edge_after = None
         self.fail_native_after = None
+        self.fail_verify = False
+        self.available = True
+        self.scope = "owner-host"
+        self.runtime_verified = True
+        self.effective_mode = "sandboxed"
+        self.reason = None
 
     @contextlib.contextmanager
     def locked(self):
@@ -56,10 +62,11 @@ class FakeBridge(SystemdAccessBridge):
         (self.state / "transition.json").unlink()
 
     def inspect(self):
-        return {"available": True, "configured_mode": "sandboxed",
-                "effective_mode": "sandboxed", "runtime_verified": True,
+        return {"available": self.available, "configured_mode": "sandboxed",
+                "effective_mode": self.effective_mode,
+                "runtime_verified": self.runtime_verified,
                 "revision": HEX_A, "busy": bool(self.edge_state["streams"] or self.native_state["active"]),
-                "pending": False, "reason": None, "scope": "owner-host",
+                "pending": False, "reason": self.reason, "scope": self.scope,
                 "_config": dict(self.config), "_native": dict(self.native_state),
                 "_edge": dict(self.edge_state)}
 
@@ -107,6 +114,8 @@ class FakeBridge(SystemdAccessBridge):
 
     def verify_held_mode(self, token, mode):
         self.calls.append("verify:" + mode)
+        if self.fail_verify:
+            raise AccessError("runtime-proof-failed")
         if mode != "sandboxed" or len(token) != 64:
             raise AccessError("verification-test-failure")
 
@@ -145,6 +154,84 @@ class ModelTransitionTests(unittest.TestCase):
             self.assertFalse(any(key in pending for key in ("ttl", "expires", "expires_at")))
             self.assertLess(bridge.calls.index("edge:acquire"), bridge.calls.index("native:acquire"))
             self.assertGreaterEqual(bridge.calls.count("edge:acquire"), 3)
+            self.assertGreater(
+                bridge.calls.index("verify:sandboxed"),
+                max(index for index, call in enumerate(bridge.calls)
+                    if call in ("edge:acquire", "native:acquire")),
+            )
+
+    def test_begin_reproofs_exact_stale_runtime_under_held_gates(self):
+        with tempfile.TemporaryDirectory() as root:
+            bridge = FakeBridge(root)
+            bridge.runtime_verified = False
+            bridge.effective_mode = "unknown"
+            bridge.reason = "runtime-proof-required"
+            result = bridge.model_begin()
+            pending = bridge.model_journal(result["transaction_id"])
+            self.assertEqual(pending["phase"], "held")
+            self.assertEqual(bridge.edge_state["phase"], "held")
+            self.assertEqual(bridge.native_state["phase"], "held")
+            self.assertGreater(
+                bridge.calls.index("verify:sandboxed"),
+                max(bridge.calls.index("edge:acquire"),
+                    bridge.calls.index("native:acquire")),
+            )
+
+    def test_begin_rejects_ambiguous_missing_runtime_proof(self):
+        with tempfile.TemporaryDirectory() as root:
+            bridge = FakeBridge(root)
+            bridge.runtime_verified = False
+            bridge.effective_mode = "unknown"
+            bridge.reason = "inspection-failed"
+            with self.assertRaisesRegex(AccessError, "runtime-proof-required"):
+                bridge.model_begin()
+            self.assertIsNone(bridge.pending())
+            self.assertNotIn("edge:acquire", bridge.calls)
+            self.assertNotIn("native:acquire", bridge.calls)
+
+    def test_begin_rejects_every_stale_runtime_shape_mismatch(self):
+        mismatches = {
+            "available": False,
+            "scope": "unknown",
+            "configured_mode": "unknown",
+            "effective_mode": "sandboxed",
+            "runtime_verified": True,
+            "busy": True,
+            "pending": True,
+            "reason": None,
+            "revision": "not-a-revision",
+        }
+        for field, value in mismatches.items():
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as root:
+                bridge = FakeBridge(root)
+                snapshot = bridge.inspect()
+                snapshot.update({
+                    "effective_mode": "unknown",
+                    "runtime_verified": False,
+                    "reason": "runtime-proof-required",
+                })
+                snapshot[field] = value
+                with patch.object(bridge, "inspect", return_value=snapshot):
+                    with self.assertRaisesRegex(AccessError, "runtime-proof-required"):
+                        bridge.model_begin()
+                self.assertIsNone(bridge.pending())
+                self.assertNotIn("edge:acquire", bridge.calls)
+                self.assertNotIn("native:acquire", bridge.calls)
+
+    def test_begin_reproof_failure_keeps_both_gates_held(self):
+        with tempfile.TemporaryDirectory() as root:
+            bridge = FakeBridge(root)
+            bridge.runtime_verified = False
+            bridge.effective_mode = "unknown"
+            bridge.reason = "runtime-proof-required"
+            bridge.fail_verify = True
+            with self.assertRaisesRegex(AccessError, "runtime-proof-failed"):
+                bridge.model_begin()
+            pending = bridge.pending()
+            self.assertEqual(pending["phase"], "error")
+            self.assertEqual(pending["error"], "runtime-proof-failed")
+            self.assertEqual(bridge.edge_state["phase"], "held")
+            self.assertEqual(bridge.native_state["phase"], "held")
 
     def test_begin_failure_retains_root_journal(self):
         with tempfile.TemporaryDirectory() as root:
