@@ -342,7 +342,15 @@ export function createAccessRuntime({directory = path.join(os.homedir(), '.openc
     if (failed || !qualified || !hex(token) || !hex(expected)) throw transitionError('native-transition-unavailable');
     if (state.phase === 'held' && state.tokenHash === hash(token)) return status();
     if (expected !== state.revision) throw transitionError('native-transition-revision-changed');
-    if (busy() || !['idle','interrupted'].includes(state.phase)) throw transitionError('native-transition-busy');
+    // Preserve a bounded, non-forgeable reason for a refused transition.  The
+    // controller exposes only this trusted token, never run/tool identifiers or
+    // conversation data.  Distinguishing the owner class is essential on first
+    // boot where a leaked startup run and a detached command require different
+    // recovery paths.
+    if (runs.size) throw transitionError('native-transition-active-run');
+    if (tools.size) throw transitionError('native-transition-active-tool');
+    if (detached.size) throw transitionError('native-transition-detached-process');
+    if (!['idle','interrupted'].includes(state.phase)) throw transitionError('native-transition-phase-busy');
     state.phase = 'held'; state.tokenHash = hash(token); proof = null; changed(); return status();
   }
   function owns(token) { return !failed && hex(token) && state.phase === 'held' && state.tokenHash === hash(token); }

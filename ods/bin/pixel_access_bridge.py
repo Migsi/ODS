@@ -59,6 +59,10 @@ RUNTIME_TRANSITION_FAILURES = frozenset((
     "native-transition-unavailable",
     "native-transition-revision-changed",
     "native-transition-busy",
+    "native-transition-active-run",
+    "native-transition-active-tool",
+    "native-transition-detached-process",
+    "native-transition-phase-busy",
 ))
 
 

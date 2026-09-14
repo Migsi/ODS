@@ -465,7 +465,24 @@ test('native transition refusal distinguishes unavailable and busy state', () =>
   failure = null;
   try { busy.acquire(token, busy.status().revision); } catch (error) { failure = error; }
   assert.ok(failure);
-  assert.equal(busy.classifyTransitionError(failure), 'native-transition-busy');
+  assert.equal(busy.classifyTransitionError(failure), 'native-transition-active-run');
+});
+
+test('native transition refusal distinguishes active tools and detached processes', () => {
+  const toolBusy = createAccessRuntime(fixture());
+  toolBusy.beforeTool({toolCallId: 'tool-1'}, {});
+  let failure;
+  try { toolBusy.acquire(token, toolBusy.status().revision); } catch (error) { failure = error; }
+  assert.equal(toolBusy.classifyTransitionError(failure), 'native-transition-active-tool');
+
+  const detachedBusy = createAccessRuntime(fixture());
+  detachedBusy.beforeTool({toolCallId: 'exec-1'}, {});
+  detachedBusy.afterTool({toolCallId: 'exec-1', toolName: 'exec', result: {details: {
+    status: 'running', sessionId: 'child', startedAt: 1,
+  }}}, {});
+  failure = null;
+  try { detachedBusy.acquire(token, detachedBusy.status().revision); } catch (error) { failure = error; }
+  assert.equal(detachedBusy.classifyTransitionError(failure), 'native-transition-detached-process');
 });
 
 test('direct tools and detached exec keep transition busy after agent end', () => {
