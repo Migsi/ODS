@@ -970,6 +970,13 @@ path.write_text(json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n")
 PY
 chmod 0600 "$HOME_DIR/.config/ods/pixel-managed.json"
 rm -f -- "$HOME_DIR/.local/share/pixel/runtime-attestation.json"
+printf '%s\n' '# source shipped before generated owner unit' \
+    >"$INSTALL_DIR/extensions/services/pixel-agent/host/extension_manager.py"
+printf '%s\n' '# source shipped before generated owner unit' \
+    >"$INSTALL_DIR/extensions/services/pixel-agent/host/workspace_preview.py"
+chmod 0644 \
+    "$INSTALL_DIR/extensions/services/pixel-agent/host/extension_manager.py" \
+    "$INSTALL_DIR/extensions/services/pixel-agent/host/workspace_preview.py"
 unbound_config_sha="$(sha256sum "$HOME_DIR/.openclaw/openclaw.json" | awk '{print $1}')"
 if ods_pixel_uninstall_managed "$INSTALL_DIR" "$HOME_DIR" \
     && [[ ! -e "$HOME_DIR/.local/share/pixel/current" \
@@ -984,7 +991,7 @@ if ods_pixel_uninstall_managed "$INSTALL_DIR" "$HOME_DIR" \
     if [[ -n "$unbound_config" \
         && "$(sha256sum "$unbound_config" | awk '{print $1}')" == "$unbound_config_sha" \
         && "$(grep -c '^image rm -- ' "$DOCKER_LOG" || true)" == 0 ]]; then
-        pass "minimal interrupted Pixel state is retired while unbound config and shared image tags are preserved"
+        pass "minimal interrupted Pixel state with source-only lifecycle files is retired while unbound state is preserved"
     else
         fail "minimal interrupted Pixel cleanup did not preserve unbound state exactly"
     fi

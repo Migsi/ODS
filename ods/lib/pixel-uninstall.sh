@@ -590,9 +590,10 @@ extension_manager_unit_present = (
 if extension_catalog_present and not extension_program_present:
     raise SystemExit("ODS Pixel extension projection source is incomplete")
 inactive_installing = cleanup[0] == "none" and state == "installing"
+source_only_installing = inactive_installing or unbound_sandbox_cleanup
 if extension_manager_unit_present and not extension_manager_source_present:
     raise SystemExit("ODS Pixel extension lifecycle source is incomplete")
-if extension_manager_source_present and not extension_manager_unit_present and not inactive_installing:
+if extension_manager_source_present and not extension_manager_unit_present and not source_only_installing:
     raise SystemExit("ODS Pixel extension lifecycle source is incomplete")
 extension_manager_present = extension_manager_unit_present
 if extension_manager_present:
@@ -615,7 +616,7 @@ workspace_preview_contract_present = (
 )
 if workspace_preview_contract_present and not workspace_preview_source_present:
     raise SystemExit("ODS Pixel workspace preview source is incomplete")
-if workspace_preview_source_present and not workspace_preview_contract_present and not inactive_installing:
+if workspace_preview_source_present and not workspace_preview_contract_present and not source_only_installing:
     raise SystemExit("ODS Pixel workspace preview source is incomplete")
 if workspace_preview_contract_present:
     regular(workspace_preview_source, owner_uid, 2 * 1024 * 1024)
