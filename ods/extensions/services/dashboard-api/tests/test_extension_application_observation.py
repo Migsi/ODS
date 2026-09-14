@@ -403,6 +403,15 @@ def test_applied_started_only():
     assert len(result.containers) == 2
 
 
+def test_non_apply_command_is_rejected_before_classification():
+    command = replace(_bound_command(), operation_key=f"purge:{SERVICE_ID}")
+    evidence = _build_evidence(snapshot=_absent_snapshot())
+
+    with pytest.raises(obs_mod.ApplicationObservationError) as exc:
+        obs_mod.observe_application(command, evidence)
+    assert exc.value.code == "command-identity-invalid"
+
+
 def test_applied_started_only_single_container():
     identity = _get_identity()
     cmd = _bound_command()
