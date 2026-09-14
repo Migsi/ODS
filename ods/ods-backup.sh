@@ -168,7 +168,7 @@ Commands:
 OPTIONS:
     -h, --help              Show this help message
     -o, --output DIR        Custom backup directory (default: .backups/)
-    -t, --type TYPE         Backup type: full, user-data, config (default: full)
+    -t, --type TYPE         Backup type: full, user-data, config (default: user-data)
     -c, --compress          Compress backup to .tar.gz
     -l, --list              List existing backups
     -d, --delete ID         Delete specific backup by ID
@@ -262,7 +262,7 @@ delete_backup() {
         return 1
     fi
 
-    read -rp "Are you sure you want to delete backup $(basename "$target")? [y/N] " confirm
+    read -rp "Are you sure you want to delete backup $(basename "$target")? [y/N] " confirm || confirm=""
     if [[ "$confirm" =~ ^[Yy]$ ]]; then
         rm -rf "$target"
         log_success "Deleted backup: $(basename "$target")"
@@ -696,7 +696,7 @@ main() {
     if [[ "$has_compose" == "false" && ! -d "$ODS_DIR/data" ]]; then
         log_warn "This doesn't appear to be a ODS directory"
         log_warn "Expected: docker-compose.yml or data/ directory"
-        read -rp "Continue anyway? [y/N] " confirm
+        read -rp "Continue anyway? [y/N] " confirm || confirm=""
         if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
             exit 1
         fi
