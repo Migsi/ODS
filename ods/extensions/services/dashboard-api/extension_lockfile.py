@@ -876,8 +876,15 @@ class ExtensionLockfileStore:
         created = False
         try:
             if not self.root.exists():
-                self.root.mkdir(mode=0o700, parents=True, exist_ok=False)
-                created = True
+                try:
+                    self.root.mkdir(mode=0o700, parents=True, exist_ok=False)
+                    created = True
+                except FileExistsError:
+                    # Another process may have created the exact root after the
+                    # absence check.  Treat that as a concurrent contender and
+                    # validate the resulting inode below instead of failing a
+                    # safe, serialized first-start bootstrap.
+                    pass
         except OSError as exc:
             raise ExtensionLockfileError("lockfile-root-unavailable") from exc
         self._reject_symlink_components()
