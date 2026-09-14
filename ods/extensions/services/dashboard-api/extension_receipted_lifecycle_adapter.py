@@ -362,6 +362,12 @@ class ReceiptedLifecycleAdapter:
                 )
         except Exception as worker_error:
             code, retryable, ambiguous = _worker_failure(worker_error)
+            if ambiguous:
+                _fail(
+                    f"lifecycle-{code}",
+                    retryable=retryable,
+                    ambiguous=True,
+                )
             evidence_hash = _hash(
                 {
                     "schema": FAILURE_SCHEMA,
