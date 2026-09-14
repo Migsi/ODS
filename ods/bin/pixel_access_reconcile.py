@@ -70,6 +70,18 @@ def ready(value):
             and value.get("pending") is False and value.get("reason") is None)
 
 
+def recoverable_safe_transition(value):
+    """Admit only the coordinator's existing sandboxed restore ceremony."""
+    return (value.get("available") is True and value.get("scope") == "owner-host"
+            and value.get("configured_mode") == "sandboxed"
+            and value.get("effective_mode") == "unknown"
+            and value.get("runtime_verified") is False and value.get("busy") is False
+            and value.get("pending") is True
+            and value.get("reason") == "transition-recovery-required"
+            and isinstance(value.get("revision"), str)
+            and HEX.fullmatch(value["revision"]))
+
+
 def reconcile(request=request_access):
     status, value = request("status")
     if status != 200:
@@ -77,11 +89,14 @@ def reconcile(request=request_access):
     if ready(value):
         return value, False
     mode = value.get("configured_mode")
-    if not (value.get("available") is True and value.get("scope") == "owner-host"
+    stale_runtime_proof = (
+            value.get("available") is True and value.get("scope") == "owner-host"
             and mode in ("sandboxed", "full-access") and value.get("effective_mode") == "unknown"
             and value.get("runtime_verified") is False and value.get("busy") is False
             and value.get("pending") is False and value.get("reason") == "runtime-proof-required"
-            and isinstance(value.get("revision"), str) and HEX.fullmatch(value["revision"])):
+            and isinstance(value.get("revision"), str) and HEX.fullmatch(value["revision"]))
+    recover_safe_mode = recoverable_safe_transition(value)
+    if not (stale_runtime_proof or recover_safe_mode):
         raise ReconcileError("unsafe-state", projection=value)
     status, value = request("change", {
         "mode": mode,
@@ -89,7 +104,9 @@ def reconcile(request=request_access):
         # This is a same-mode reproof after an ODS-owned restart, not a new
         # privilege selection. Full-access still uses the controller's explicit
         # confirmation contract.
-        "confirmed": mode == "full-access",
+        # A pending recovery is admitted only for sandboxed mode above. A
+        # normal same-mode full-access reproof retains explicit confirmation.
+        "confirmed": mode == "full-access" and not recover_safe_mode,
     })
     if status != 200 or not ready(value):
         raise ReconcileError("change-failed", status=status, projection=value)

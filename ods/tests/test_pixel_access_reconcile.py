@@ -84,11 +84,36 @@ class ReconcileTests(unittest.TestCase):
         self.assertTrue(changed)
         self.assertIs(calls[1][1]["confirmed"], True)
 
+    def test_pending_sandboxed_transition_uses_coordinator_restore(self):
+        before = projection(effective_mode="unknown", runtime_verified=False,
+                            pending=True, reason="transition-recovery-required")
+        calls = []
+        def request(operation, body=None):
+            calls.append((operation, body))
+            return (200, before) if operation == "status" else (200, projection())
+        value, changed = reconcile.reconcile(request)
+        self.assertTrue(changed)
+        self.assertTrue(value["runtime_verified"])
+        self.assertEqual(calls[1], ("change", {
+            "mode": "sandboxed", "revision": "a" * 64, "confirmed": False}))
+
+    def test_pending_full_access_transition_never_mutates(self):
+        before = projection(configured_mode="full-access", effective_mode="unknown",
+                            runtime_verified=False, pending=True,
+                            reason="transition-recovery-required")
+        calls = []
+        def request(operation, body=None):
+            calls.append((operation, body))
+            return 200, before
+        with self.assertRaises(RuntimeError):
+            reconcile.reconcile(request)
+        self.assertEqual(calls, [("status", None)])
+
     def test_unsafe_or_ambiguous_states_never_mutate(self):
         base = projection(effective_mode="unknown", runtime_verified=False,
                           reason="runtime-proof-required")
         variants = [
-            {"available": False}, {"busy": True}, {"pending": True},
+            {"available": False}, {"busy": True}, {"pending": True, "scope": "edge"},
             {"configured_mode": "unknown"}, {"reason": "transition-recovery-required"},
             {"revision": "not-a-revision"}, {"scope": "edge"},
         ]
