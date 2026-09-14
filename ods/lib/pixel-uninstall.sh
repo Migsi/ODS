@@ -914,7 +914,9 @@ if extension_catalog_present:
         raise SystemExit("ODS Pixel extension catalog is not ODS-managed")
 
 if onboarding.exists():
-    answers = json.loads(onboarding.read_text(encoding="utf-8"))
+    regular(onboarding, owner_uid, 2 * 1024 * 1024, private=True)
+    live_onboarding_payload = onboarding.read_bytes()
+    answers = json.loads(live_onboarding_payload.decode("utf-8"))
     extensions = answers.get("gatewayExtensions") if isinstance(answers, dict) else None
     expected_plugin = str(install_dir / "extensions/services/pixel-agent/plugin")
     if not isinstance(extensions, list) or not any(
@@ -931,7 +933,16 @@ if onboarding.exists():
     elif ops_policy_present and state != "installing":
         raise SystemExit("ODS Operations policy exists without an enabled onboarding contract")
     if cleanup[0] != "none" and not unbound_sandbox_cleanup:
-        onboarding_payload = onboarding.read_bytes()
+        # The marker contract is created from ODS's private source answers.
+        # Pixel may reserialize the live owner mirror while applying the same
+        # answers, so bind cleanup to the exact source bytes while requiring
+        # the live projection to remain semantically identical.
+        onboarding_source = install_dir / "data/pixel/onboarding.json"
+        regular(onboarding_source, owner_uid, 2 * 1024 * 1024, private=True)
+        onboarding_payload = onboarding_source.read_bytes()
+        source_answers = json.loads(onboarding_payload.decode("utf-8"))
+        if source_answers != answers:
+            raise SystemExit("Pixel live onboarding diverged from its ODS source")
         accepted_contracts = {
             hashlib.sha256(b"ods-pixel-contract-v1\0" + onboarding_payload).hexdigest(),
         }

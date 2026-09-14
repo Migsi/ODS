@@ -208,6 +208,7 @@ write_fixture() {
         "$SYSTEMD_DIR" "$ETC_DIR" "$LIBEXEC_DIR" \
         "$HOME_DIR/.config/ods" "$HOME_DIR/.config/pixel-agent" \
         "$HOME_DIR/.config/pixel-deployment" "$HOME_DIR/.openclaw" \
+        "$INSTALL_DIR/data/pixel" \
         "$INSTALL_DIR/extensions/services/pixel-agent/host" \
         "$INSTALL_DIR/extensions/services/pixel-agent/plugin"
 
@@ -227,12 +228,15 @@ JSON
     cat >"$HOME_DIR/.config/pixel-deployment/onboarding.json" <<JSON
 {"gatewayExtensions":[{"id":"pixel-ods","path":"$INSTALL_DIR/extensions/services/pixel-agent/plugin"}]}
 JSON
+    cp "$HOME_DIR/.config/pixel-deployment/onboarding.json" \
+        "$INSTALL_DIR/data/pixel/onboarding.json"
     printf '%s\n' 'preserve me' >"$HOME_DIR/.openclaw/openclaw.json.bak"
     chmod 0600 \
         "$HOME_DIR/.config/ods/pixel-managed.json" \
         "$HOME_DIR/.openclaw/openclaw.json" \
         "$HOME_DIR/.config/pixel-agent/gateway.env" \
-        "$HOME_DIR/.config/pixel-deployment/onboarding.json"
+        "$HOME_DIR/.config/pixel-deployment/onboarding.json" \
+        "$INSTALL_DIR/data/pixel/onboarding.json"
 
     cat >"$SYSTEMD_DIR/openclaw-gateway.service" <<UNIT
 [Unit]
@@ -572,7 +576,14 @@ value["operationsPolicyFile"] = sys.argv[2]
 path.write_text(json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n")
 PY
     chmod 0600 "$HOME_DIR/.config/pixel-deployment/onboarding.json"
-    contract_sha256="$(python3 - "$HOME_DIR/.config/pixel-deployment/onboarding.json" \
+    python3 - "$HOME_DIR/.config/pixel-deployment/onboarding.json" \
+        "$INSTALL_DIR/data/pixel/onboarding.json" <<'PY'
+import json, pathlib, sys
+source, target = map(pathlib.Path, sys.argv[1:])
+target.write_text(json.dumps(json.loads(source.read_text()), indent=2, sort_keys=True) + "\n")
+PY
+    chmod 0600 "$INSTALL_DIR/data/pixel/onboarding.json"
+    contract_sha256="$(python3 - "$INSTALL_DIR/data/pixel/onboarding.json" \
         "$INSTALL_DIR/data/pixel/operations-policy.json" \
         "$INSTALL_DIR/data/pixel/extension-catalog.json" \
         "$INSTALL_DIR/extensions/services/pixel-agent/host/extension_search.py" \
@@ -991,7 +1002,7 @@ fi
 write_ops_fixture
 rm -f -- "$LIBEXEC_DIR/ods-pixel-system-observe.py"
 legacy_contract_sha256="$(python3 - \
-    "$HOME_DIR/.config/pixel-deployment/onboarding.json" \
+    "$INSTALL_DIR/data/pixel/onboarding.json" \
     "$INSTALL_DIR/data/pixel/operations-policy.json" \
     "$INSTALL_DIR/data/pixel/extension-catalog.json" \
     "$INSTALL_DIR/extensions/services/pixel-agent/host/extension_search.py" \
@@ -1055,7 +1066,7 @@ for profile_mode in 0600 0640 0644; do
     fi
 done
 
-for drift_target in program broker-source-mode public-state-file extension-program extension-catalog extension-manager-client \
+for drift_target in program broker-source-mode public-state-file onboarding-source onboarding-live extension-program extension-catalog extension-manager-client \
     extension-manager-program extension-manager-unit extension-manager-owner-unit approval-helper \
     artifact-promoter-program artifact-promoter-unit artifact-promoter-owner-unit \
     workspace-preview-program workspace-preview-unit workspace-preview-owner-unit workspace-preview-state \
@@ -1066,6 +1077,15 @@ for drift_target in program broker-source-mode public-state-file extension-progr
         program) printf '%s\n' '# drift' >>"$OPS_INSTALL/broker.py" ;;
         broker-source-mode) chmod 0666 "$INSTALL_DIR/data/pixel/source-d2a2b6be552126f294fb30ee5fb46872acf82c89/deploy/ops-broker/broker.py" ;;
         public-state-file) printf '%s\n' unexpected >"$OPS_STATE/notes.txt"; chmod 0644 "$OPS_STATE/notes.txt" ;;
+        onboarding-source) printf '%s\n' ' ' >>"$INSTALL_DIR/data/pixel/onboarding.json" ;;
+        onboarding-live) python3 - "$HOME_DIR/.config/pixel-deployment/onboarding.json" <<'PY'
+import json, pathlib, sys
+path = pathlib.Path(sys.argv[1])
+value = json.loads(path.read_text())
+value["capabilityProfile"] = "drifted"
+path.write_text(json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n")
+PY
+            ;;
         extension-program) printf '%s\n' '# drift' >>"$OPS_INSTALL/ods-extension-search.py" ;;
         extension-catalog) printf '%s\n' ' ' >>"$OPS_INSTALL/ods-extension-catalog.json" ;;
         extension-manager-client) printf '%s\n' '# drift' >>"$OPS_INSTALL/ods-extension-manager.py" ;;
