@@ -2236,6 +2236,7 @@ assert "verificationStatus: toolLoopGuard.verificationStatus(context?.runId)" in
 check python3 -c '
 import pathlib,sys
 text=pathlib.Path(sys.argv[1]).read_text()
+access_bridge=pathlib.Path(sys.argv[2]).read_text()
 installer=text[text.index("ods_pixel_install_default_agent() {"):]
 assert "local -a pixel_prerequisites=(litellm dashboard-api pixel-edge)" in installer
 assert "ods_pixel_run_as_owner \"$owner\" \"$home\" curl" in text
@@ -2335,6 +2336,9 @@ assert model_finish < release_failure < rollback_restore
 assert chr(39) + "gateway_port" + chr(39) + ": gateway_port" in text
 assert "pixel_access_reconcile.py" in text
 assert "pixel_model_transition.py" in text
+assert "def inspect(self, *, allow_installing=False):" in access_bridge
+assert "self.discover(allow_installing=allow_installing)" in access_bridge
+assert "snapshot = self.inspect(allow_installing=True)" in access_bridge
 access_install = text.index("_ods_pixel_install_access_service()")
 access_install_end = text.index("_ods_pixel_mark_installing()", access_install)
 access_install_body = text[access_install:access_install_end]
@@ -2415,7 +2419,7 @@ access_service = installer.index("if ! _ods_pixel_install_access_service", boots
 access_reproof = installer.index("_ods_pixel_reverify_access_after_gateway_restart \"$owner\" \"$home\" true", access_service)
 assert prerequisites < control_health < bootstrap < access_service < access_reproof
 assert "exact ODS prerequisite services" in installer
-' "$ROOT/installers/lib/pixel-host-install.sh"
+' "$ROOT/installers/lib/pixel-host-install.sh" "$ROOT/bin/pixel_access_bridge.py"
 check python3 -c '
 import pathlib,sys
 phase=pathlib.Path(sys.argv[1]).read_text()

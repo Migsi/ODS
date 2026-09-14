@@ -61,7 +61,8 @@ class FakeBridge(SystemdAccessBridge):
     def remove_model_journal(self):
         (self.state / "transition.json").unlink()
 
-    def inspect(self):
+    def inspect(self, *, allow_installing=False):
+        self.discover(allow_installing=allow_installing)
         return {"available": self.available, "configured_mode": "sandboxed",
                 "effective_mode": self.effective_mode,
                 "runtime_verified": self.runtime_verified,
@@ -152,6 +153,7 @@ class ModelTransitionTests(unittest.TestCase):
             self.assertNotEqual(result["transaction_id"], pending["token"])
             self.assertEqual(pending["phase"], "held")
             self.assertFalse(any(key in pending for key in ("ttl", "expires", "expires_at")))
+            self.assertIn("discover-installing", bridge.calls)
             self.assertLess(bridge.calls.index("edge:acquire"), bridge.calls.index("native:acquire"))
             self.assertGreaterEqual(bridge.calls.count("edge:acquire"), 3)
             self.assertGreater(

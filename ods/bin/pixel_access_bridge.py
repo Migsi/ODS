@@ -643,8 +643,13 @@ class SystemdAccessBridge:
             yield
         finally: os.close(fd)
 
-    def inspect(self):
-        self.discover()
+    def inspect(self, *, allow_installing=False):
+        # Model reconciliation deliberately marks the already verified ODS
+        # deployment as installing before it takes both admission gates.  Keep
+        # ordinary status/settings/provider inspection ready-only, but let the
+        # model-transition entry point admit that exact managed state so a
+        # retry can resume instead of deadlocking on its own marker.
+        self.discover(allow_installing=allow_installing)
         config, native, edge = self.worker(), self.native(), self.edge()
         if not native.get("available") or edge.get("capability") != "available": raise AccessError("admission-gate-unavailable")
         pid = int(self.command(["systemctl", "show", UNIT, "--property=MainPID", "--value"]))
@@ -802,7 +807,7 @@ class SystemdAccessBridge:
         with self.bounded(MODEL_DRAIN_TIMEOUT + 30), self.locked():
             if self.pending() is not None:
                 raise AccessError("transition-recovery-required")
-            snapshot = self.inspect()
+            snapshot = self.inspect(allow_installing=True)
             configured_mode = snapshot["configured_mode"]
             trusted_snapshot = (
                 snapshot["available"] is True

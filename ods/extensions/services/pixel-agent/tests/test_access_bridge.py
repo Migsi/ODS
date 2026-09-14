@@ -135,7 +135,9 @@ class FakeBridge(bridge.SystemdAccessBridge):
         self.log = []
         self.fail = None
 
-    def discover(self):
+    def discover(self, *, allow_installing=False):
+        if allow_installing:
+            self.log.append("discover-installing")
         self.surface = "linux-systemd"
         self.home = self.install
         self.owner = types.SimpleNamespace(pw_uid=os.getuid(), pw_gid=os.getgid(), pw_name="fixture")
