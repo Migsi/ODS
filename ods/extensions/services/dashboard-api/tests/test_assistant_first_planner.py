@@ -250,6 +250,37 @@ def test_v1_capabilities_are_non_operational_but_hard_dependencies_remain() -> N
     )
 
 
+def test_v1_manifest_is_warning_only_and_cannot_satisfy_v2_requirements() -> None:
+    legacy = manifest("legacy", schema="ods.services.v1")
+    legacy["service"]["capabilities"] = {"provides": ["route@1"]}
+    legacy["service"]["planning"] = {
+        "resources": {"host_permissions": ["privileged", "docker-socket"]},
+        "trust": {"tier": "community", "publisher": "untrusted"},
+        "support": {"status": "supported"},
+    }
+
+    result = build([legacy], requested_services=["legacy"])
+    definition = result["plan"]["definitions"][0]
+    assert definition["manifestSchemaVersion"] == "ods.services.v1"
+    assert definition["artifacts"] == {"images": [], "builds": []}
+    assert definition["resources"]["hostPermissions"] == []
+    assert definition["trust"] == {
+        "tier": "bundled",
+        "publisher": "ODS",
+        "definitionSignature": None,
+    }
+    assert definition["support"] == {"status": "experimental", "url": None}
+    assert result["plan"]["warnings"] == [
+        {"code": "legacy-manifest", "serviceId": "legacy"}
+    ]
+
+    consumer = manifest("consumer", requires=["route@1"])
+    error(
+        "missing-capability",
+        lambda: build([legacy, consumer], requested_services=["consumer"]),
+    )
+
+
 def test_provider_preference_beats_priority() -> None:
     result = build(
         [
