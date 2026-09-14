@@ -13,9 +13,9 @@ BIN_DIR = Path(__file__).resolve().parents[4] / "bin"
 if str(BIN_DIR) not in sys.path:
     sys.path.insert(0, str(BIN_DIR))
 
-import extension_resource_reservation_adapter as reservation_adapter
-import extension_resource_reservation_runtime as reservation_runtime
-import extension_resource_reservation_store as reservations
+import extension_resource_reservation_adapter as reservation_adapter  # noqa: E402
+import extension_resource_reservation_runtime as reservation_runtime  # noqa: E402
+import extension_resource_reservation_store as reservations  # noqa: E402
 
 SUPPORTED = (
     os.name == "posix"
