@@ -107,7 +107,7 @@ fi
 # support remains unchanged; auto mode falls back to Hermes without failing.
 if ! PIXEL_AGENT_MODE="$(ods_pixel_resolve_enablement "${ENABLE_PIXEL:-auto}" 2>/dev/null)"; then
     ai_bad "Pixel was explicitly required, but this host or license is not qualified."
-    ai "Pixel requires Ubuntu 24.04 or Debian 12 with PID1 systemd and PIXEL_LICENSE_ACCEPTED=true after a separate written agreement."
+    ai "Pixel requires Ubuntu 24.04/26.04 or Debian 12 with PID1 systemd and PIXEL_LICENSE_ACCEPTED=true after a separate written agreement."
     return 1 2>/dev/null || exit 1
 fi
 ENABLE_PIXEL_RUNTIME=false
