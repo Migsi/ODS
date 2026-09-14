@@ -283,8 +283,9 @@ async def configure_transaction(
     request: Request,
     runtime: TransactionRuntime = Depends(get_transaction_runtime),
     _api_key: str = Depends(verify_api_key),
+    _owner: str = Depends(require_owner_approval_session),
 ) -> JSONResponse:
-    """Validate configuration and send secret values directly to host custody."""
+    """Accept owner-entered configuration and send secrets directly to custody."""
     model = await _request_model(request, ConfigurationSubmissionRequest)
     try:
         result = await asyncio.to_thread(
