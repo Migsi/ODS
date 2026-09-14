@@ -340,6 +340,25 @@ else:
     else:
         cleanup = ("staged", None, None, None, None, None, None, "")
 
+unattested_cleanup = cleanup[0] in {"unattested-active", "unattested-staged"}
+minimal_marker_keys = {
+    "schema_version", "manager", "state", "initial_active_state",
+    "install_dir", "pixel_source_ref",
+}
+minimal_unattested_cleanup = unattested_cleanup and set(value) == minimal_marker_keys
+derived_unattested_marker_keys = minimal_marker_keys | {
+    "active_release_version", "release_identity_sha256",
+    "install_manifest_sha256", "sandbox_image_id", "sandbox_image_state",
+    "retired_release_path", "runtime_attestation_state",
+}
+resuming_unbound_sandbox_cleanup = (
+    state == "deactivating"
+    and set(value) == derived_unattested_marker_keys
+    and value.get("runtime_attestation_state") == "absent"
+    and value.get("sandbox_image_state") == "preserved-unbound"
+)
+unbound_sandbox_cleanup = minimal_unattested_cleanup or resuming_unbound_sandbox_cleanup
+
 if cleanup[0] != "none":
     if value.get("schema_version") != 2 or value.get("initial_active_state") != "absent":
         raise SystemExit("Pixel active state lacks an ODS pre-install absence proof")
@@ -388,16 +407,22 @@ if cleanup[0] != "none":
     attestation_bytes = receipt.read_bytes() if receipt is not None else None
     identity = json.loads(identity_bytes)
     attestation = json.loads(attestation_bytes) if attestation_bytes is not None else None
-    version = value.get("active_release_version")
+    identity_version = identity.get("pixel")
+    version = identity_version if minimal_unattested_cleanup else value.get("active_release_version")
     identity_sha256 = hashlib.sha256(identity_bytes).hexdigest()
     manifest_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
     if (not isinstance(version, str) or not re.fullmatch(r"[0-9]{1,6}\.[0-9]{1,6}\.[0-9]{1,6}", version)
-            or (cleanup[0] != "retired" and release.name != version) or identity.get("pixel") != version
+            or (cleanup[0] != "retired" and release.name != version) or identity_version != version
+            or identity.get("kind") != "pixel-release-source-identity"
             or not isinstance(identity.get("source"), dict)
             or identity["source"].get("state") != "git-clean"
             or identity["source"].get("commit") != source_ref
-            or value.get("release_identity_sha256") != identity_sha256
-            or value.get("install_manifest_sha256") != manifest_sha256):
+            or not isinstance(identity["source"].get("tree"), str)
+            or not re.fullmatch(r"[0-9a-f]{40}", identity["source"]["tree"])
+            or (not minimal_unattested_cleanup and (
+                value.get("release_identity_sha256") != identity_sha256
+                or value.get("install_manifest_sha256") != manifest_sha256
+            ))):
         raise SystemExit("ODS marker does not bind the active Pixel release identity")
     if receipt is not None and (not isinstance(attestation, dict) or attestation.get("kind") != "pixel-runtime-attestation"
             or attestation.get("status") not in {"verified", "limited"}
@@ -406,12 +431,27 @@ if cleanup[0] != "none":
             or attestation["release"].get("sourceIdentitySha256") != identity_sha256
             or attestation["release"].get("installManifestSha256") != manifest_sha256):
         raise SystemExit("Pixel runtime attestation does not bind the ODS-managed active release")
-    sandbox_image = value.get("sandbox_image")
-    sandbox_image_id = value.get("sandbox_image_id")
-    if (not isinstance(sandbox_image, str)
+    if minimal_unattested_cleanup:
+        # A failed Pixel apply can create the exact release and deterministic
+        # preservation tag before ODS receives the runtime attestation needed
+        # to bind the shared image name. Derive only the candidate image ID in
+        # the locked shell below; leave every unbound shared tag intact.
+        sandbox_image = ""
+        sandbox_image_id = "derive"
+    elif resuming_unbound_sandbox_cleanup:
+        sandbox_image = ""
+        sandbox_image_id = value.get("sandbox_image_id")
+    else:
+        sandbox_image = value.get("sandbox_image")
+        sandbox_image_id = value.get("sandbox_image_id")
+    if (((not unbound_sandbox_cleanup) and (
+            not isinstance(sandbox_image, str)
             or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,255}:[A-Za-z0-9][A-Za-z0-9._-]{0,127}", sandbox_image)
             or not isinstance(sandbox_image_id, str)
-            or not re.fullmatch(r"sha256:[0-9a-f]{64}", sandbox_image_id)
+            or not re.fullmatch(r"sha256:[0-9a-f]{64}", sandbox_image_id)))
+            or (resuming_unbound_sandbox_cleanup and (
+                not isinstance(sandbox_image_id, str)
+                or not re.fullmatch(r"sha256:[0-9a-f]{64}", sandbox_image_id)))
             or "|" in str(release)):
         raise SystemExit("ODS marker has an invalid Pixel sandbox binding")
     cleanup = (
@@ -489,6 +529,14 @@ if openclaw_config.exists():
             if value != bootstrap_marker:
                 raise SystemExit("inactive ODS marker is not the original pre-apply marker")
             retire_openclaw_config = config != bootstrap_config
+    elif unbound_sandbox_cleanup:
+        # The minimal marker proves that this reserved config path was absent
+        # before ODS began the failed install, but it does not bind these later
+        # bytes. Preserve them exactly for recovery instead of deleting them or
+        # trusting their sandbox image reference.
+        if str(install_dir) not in serialized_config:
+            raise SystemExit("unattested OpenClaw configuration is not bound to this ODS install")
+        retire_openclaw_config = True
     else:
         if str(install_dir) not in serialized_config:
             raise SystemExit("OpenClaw configuration is not bound to this ODS install")
@@ -602,11 +650,13 @@ if onboarding.exists():
         raise SystemExit("Pixel onboarding is not bound to this ODS install")
     operations_enabled = answers.get("operationsLimbEnabled") is True
     if operations_enabled:
-        if answers.get("operationsPolicyFile") != str(ops_owner_policy) or not ops_policy_present:
+        if answers.get("operationsPolicyFile") != str(ops_owner_policy):
             raise SystemExit("Pixel onboarding is not bound to the ODS Operations policy")
+        if not ops_policy_present and not unbound_sandbox_cleanup:
+            raise SystemExit("Pixel onboarding is missing its ODS Operations policy")
     elif ops_policy_present and state != "installing":
         raise SystemExit("ODS Operations policy exists without an enabled onboarding contract")
-    if cleanup[0] != "none":
+    if cleanup[0] != "none" and not unbound_sandbox_cleanup:
         onboarding_payload = onboarding.read_bytes()
         accepted_contracts = {
             hashlib.sha256(b"ods-pixel-contract-v1\0" + onboarding_payload).hexdigest(),
@@ -933,6 +983,20 @@ PY
         log_error "ODS-managed Pixel OpenClaw config checksum is invalid"
         return 1
     }
+    if [[ "$cleanup_state" != none ]]; then
+        if [[ -z "$sandbox_image" ]]; then
+            [[ "$sandbox_image_id" == derive || "$sandbox_image_id" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+                log_error "ODS-managed Pixel unbound sandbox recovery plan is invalid"
+                return 1
+            }
+        else
+            [[ "$sandbox_image" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,255}:[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ \
+                && "$sandbox_image_id" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+                log_error "ODS-managed Pixel sandbox cleanup plan is invalid"
+                return 1
+            }
+        fi
+    fi
 
     # Pixel's Operations Broker deliberately crosses the owner/root boundary.
     # Inspect its protected bytes as root, but bind them to this exact ODS
@@ -1358,11 +1422,23 @@ PY
             log_error "The ODS-managed Pixel sandbox preservation tag is missing"
             return 1
         }
+        if [[ "$sandbox_image_id" == derive ]]; then
+            sandbox_image_id="${observed_image%%|*}"
+            [[ "$sandbox_image_id" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+                log_error "The ODS-managed Pixel sandbox preservation tag has an invalid image ID"
+                return 1
+            }
+        fi
         [[ "$observed_image" == "$sandbox_image_id|$release_version|$owner_uid|sandbox" ]] || {
             log_error "The ODS-managed Pixel sandbox preservation tag drifted"
             return 1
         }
-        if observed_image="$(timeout 30s docker image inspect --format \
+        if [[ -z "$sandbox_image" ]]; then
+            # The failed apply never durably bound the shared image name. Keep
+            # all shared tags and use only the deterministic candidate tag and
+            # exact image ID to bound reserved-container cleanup.
+            shared_image_present=false
+        elif observed_image="$(timeout 30s docker image inspect --format \
             '{{.Id}}|{{index .Config.Labels "org.osmantic.pixel.sandbox-version"}}|{{index .Config.Labels "org.osmantic.pixel.sandbox-uid"}}|{{.Config.User}}' \
             "$sandbox_image" 2>/dev/null)"; then
             [[ "$observed_image" == "$sandbox_image_id|$release_version|$owner_uid|sandbox" ]] || {
@@ -1549,26 +1625,52 @@ PY
                 && runtime_attestation_state=absent
             if ! python3 - "$marker" "$retired_release_path" "$release_version" \
                 "$release_identity_sha256" "$install_manifest_sha256" \
-                "$runtime_attestation_state" <<'PY'
+                "$runtime_attestation_state" "$sandbox_image" "$sandbox_image_id" <<'PY'
 import json
 import os
 import pathlib
+import re
 import stat
 import sys
 import tempfile
 
 marker = pathlib.Path(sys.argv[1])
 retired_release = pathlib.Path(sys.argv[2])
-version, identity_sha256, manifest_sha256, runtime_attestation_state = sys.argv[3:]
+(
+    version,
+    identity_sha256,
+    manifest_sha256,
+    runtime_attestation_state,
+    sandbox_image,
+    sandbox_image_id,
+) = sys.argv[3:]
 value = json.loads(marker.read_text(encoding="utf-8"))
+minimal_marker_keys = {
+    "schema_version", "manager", "state", "initial_active_state",
+    "install_dir", "pixel_source_ref",
+}
+minimal_unattested = (
+    runtime_attestation_state == "absent"
+    and isinstance(value, dict)
+    and value.get("state") == "installing"
+    and set(value) == minimal_marker_keys
+    and sandbox_image == ""
+    and re.fullmatch(r"sha256:[0-9a-f]{64}", sandbox_image_id)
+)
+fully_bound = (
+    isinstance(value, dict)
+    and value.get("active_release_version") == version
+    and value.get("release_identity_sha256") == identity_sha256
+    and value.get("install_manifest_sha256") == manifest_sha256
+    and value.get("sandbox_image") == sandbox_image
+    and value.get("sandbox_image_id") == sandbox_image_id
+)
 if (
     not isinstance(value, dict)
     or value.get("schema_version") != 2
     or value.get("state") not in {"installing", "ready"}
     or value.get("initial_active_state") != "absent"
-    or value.get("active_release_version") != version
-    or value.get("release_identity_sha256") != identity_sha256
-    or value.get("install_manifest_sha256") != manifest_sha256
+    or not (minimal_unattested or fully_bound)
 ):
     raise SystemExit("Pixel marker changed before its deactivation transition")
 container_info = retired_release.parent.lstat()
@@ -1586,6 +1688,12 @@ if runtime_attestation_state not in {"verified", "absent"}:
     raise SystemExit("invalid Pixel runtime attestation transition")
 if runtime_attestation_state == "absent" and value.get("state") != "installing":
     raise SystemExit("only an interrupted Pixel install can lack runtime attestation")
+if minimal_unattested:
+    value["active_release_version"] = version
+    value["release_identity_sha256"] = identity_sha256
+    value["install_manifest_sha256"] = manifest_sha256
+    value["sandbox_image_id"] = sandbox_image_id
+    value["sandbox_image_state"] = "preserved-unbound"
 value["state"] = "deactivating"
 value["retired_release_path"] = str(retired_release)
 value["runtime_attestation_state"] = runtime_attestation_state
@@ -1641,7 +1749,8 @@ PY
             || -e "$pixel_install/releases/$release_version" \
             || -L "$pixel_install/releases/$release_version" \
             || ! -d "$retired_release_path" ]] \
-            || timeout 30s docker image inspect "$sandbox_image" >/dev/null 2>&1; then
+            || { [[ -n "$sandbox_image" ]] \
+                && timeout 30s docker image inspect "$sandbox_image" >/dev/null 2>&1; }; then
             log_error "ODS-managed Pixel active-state cleanup was incomplete"
             return 1
         fi

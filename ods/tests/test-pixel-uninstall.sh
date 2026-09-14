@@ -958,11 +958,19 @@ python3 - "$HOME_DIR/.config/ods/pixel-managed.json" <<'PY'
 import json, pathlib, sys
 path = pathlib.Path(sys.argv[1])
 value = json.loads(path.read_text())
-value["state"] = "installing"
-path.write_text(json.dumps(value) + "\n")
+value = {
+    "schema_version": 2,
+    "manager": "ods",
+    "state": "installing",
+    "initial_active_state": "absent",
+    "install_dir": value["install_dir"],
+    "pixel_source_ref": value["pixel_source_ref"],
+}
+path.write_text(json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n")
 PY
 chmod 0600 "$HOME_DIR/.config/ods/pixel-managed.json"
 rm -f -- "$HOME_DIR/.local/share/pixel/runtime-attestation.json"
+unbound_config_sha="$(sha256sum "$HOME_DIR/.openclaw/openclaw.json" | awk '{print $1}')"
 if ods_pixel_uninstall_managed "$INSTALL_DIR" "$HOME_DIR" \
     && [[ ! -e "$HOME_DIR/.local/share/pixel/current" \
         && ! -e "$HOME_DIR/.local/share/pixel/runtime-attestation.json" \
@@ -970,10 +978,121 @@ if ods_pixel_uninstall_managed "$INSTALL_DIR" "$HOME_DIR" \
         && ! -e "$HOME_DIR/.local/share/pixel/.ods-uninstall-runtime-attestation" \
         && ! -e "$HOME_DIR/.local/share/pixel/releases/4.3.14" \
         && ! -e "$HOME_DIR/.config/ods/pixel-managed.json" \
-        && ! -e "$DOCKER_STATE" ]]; then
-    pass "interrupted installing Pixel active link without attestation is safely retired"
+        && -e "$DOCKER_STATE" ]]; then
+    unbound_config="$(find "$HOME_DIR/.openclaw/retired-ods-configs" -mindepth 2 -maxdepth 2 \
+        -type f -name openclaw.json -print -quit 2>/dev/null)"
+    if [[ -n "$unbound_config" \
+        && "$(sha256sum "$unbound_config" | awk '{print $1}')" == "$unbound_config_sha" \
+        && "$(grep -c '^image rm -- ' "$DOCKER_LOG" || true)" == 0 ]]; then
+        pass "minimal interrupted Pixel state is retired while unbound config and shared image tags are preserved"
+    else
+        fail "minimal interrupted Pixel cleanup did not preserve unbound state exactly"
+    fi
 else
-    fail "interrupted installing Pixel active link without attestation was not resumable"
+    fail "minimal interrupted Pixel active link without attestation was not resumable"
+fi
+
+write_active_fixture
+python3 - "$HOME_DIR/.config/ods/pixel-managed.json" <<'PY'
+import json, pathlib, sys
+path = pathlib.Path(sys.argv[1])
+value = json.loads(path.read_text())
+value = {
+    "schema_version": 2,
+    "manager": "ods",
+    "state": "installing",
+    "initial_active_state": "absent",
+    "install_dir": value["install_dir"],
+    "pixel_source_ref": value["pixel_source_ref"],
+    "active_release_version": "9.9.9",
+}
+path.write_text(json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n")
+PY
+chmod 0600 "$HOME_DIR/.config/ods/pixel-managed.json"
+rm -f -- "$HOME_DIR/.local/share/pixel/runtime-attestation.json"
+if ods_pixel_uninstall_managed "$INSTALL_DIR" "$HOME_DIR"; then
+    fail "partially enriched unattested Pixel marker was accepted"
+else
+    [[ -L "$HOME_DIR/.local/share/pixel/current" \
+        && -e "$HOME_DIR/.config/ods/pixel-managed.json" \
+        && -e "$DOCKER_STATE" && ! -s "$SYSTEMCTL_LOG" && ! -s "$DOCKER_LOG" ]] \
+        && pass "partially enriched unattested Pixel marker fails closed before mutation" \
+        || fail "partial unattested marker refusal caused mutation"
+fi
+
+write_active_fixture
+pixel_install="$HOME_DIR/.local/share/pixel"
+rm -f -- "$pixel_install/runtime-attestation.json"
+mv -T "$pixel_install/current" "$pixel_install/.ods-uninstall-current"
+mkdir -m 0700 "$pixel_install/retired-ods-releases"
+identity_sha="$(sha256sum "$pixel_install/releases/4.3.14/release-identity.json" | awk '{print $1}')"
+manifest_sha="$(sha256sum "$pixel_install/releases/4.3.14/install-manifest.sha256" | awk '{print $1}')"
+retired_container="$(mktemp -d \
+    "$pixel_install/retired-ods-releases/4.3.14-${identity_sha:0:12}.XXXXXXXX")"
+retired_release="$retired_container/release"
+python3 - "$HOME_DIR/.config/ods/pixel-managed.json" "$identity_sha" "$manifest_sha" \
+    "$retired_release" <<'PY'
+import json, pathlib, sys
+path = pathlib.Path(sys.argv[1])
+original = json.loads(path.read_text())
+value = {
+    "schema_version": 2,
+    "manager": "ods",
+    "state": "deactivating",
+    "initial_active_state": "absent",
+    "install_dir": original["install_dir"],
+    "pixel_source_ref": original["pixel_source_ref"],
+    "active_release_version": "4.3.14",
+    "release_identity_sha256": sys.argv[2],
+    "install_manifest_sha256": sys.argv[3],
+    "sandbox_image_id": "sha256:" + "d" * 64,
+    "sandbox_image_state": "preserved-unbound",
+    "retired_release_path": sys.argv[4],
+    "runtime_attestation_state": "absent",
+}
+path.write_text(json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n")
+PY
+chmod 0600 "$HOME_DIR/.config/ods/pixel-managed.json"
+if ods_pixel_uninstall_managed "$INSTALL_DIR" "$HOME_DIR" \
+    && [[ -d "$retired_release" \
+        && ! -e "$pixel_install/releases/4.3.14" \
+        && ! -e "$pixel_install/.ods-uninstall-current" \
+        && ! -e "$HOME_DIR/.config/ods/pixel-managed.json" \
+        && -e "$DOCKER_STATE" ]]; then
+    pass "derived unattested deactivation resumes while preserving unbound shared image tags"
+else
+    fail "derived unattested deactivation marker was not resumable"
+fi
+
+write_active_fixture
+python3 - "$HOME_DIR/.config/ods/pixel-managed.json" \
+    "$HOME_DIR/.local/share/pixel/releases/4.3.14/release-identity.json" <<'PY'
+import json, pathlib, sys
+marker = pathlib.Path(sys.argv[1])
+original = json.loads(marker.read_text())
+marker.write_text(json.dumps({
+    "schema_version": 2,
+    "manager": "ods",
+    "state": "installing",
+    "initial_active_state": "absent",
+    "install_dir": original["install_dir"],
+    "pixel_source_ref": original["pixel_source_ref"],
+}, sort_keys=True, separators=(",", ":")) + "\n")
+identity = pathlib.Path(sys.argv[2])
+value = json.loads(identity.read_text())
+value["source"]["commit"] = "f" * 40
+identity.write_text(json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n")
+PY
+chmod 0600 "$HOME_DIR/.config/ods/pixel-managed.json"
+rm -f -- "$HOME_DIR/.local/share/pixel/runtime-attestation.json"
+if ods_pixel_uninstall_managed "$INSTALL_DIR" "$HOME_DIR"; then
+    fail "minimal unattested Pixel marker accepted a mismatched release source"
+else
+    [[ -L "$HOME_DIR/.local/share/pixel/current" \
+        && -e "$HOME_DIR/.config/ods/pixel-managed.json" \
+        && -e "$DOCKER_STATE" && ! -s "$SYSTEMCTL_LOG" && ! -s "$DOCKER_LOG" ]] \
+        && pass "minimal unattested release source mismatch fails closed before mutation" \
+        || fail "minimal unattested source mismatch caused mutation"
 fi
 
 write_active_fixture
