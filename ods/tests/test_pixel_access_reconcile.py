@@ -39,6 +39,16 @@ def projection(**changes):
 
 
 class ReconcileTests(unittest.TestCase):
+    def test_diagnostic_projection_retains_only_bounded_coordinator_error(self):
+        diagnostic = reconcile.diagnostic_projection({
+            "error": "runtime-proof-failed",
+            "private": "discard-me",
+        })
+        self.assertEqual(diagnostic["coordinator_error"], "runtime-proof-failed")
+        self.assertNotIn("private", diagnostic)
+        self.assertNotIn("coordinator_error",
+                         reconcile.diagnostic_projection({"error": "INVALID"}))
+
     def test_ready_projection_is_read_only(self):
         calls = []
         def request(operation, body=None):

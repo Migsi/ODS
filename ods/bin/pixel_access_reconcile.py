@@ -12,6 +12,7 @@ PROGRAM = Path(__file__).resolve().parent
 HEX = re.compile(r"^[a-f0-9]{64}$")
 DIAGNOSTIC_FIELDS = ("available", "scope", "configured_mode", "effective_mode",
                      "runtime_verified", "busy", "pending", "reason")
+ERROR_CODE = re.compile(r"^[a-z][a-z0-9-]{0,95}$")
 
 
 def diagnostic_projection(value):
@@ -25,6 +26,12 @@ def diagnostic_projection(value):
         elif (isinstance(item, str) and len(item) <= 96
               and all(32 <= ord(char) < 127 for char in item)):
             result[key] = item
+    # The root coordinator exposes only a stable error token on failures.
+    # Retain that bounded token under a distinct name so a failed proof can be
+    # diagnosed without admitting arbitrary response fields or private data.
+    coordinator_error = value.get("error")
+    if isinstance(coordinator_error, str) and ERROR_CODE.fullmatch(coordinator_error):
+        result["coordinator_error"] = coordinator_error
     return result
 
 
