@@ -136,6 +136,63 @@ def test_malformed_toggle_lease_fails_before_manager_or_lock_creation(
     assert (agent.EXTENSIONS_DIR / "documents" / "compose.yaml.disabled").is_file()
 
 
+def test_toggle_rejects_duplicate_lease_evidence_before_manager_or_lock_creation(
+    host_server, host_request
+):
+    agent, _listener = host_server
+    write_compose(agent, "documents", active=False)
+    evidence = json.dumps(valid_evidence(), separators=(",", ":"))
+    duplicate_top_level = (
+        f'{{"service_id":"documents","lease":{evidence},"lease":{evidence}}}'
+    ).encode()
+    duplicate_nested = evidence.replace(
+        '"leaseToken":',
+        '"leaseToken":"' + "x" * 32 + '","leaseToken":',
+        1,
+    )
+
+    for raw in (
+        duplicate_top_level,
+        f'{{"service_id":"documents","lease":{duplicate_nested}}}'.encode(),
+    ):
+        status, result = host_request("/v1/extension/activate", raw=raw)
+        assert status == 400
+        assert result == {
+            "error": {"code": "invalid-extension-mutation-request"}
+        }
+
+    assert agent._extension_lease_manager is None
+    assert dict(agent._service_locks) == {}
+    assert (agent.EXTENSIONS_DIR / "documents" / "compose.yaml.disabled").is_file()
+
+
+def test_toggle_rejects_ambiguous_or_oversized_framing_before_lease_parsing(
+    host_server, host_request
+):
+    agent, _listener = host_server
+    payload = json.dumps(
+        {"service_id": "documents", "lease": valid_evidence()}
+    ).encode()
+
+    status, result = host_request(
+        "/v1/extension/activate",
+        raw=payload,
+        headers={"Content-Length": "1", "Transfer-Encoding": "chunked"},
+    )
+    assert status == 400
+    assert result == {
+        "error": {"code": "invalid-extension-mutation-request-framing"}
+    }
+    status, result = host_request(
+        "/v1/extension/activate",
+        raw=b"x" * (agent.MAX_BODY + 1),
+    )
+    assert status == 413
+    assert result == {"error": {"code": "extension-mutation-request-size"}}
+    assert agent._extension_lease_manager is None
+    assert dict(agent._service_locks) == {}
+
+
 def test_disabled_toggle_lease_gate_does_not_construct_manager_or_lock(
     host_server, host_request
 ):
@@ -377,6 +434,53 @@ def test_malformed_sync_config_lease_fails_before_manager_lock_or_copy(
     assert not target.exists()
 
 
+def test_sync_config_rejects_duplicate_or_ambiguous_envelopes_before_copy(
+    host_server, host_request
+):
+    agent, _listener = host_server
+    _source, target = write_user_config(agent, "documents")
+    evidence = json.dumps(valid_evidence(), separators=(",", ":"))
+    duplicate_nested = evidence.replace(
+        '"leaseToken":',
+        '"leaseToken":"' + "x" * 32 + '","leaseToken":',
+        1,
+    )
+
+    raw_requests = (
+        (
+            f'{{"service_id":"documents","lease":{evidence},'
+            f'"lease":{evidence}}}'.encode(),
+            {},
+            "invalid-extension-mutation-request",
+        ),
+        (
+            f'{{"service_id":"documents","lease":{duplicate_nested}}}'.encode(),
+            {},
+            "invalid-extension-mutation-request",
+        ),
+        (
+            json.dumps(
+                {"service_id": "documents", "lease": valid_evidence()}
+            ).encode(),
+            {"Content-Length": "1", "Transfer-Encoding": "chunked"},
+            "invalid-extension-mutation-request-framing",
+        ),
+    )
+
+    for raw, headers, error_code in raw_requests:
+        status, result = host_request(
+            "/v1/extension/sync_config",
+            raw=raw,
+            headers=headers,
+        )
+        assert status == 400
+        assert result == {"error": {"code": error_code}}
+
+    assert agent._extension_lease_manager is None
+    assert dict(agent._service_locks) == {}
+    assert not target.exists()
+
+
 def test_sync_config_without_lease_preserves_legacy_behavior(
     host_server, host_request, monkeypatch
 ):
@@ -598,6 +702,55 @@ def test_malformed_start_stop_lease_fails_before_lock_or_compose(
 
     assert status == 422
     assert result == {"error": {"code": "invalid-lease-request"}}
+    assert compose_calls == []
+    assert agent._extension_lease_manager is None
+    assert dict(agent._service_locks) == {}
+
+
+@pytest.mark.parametrize("action", ["start", "stop"])
+def test_start_stop_rejects_duplicate_or_ambiguous_envelopes_before_compose(
+    host_server, host_request, monkeypatch, action
+):
+    agent, _listener = host_server
+    compose_calls = []
+    monkeypatch.setattr(
+        agent,
+        "docker_compose_action",
+        lambda *args: (compose_calls.append(args) or (True, "")),
+    )
+    evidence = json.dumps(valid_evidence(), separators=(",", ":"))
+    duplicate_nested = evidence.replace(
+        '"leaseToken":',
+        '"leaseToken":"' + "x" * 32 + '","leaseToken":',
+        1,
+    )
+    path = f"/v1/extension/{action}"
+
+    for raw in (
+        (
+            f'{{"service_id":"documents","lease":{evidence},'
+            f'"lease":{evidence}}}'
+        ).encode(),
+        f'{{"service_id":"documents","lease":{duplicate_nested}}}'.encode(),
+    ):
+        status, result = host_request(path, raw=raw)
+        assert status == 400
+        assert result == {
+            "error": {"code": "invalid-extension-mutation-request"}
+        }
+
+    framed = json.dumps(
+        {"service_id": "documents", "lease": valid_evidence()}
+    ).encode()
+    status, result = host_request(
+        path,
+        raw=framed,
+        headers={"Content-Length": "1", "Transfer-Encoding": "chunked"},
+    )
+    assert status == 400
+    assert result == {
+        "error": {"code": "invalid-extension-mutation-request-framing"}
+    }
     assert compose_calls == []
     assert agent._extension_lease_manager is None
     assert dict(agent._service_locks) == {}
