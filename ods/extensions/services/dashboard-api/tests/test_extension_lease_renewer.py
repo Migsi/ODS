@@ -248,12 +248,17 @@ def test_start_is_single_use_and_unstarted_operations_fail() -> None:
         ({"interval_seconds": True}, "lease-renewer-invalid-interval"),
         ({"interval_seconds": 600}, "lease-renewer-invalid-interval"),
         ({"interval_seconds": float("inf")}, "lease-renewer-invalid-interval"),
+        ({"interval_seconds": 10**1000}, "lease-renewer-invalid-interval"),
         (
             {"shutdown_timeout_seconds": 0},
             "lease-renewer-invalid-shutdown-timeout",
         ),
         (
             {"shutdown_timeout_seconds": float("nan")},
+            "lease-renewer-invalid-shutdown-timeout",
+        ),
+        (
+            {"shutdown_timeout_seconds": 10**1000},
             "lease-renewer-invalid-shutdown-timeout",
         ),
         ({"_waiter": None}, "lease-renewer-invalid-waiter"),

@@ -101,16 +101,19 @@ def host_request(host_server):
         *,
         raw=None,
         token="synthetic-lease-host-key",
+        headers=None,
         expect_no_store=True,
     ):
         connection = http.client.HTTPConnection(*listener.server_address, timeout=5)
         try:
             payload = raw if raw is not None else json.dumps(body).encode("utf-8")
+            request_headers = {"Authorization": "Bearer " + token}
+            request_headers.update(headers or {})
             connection.request(
                 "POST",
                 path,
                 body=payload,
-                headers={"Authorization": "Bearer " + token},
+                headers=request_headers,
             )
             response = connection.getresponse()
             document = json.loads(response.read())
@@ -214,6 +217,13 @@ def test_host_parser_and_schema_reject_ambiguous_or_oversized_input(
         "/v1/extension/lease/acquire",
         raw=b"x" * (agent._ASSISTANT_LEASE_MAX_BODY + 1),
     )[0] == 413
+    status, result = host_request(
+        "/v1/extension/lease/acquire",
+        raw=json.dumps(acquire_request(schema)).encode(),
+        headers={"Content-Length": "1", "Transfer-Encoding": "chunked"},
+    )
+    assert status == 400
+    assert result == {"error": {"code": "invalid-lease-request-framing"}}
     assert host_request(
         "/v1/extension/lease/acquire?leaseToken=do-not-log", acquire_request(schema)
     )[0] == 404
