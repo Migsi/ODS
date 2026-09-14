@@ -8,7 +8,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 fail() { echo "[FAIL] $*"; exit 1; }
 pass() { echo "[PASS] $*"; }
 
-for required in git jq tar; do
+for required in git jq; do
     command -v "$required" >/dev/null 2>&1 || fail "$required is required"
 done
 command -v python3 >/dev/null 2>&1 || command -v python >/dev/null 2>&1 \
@@ -43,6 +43,10 @@ snapshot_pre_update() {
             printf '%s\n' '{"schema":"changed-after-preflight"}' \
                 > "${INSTALL_DIR}/data/assistant-first/desired-state/extensions.lock.json"
             ;;
+        delete-lockfile)
+            rm -f -- \
+                "${INSTALL_DIR}/data/assistant-first/desired-state/extensions.lock.json"
+            ;;
         detach)
             git -C "$INSTALL_DIR" checkout --detach -q
             ;;
@@ -65,6 +69,46 @@ git -C "$(dirname "$0")/.." commit --allow-empty -q -m "unexpected concurrent re
 exit 1
 EOF
             chmod +x "${INSTALL_DIR}/migrations/migrate-v99-head-drift.sh"
+            ;;
+        failing-migration-file-drift)
+            mkdir -p "${INSTALL_DIR}/migrations"
+            cat > "${INSTALL_DIR}/migrations/migrate-v99-file-drift.sh" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' unexpected-concurrent-change > "$(dirname "$0")/../candidate-marker.txt"
+exit 1
+EOF
+            chmod +x "${INSTALL_DIR}/migrations/migrate-v99-file-drift.sh"
+            ;;
+        failing-migration-branch-drift)
+            mkdir -p "${INSTALL_DIR}/migrations"
+            cat > "${INSTALL_DIR}/migrations/migrate-v99-branch-drift.sh" <<'EOF'
+#!/usr/bin/env bash
+git -C "$(dirname "$0")/.." checkout -q -b unexpected-rollback-branch
+exit 1
+EOF
+            chmod +x "${INSTALL_DIR}/migrations/migrate-v99-branch-drift.sh"
+            ;;
+        post-merge-file-drift|signal-after-merge)
+            local hook_path
+            hook_path=$(git -C "$INSTALL_DIR" rev-parse --git-path hooks/post-merge)
+            case "$hook_path" in
+                /*) ;;
+                *) hook_path="${INSTALL_DIR}/${hook_path}" ;;
+            esac
+            mkdir -p "$(dirname "$hook_path")"
+            if [[ "${SNAPSHOT_MUTATION}" == post-merge-file-drift ]]; then
+                cat > "$hook_path" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' unexpected-post-merge-change \
+    > "$(git rev-parse --show-toplevel)/ods/candidate-marker.txt"
+EOF
+            else
+                cat > "$hook_path" <<'EOF'
+#!/usr/bin/env bash
+kill -TERM "${UPDATE_TEST_SIGNAL_TARGET:?}"
+EOF
+            fi
+            chmod +x "$hook_path"
             ;;
     esac
     printf '%s\n' "$target"
@@ -90,9 +134,19 @@ parser.add_argument("--candidate-revision", required=True)
 args = parser.parse_args()
 
 candidate = Path(args.candidate_dir)
-marker = (candidate / "candidate-marker.txt").read_text(encoding="utf-8").strip()
+manifest = json.loads((candidate / "manifest.json").read_text(encoding="utf-8"))
+marker = manifest["ods_version"]
 with open(os.environ["PREFLIGHT_LOG"], "a", encoding="utf-8") as handle:
-    handle.write(json.dumps({"revision": args.candidate_revision, "marker": marker}) + "\n")
+    handle.write(
+        json.dumps(
+            {
+                "revision": args.candidate_revision,
+                "marker": marker,
+                "archiveProbe": manifest.get("archive_probe"),
+            }
+        )
+        + "\n"
+    )
 with open(os.environ["UPDATE_EVENT_LOG"], "a", encoding="utf-8") as handle:
     handle.write("preflight\n")
 
@@ -146,21 +200,30 @@ git -C "$REMOTE" symbolic-ref HEAD refs/heads/main
 # Clone each fixture before the candidate exists so a rejected preflight can
 # prove the installed object database was not changed by candidate resolution.
 for name in blocked-10 blocked-11 blocked-12 blocked-42 beta legacy ready \
-    dirty-staged dirty-unstaged dirty-untracked drift-lockfile drift-branch \
-    apply-fail migration-fail migration-head-drift; do
+    dirty-staged dirty-unstaged dirty-untracked drift-lockfile \
+    drift-lockfile-delete drift-branch apply-fail apply-file-drift apply-signal \
+    migration-fail migration-head-drift migration-file-drift \
+    migration-branch-drift non-origin-upstream; do
     mkdir -p "$TMP/$name"
     git clone -q "$REMOTE" "$TMP/$name/repository"
 done
 git -C "$TMP/beta/repository" checkout -q -b public-beta --track origin/public-beta
+git -C "$TMP/non-origin-upstream/repository" remote add upstream "$REMOTE"
+git -C "$TMP/non-origin-upstream/repository" fetch -q upstream public-beta
+git -C "$TMP/non-origin-upstream/repository" branch \
+    --set-upstream-to=upstream/public-beta main >/dev/null
 
 cat > "$SEED/ods/manifest.json" <<'EOF'
-{"ods_version":"1.1.0","release":{"version":"1.1.0"}}
+{"ods_version":"1.1.0","release":{"version":"1.1.0"},"archive_probe":"$Format:%H$"}
 EOF
 cat > "$SEED/ods/config/extensions-catalog.json" <<'EOF'
 {"catalog_revision":"candidate","extensions":[]}
 EOF
 printf '%s\n' candidate > "$SEED/ods/candidate-marker.txt"
-git -C "$SEED" add ods
+cat > "$SEED/.gitattributes" <<'EOF'
+ods/manifest.json export-subst
+EOF
+git -C "$SEED" add ods .gitattributes
 git -C "$SEED" commit -q -m "candidate"
 CANDIDATE_REVISION=$(git -C "$SEED" rev-parse HEAD)
 git -C "$SEED" push -q origin main
@@ -244,7 +307,8 @@ run_update() {
     PREFLIGHT_LOG="$TMP/$name/preflight.log" \
     UPDATE_EVENT_LOG="$TMP/$name/events.log" \
     SNAPSHOT_MUTATION="${SNAPSHOT_MUTATION:-}" \
-    bash "$install/ods-update.sh" update > "$output" 2>&1
+    bash -c 'export UPDATE_TEST_SIGNAL_TARGET=$BASHPID; exec bash "$1" update' \
+        _ "$install/ods-update.sh" > "$output" 2>&1
     RUN_STATUS=$?
     set -e
     SNAPSHOT_MUTATION=""
@@ -274,7 +338,7 @@ for status in 10 11 12 42; do
         || fail "preflight status $status reached snapshot or Docker mutation"
     [[ "$(jq -r '.revision' "$TMP/$name/preflight.log")" == "$CANDIDATE_REVISION" ]] \
         || fail "preflight status $status was not bound to the exact candidate"
-    [[ "$(jq -r '.marker' "$TMP/$name/preflight.log")" == candidate ]] \
+    [[ "$(jq -r '.marker' "$TMP/$name/preflight.log")" == 1.1.0 ]] \
         || fail "preflight status $status did not inspect the candidate tree"
     if find "$TMP/$name/runtime-tmp" -mindepth 1 -maxdepth 1 \
         -type d -name 'ods-update-candidate.*' | grep -q .; then
@@ -284,18 +348,49 @@ done
 pass "all non-ready preflight states fail before installed checkout and runtime mutation"
 
 prepare_runtime_state beta assistant-first
+[[ "$(git -C "$TMP/beta/repository/ods" rev-parse \
+    --abbrev-ref --symbolic-full-name '@{upstream}')" == origin/public-beta ]] \
+    || fail "public-beta fixture lost its configured upstream"
 run_update beta 0
 [[ "$RUN_STATUS" -eq 0 ]] || {
     cat "$TMP/beta/update.out"
     fail "configured public-beta upstream update failed"
 }
-[[ "$(git -C "$TMP/beta/repository/ods" rev-parse HEAD)" == "$BETA_REVISION" ]] \
-    || fail "configured public-beta checkout crossed to the main branch"
+beta_actual_revision=$(git -C "$TMP/beta/repository/ods" rev-parse HEAD)
+if [[ "$beta_actual_revision" != "$BETA_REVISION" ]]; then
+    printf 'expected public-beta revision: %s\n' "$BETA_REVISION"
+    printf 'actual installed revision: %s\n' "$beta_actual_revision"
+    cat "$TMP/beta/update.out"
+    fail "configured public-beta checkout crossed to the main branch"
+fi
 [[ "$(jq -r '.revision' "$TMP/beta/preflight.log")" == "$BETA_REVISION" ]] \
     || fail "public-beta preflight was not bound to its configured upstream"
-[[ "$(jq -r '.marker' "$TMP/beta/preflight.log")" == public-beta-candidate ]] \
+[[ "$(jq -r '.marker' "$TMP/beta/preflight.log")" == 1.0.5 ]] \
     || fail "public-beta update inspected the wrong candidate subtree"
 pass "configured public-beta checkouts remain on their exact upstream channel"
+
+prepare_runtime_state non-origin-upstream assistant-first
+non_origin_install="$TMP/non-origin-upstream/repository/ods"
+run_update non-origin-upstream 0
+[[ "$RUN_STATUS" -ne 0 ]] || fail "non-origin upstream was silently substituted"
+grep -q 'configured source upstream must use the origin remote' \
+    "$TMP/non-origin-upstream/update.out" \
+    || fail "non-origin upstream rejection was not explained"
+[[ "$(git -C "$non_origin_install" rev-parse HEAD)" == "$BASE_REVISION" ]] \
+    || fail "non-origin upstream rejection changed installed HEAD"
+[[ ! -e "$TMP/non-origin-upstream/preflight.log" ]] \
+    || fail "non-origin upstream reached compatibility preflight"
+[[ ! -e "$TMP/non-origin-upstream/events.log" ]] \
+    || fail "non-origin upstream reached snapshot or runtime mutation"
+if git -C "$non_origin_install" cat-file -e \
+    "${CANDIDATE_REVISION}^{commit}" 2>/dev/null; then
+    fail "non-origin upstream rejection imported the origin candidate"
+fi
+if find "$TMP/non-origin-upstream/runtime-tmp" -mindepth 1 -maxdepth 1 \
+    -type d -name 'ods-update-candidate.*' | grep -q .; then
+    fail "non-origin upstream rejection left a candidate workspace"
+fi
+pass "configured non-origin upstreams fail closed instead of crossing remotes"
 
 prepare_runtime_state legacy full
 run_update legacy 42
@@ -369,6 +464,25 @@ fi
     || fail "post-preflight lockfile drift restored an unmutated snapshot"
 pass "lockfile drift after preflight fails before candidate import or runtime mutation"
 
+prepare_runtime_state drift-lockfile-delete assistant-first
+drift_lockfile_delete_install="$TMP/drift-lockfile-delete/repository/ods"
+SNAPSHOT_MUTATION=delete-lockfile run_update drift-lockfile-delete 0
+[[ "$RUN_STATUS" -ne 0 ]] || fail "post-preflight lockfile deletion did not block update"
+grep -q 'desired state changed after update preflight' \
+    "$TMP/drift-lockfile-delete/update.out" \
+    || fail "post-preflight lockfile deletion was not identified"
+[[ "$(git -C "$drift_lockfile_delete_install" rev-parse HEAD)" == \
+    "$BASE_REVISION" ]] || fail "post-preflight lockfile deletion changed HEAD"
+if git -C "$drift_lockfile_delete_install" cat-file -e \
+    "${CANDIDATE_REVISION}^{commit}" 2>/dev/null; then
+    fail "post-preflight lockfile deletion imported the candidate object"
+fi
+! grep -q '^docker ' "$TMP/drift-lockfile-delete/events.log" \
+    || fail "post-preflight lockfile deletion restarted services"
+! grep -q '^restore$' "$TMP/drift-lockfile-delete/events.log" \
+    || fail "post-preflight lockfile deletion restored an unmutated snapshot"
+pass "lockfile deletion after preflight fails before candidate import or mutation"
+
 prepare_runtime_state drift-branch assistant-first
 drift_branch_install="$TMP/drift-branch/repository/ods"
 SNAPSHOT_MUTATION=detach run_update drift-branch 0
@@ -399,6 +513,52 @@ grep -q 'failed before changing installed source' "$TMP/apply-fail/update.out" \
 ! grep -q '^docker ' "$TMP/apply-fail/events.log" \
     || fail "pre-merge apply failure restarted services"
 pass "apply failure before HEAD movement does not cycle the runtime"
+
+prepare_runtime_state apply-file-drift assistant-first
+apply_file_drift_install="$TMP/apply-file-drift/repository/ods"
+SNAPSHOT_MUTATION=post-merge-file-drift run_update apply-file-drift 0
+[[ "$RUN_STATUS" -ne 0 ]] || fail "post-merge tracked-file drift did not fail update"
+[[ "$(git -C "$apply_file_drift_install" rev-parse HEAD)" == \
+    "$CANDIDATE_REVISION" ]] || fail "post-merge tracked-file drift changed candidate HEAD"
+[[ "$(cat "$apply_file_drift_install/candidate-marker.txt")" == \
+    unexpected-post-merge-change ]] \
+    || fail "post-merge tracked-file drift was erased"
+grep -q 'Tracked source files changed after the update candidate was applied' \
+    "$TMP/apply-file-drift/update.out" \
+    || fail "post-merge tracked-file drift did not fail closed"
+grep -q 'manual recovery is required' "$TMP/apply-file-drift/update.out" \
+    || fail "post-merge tracked-file drift did not require manual recovery"
+! grep -q '^restore$' "$TMP/apply-file-drift/events.log" \
+    || fail "post-merge tracked-file drift restored runtime state"
+! grep -q '^docker ' "$TMP/apply-file-drift/events.log" \
+    || fail "post-merge tracked-file drift restarted services"
+pass "post-merge tracked-file drift is detected and preserved"
+
+prepare_runtime_state apply-signal assistant-first
+apply_signal_install="$TMP/apply-signal/repository/ods"
+SNAPSHOT_MUTATION=signal-after-merge run_update apply-signal 0
+[[ "$RUN_STATUS" -eq 143 ]] || {
+    cat "$TMP/apply-signal/update.out"
+    fail "post-merge TERM did not exit with status 143"
+}
+grep -q 'Assistant First update interrupted by TERM' \
+    "$TMP/apply-signal/update.out" \
+    || fail "post-merge TERM did not report the interrupted update"
+grep -q "Restored source revision ${BASE_REVISION}" \
+    "$TMP/apply-signal/update.out" \
+    || fail "post-merge TERM did not restore the original source"
+[[ "$(git -C "$apply_signal_install" rev-parse HEAD)" == "$BASE_REVISION" ]] \
+    || fail "post-merge TERM left the exact candidate applied"
+[[ "$(sed -n '1p' "$TMP/apply-signal/events.log")" == preflight ]] \
+    || fail "post-merge TERM did not preflight first"
+[[ "$(sed -n '2p' "$TMP/apply-signal/events.log")" == snapshot ]] \
+    || fail "post-merge TERM did not snapshot second"
+[[ "$(sed -n '3p' "$TMP/apply-signal/events.log")" == restore ]] \
+    || fail "post-merge TERM did not restore after source rollback"
+grep -q '^docker .* down --remove-orphans$' \
+    "$TMP/apply-signal/events.log" \
+    || fail "post-merge TERM did not restart the restored graph"
+pass "post-merge TERM restores source and runtime before exiting"
 
 prepare_runtime_state migration-fail assistant-first
 migration_fail_install="$TMP/migration-fail/repository/ods"
@@ -442,6 +602,48 @@ grep -q 'manual recovery is required' "$TMP/migration-head-drift/update.out" \
     || fail "unexpected rollback HEAD restarted services"
 pass "source rollback refuses to erase an unrecognized concurrent revision"
 
+prepare_runtime_state migration-file-drift assistant-first
+migration_file_drift_install="$TMP/migration-file-drift/repository/ods"
+SNAPSHOT_MUTATION=failing-migration-file-drift run_update migration-file-drift 0
+[[ "$RUN_STATUS" -ne 0 ]] || fail "migration tracked-file drift did not fail update"
+[[ "$(git -C "$migration_file_drift_install" rev-parse HEAD)" == \
+    "$CANDIDATE_REVISION" ]] \
+    || fail "tracked-file drift changed the applied candidate revision"
+[[ "$(cat "$migration_file_drift_install/candidate-marker.txt")" == \
+    unexpected-concurrent-change ]] \
+    || fail "source rollback erased the concurrent tracked-file change"
+grep -q 'Tracked source files changed after the update candidate was applied' \
+    "$TMP/migration-file-drift/update.out" \
+    || fail "tracked-file drift did not produce a fail-closed error"
+grep -q 'manual recovery is required' "$TMP/migration-file-drift/update.out" \
+    || fail "tracked-file drift did not require manual recovery"
+! grep -q '^restore$' "$TMP/migration-file-drift/events.log" \
+    || fail "tracked-file drift restored runtime state onto unexpected source"
+! grep -q '^docker ' "$TMP/migration-file-drift/events.log" \
+    || fail "tracked-file drift restarted services"
+pass "source rollback preserves concurrent tracked-file changes"
+
+prepare_runtime_state migration-branch-drift assistant-first
+migration_branch_drift_install="$TMP/migration-branch-drift/repository/ods"
+SNAPSHOT_MUTATION=failing-migration-branch-drift run_update migration-branch-drift 0
+[[ "$RUN_STATUS" -ne 0 ]] || fail "migration branch drift did not fail update"
+[[ "$(git -C "$migration_branch_drift_install" rev-parse HEAD)" == \
+    "$CANDIDATE_REVISION" ]] \
+    || fail "branch drift changed the applied candidate revision"
+[[ "$(git -C "$migration_branch_drift_install" symbolic-ref --short HEAD)" == \
+    unexpected-rollback-branch ]] \
+    || fail "source rollback erased or changed the unexpected branch"
+grep -q 'branch or upstream changed after the update candidate was applied' \
+    "$TMP/migration-branch-drift/update.out" \
+    || fail "branch drift did not produce a fail-closed error"
+grep -q 'manual recovery is required' "$TMP/migration-branch-drift/update.out" \
+    || fail "branch drift did not require manual recovery"
+! grep -q '^restore$' "$TMP/migration-branch-drift/events.log" \
+    || fail "branch drift restored runtime state onto unexpected source"
+! grep -q '^docker ' "$TMP/migration-branch-drift/events.log" \
+    || fail "branch drift restarted services"
+pass "source rollback preserves concurrent branch and upstream changes"
+
 prepare_runtime_state ready assistant-first
 ready_install="$TMP/ready/repository/ods"
 set +e
@@ -462,6 +664,10 @@ set -e
 }
 [[ "$(git -C "$ready_install" rev-parse HEAD)" == "$CANDIDATE_REVISION" ]] \
     || fail "ready update did not apply the preflighted exact candidate"
+[[ "$(jq -r '.marker' "$TMP/ready/preflight.log")" == 1.1.0 ]] \
+    || fail "ready update did not inspect the exact candidate manifest blob"
+[[ "$(jq -r '.archiveProbe' "$TMP/ready/preflight.log")" == '$Format:%H$' ]] \
+    || fail "candidate attributes transformed the bytes assessed by preflight"
 ready_first=$(sed -n '1p' "$TMP/ready/events.log" | tr -d '\r')
 ready_second=$(sed -n '2p' "$TMP/ready/events.log" | tr -d '\r')
 [[ "$ready_first" == preflight && "$ready_second" == snapshot ]] \

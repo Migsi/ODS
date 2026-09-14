@@ -96,20 +96,25 @@ lockfile bytes. Untracked and ignored runtime data do not fail that source
 precondition. The updater
 fetches the configured `origin/*` upstream branch into a private disposable Git
 repository. An unconfigured or detached checkout falls back to `main`, then
-`master`; a configured branch never silently crosses channels. The updater
-materializes only the installed source subtree,
+`master`; a configured `origin/*` branch never silently crosses channels, and
+a checkout configured to another remote fails closed instead of substituting an
+`origin` branch. The updater
+materializes the assessed manifest and catalog from their exact Git blob bytes,
 runs this gate against the exact fetched object, and stops before a rollback
 snapshot, installed Git-object import, checkout, migration, image, or service
 change unless the result is ready. A ready candidate is imported from the
 disposable repository only after the snapshot and an immediate revalidation of
 the bound source and desired state. Drift fails before candidate-object import
 or runtime mutation. The exact candidate is applied with a verified
-fast-forward; there is no second network fetch that could change it. If apply
-fails without moving HEAD, the updater does not cycle services. If a later
-migration or health check fails after HEAD moved, rollback validates and
-restores the original source revision before restoring the snapshot and
-restarting the old graph. Full, Core, and Custom retain their established
-source-update path.
+fast-forward followed by a second tracked-tree check; there is no archive
+substitution or second network fetch that could change the assessed candidate
+bytes. If apply fails without moving HEAD, the updater does not cycle services.
+Once the snapshot exists, HUP, INT, or TERM is bound to the same fail-closed
+source-first recovery path, including the narrow interval after Git moves HEAD
+but before the caller records the applied revision. If an interrupt, migration,
+or health check fails after mutation begins, rollback validates and restores the
+original source revision before restoring the snapshot and restarting the old
+graph. Full, Core, and Custom retain their established source-update path.
 
 A result requiring extension changes still stops for a separately generated and
 approved composite plan. A cross-process guard that excludes extension mutation
