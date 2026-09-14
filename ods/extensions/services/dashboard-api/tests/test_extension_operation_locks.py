@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import multiprocessing
+import os
 import sys
 import threading
 import time
@@ -167,6 +168,30 @@ def test_symlinked_lock_file_is_rejected(tmp_path):
             pass
 
     assert target.read_text(encoding="utf-8") == "unchanged"
+
+
+def test_hard_linked_lock_file_is_rejected(tmp_path):
+    lock_path = locks.operation_lock_path(tmp_path, "documents")
+    target = tmp_path / "unrelated"
+    target.write_bytes(b"unchanged")
+    try:
+        os.link(target, lock_path)
+    except (OSError, NotImplementedError):
+        pytest.skip("current filesystem cannot create hard links")
+
+    with pytest.raises(locks.ServiceLockError, match="operation-lock-file-unsafe"):
+        with locks.exclusive_file_lock(lock_path):
+            pass
+
+    assert target.read_bytes() == b"unchanged"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX mode assertion")
+def test_new_lock_file_is_owner_only(tmp_path):
+    lock_path = locks.operation_lock_path(tmp_path, "documents")
+
+    with locks.exclusive_file_lock(lock_path):
+        assert lock_path.stat().st_mode & 0o777 == 0o600
 
 
 def test_symlinked_lock_directory_is_rejected(tmp_path):
