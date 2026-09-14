@@ -159,8 +159,12 @@ def assess_update_compatibility(
             "invalid-source-lockfile", lockfileCode=exc.code
         ) from exc
 
-    _version(installed_ods_version, "invalid-installed-ods-version")
+    installed_key = _version(
+        installed_ods_version, "invalid-installed-ods-version"
+    )
     candidate_key = _version(candidate_ods_version, "invalid-candidate-ods-version")
+    if candidate_key < installed_key:
+        _fail("candidate-ods-version-regression")
     document = validated["lockfile"]
     if installed_ods_version != document["odsVersion"]:
         _fail("stale-source-lockfile")
