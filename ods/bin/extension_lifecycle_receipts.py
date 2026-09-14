@@ -568,6 +568,24 @@ def _on_posix() -> bool:
     return os.name == "posix"
 
 
+def _close_fd_best_effort(fd: int) -> None:
+    """Close an fd without replacing an exception already being reported."""
+
+    try:
+        os.close(fd)
+    except OSError:
+        pass
+
+
+def _close_fd_strict(fd: int, *, code: str, detail: str) -> None:
+    """Close an fd or raise the caller's stable error classification."""
+
+    try:
+        os.close(fd)
+    except OSError as exc:
+        raise LifecycleReceiptError(code, f"{detail}: {exc}") from None
+
+
 def _fsync_directory(path: str) -> None:
     """fsync a directory so a freshly published link survives a crash.
 
@@ -587,11 +605,15 @@ def _fsync_directory(path: str) -> None:
     try:
         os.fsync(fd)
     except OSError as exc:
+        _close_fd_best_effort(fd)
         raise LifecycleReceiptError(
             "receipt-io-error", f"cannot fsync directory: {exc}"
         ) from None
-    finally:
-        os.close(fd)
+    _close_fd_strict(
+        fd,
+        code="receipt-io-error",
+        detail="cannot close directory after fsync",
+    )
 
 
 def _check_published_posix_metadata(path: str, lst: os.stat_result) -> None:
@@ -895,18 +917,18 @@ def _write_and_publish_receipt(directory: str, final_name: str, data: bytes) -> 
     try:
         pre_link_lst = os.lstat(temp_path)
     except OSError as exc:
-        os.close(fd)
+        _close_fd_best_effort(fd)
         raise LifecycleReceiptError(
             "receipt-io-error", f"cannot lstat temp before link: {exc}"
         ) from None
     if (pre_link_lst.st_dev, pre_link_lst.st_ino) != (temp_dev, temp_ino):
-        os.close(fd)
+        _close_fd_best_effort(fd)
         raise LifecycleIntegrityError(
             f"temp file inode changed before link (possible rebinding): "
             f"{temp_path}"
         )
     if not stat.S_ISREG(pre_link_lst.st_mode):
-        os.close(fd)
+        _close_fd_best_effort(fd)
         raise LifecycleIntegrityError(
             f"temp is not a regular file before link: {temp_path}"
         )
@@ -920,8 +942,7 @@ def _write_and_publish_receipt(directory: str, final_name: str, data: bytes) -> 
             _unlink_temp_if_ours(temp_path, temp_dev, temp_ino)
         except LifecycleReceiptError:
             pass
-        finally:
-            os.close(fd)
+        _close_fd_best_effort(fd)
         raise
 
     # After successful link: lstat final path and require the same inode/device
@@ -932,7 +953,7 @@ def _write_and_publish_receipt(directory: str, final_name: str, data: bytes) -> 
             _unlink_temp_if_ours(temp_path, temp_dev, temp_ino)
         except LifecycleReceiptError:
             pass
-        os.close(fd)
+        _close_fd_best_effort(fd)
         raise LifecycleReceiptError(
             "receipt-io-error", f"cannot lstat final path after link: {exc}"
         ) from None
@@ -941,7 +962,7 @@ def _write_and_publish_receipt(directory: str, final_name: str, data: bytes) -> 
             _unlink_temp_if_ours(temp_path, temp_dev, temp_ino)
         except LifecycleReceiptError:
             pass
-        os.close(fd)
+        _close_fd_best_effort(fd)
         raise LifecycleIntegrityError(
             f"final path is not the published temp inode: {final_path}"
         )
@@ -950,7 +971,7 @@ def _write_and_publish_receipt(directory: str, final_name: str, data: bytes) -> 
             _unlink_temp_if_ours(temp_path, temp_dev, temp_ino)
         except LifecycleReceiptError:
             pass
-        os.close(fd)
+        _close_fd_best_effort(fd)
         raise LifecycleIntegrityError(
             f"final path is not a regular file after link: {final_path}"
         )
@@ -959,13 +980,20 @@ def _write_and_publish_receipt(directory: str, final_name: str, data: bytes) -> 
     # with a stable I/O error if cleanup of the authentic temp fails.
     try:
         substituted = not _unlink_temp_if_ours(temp_path, temp_dev, temp_ino)
-    finally:
-        os.close(fd)
+    except BaseException:
+        _close_fd_best_effort(fd)
+        raise
     if substituted:
+        _close_fd_best_effort(fd)
         raise LifecycleIntegrityError(
             f"temp path was substituted before cleanup; refusing to unlink "
             f"foreign path: {temp_path}"
         )
+    _close_fd_strict(
+        fd,
+        code="receipt-io-error",
+        detail="cannot close published temp receipt",
+    )
 
     _fsync_directory(directory)
 
@@ -1021,6 +1049,7 @@ def _read_published_receipt(path: str, max_bytes: int = MAX_RECEIPT_BYTES) -> by
             raise LifecycleIntegrityError(
                 f"cannot open receipt {path}: {exc}"
             ) from None
+        read_failure: BaseException | None = None
         try:
             fst = os.fstat(fd)
             if not stat.S_ISREG(fst.st_mode):
@@ -1052,8 +1081,18 @@ def _read_published_receipt(path: str, max_bytes: int = MAX_RECEIPT_BYTES) -> by
                     raise LifecycleIntegrityError(
                         f"receipt exceeds the maximum size: {path}"
                     )
+        except BaseException as exc:
+            read_failure = exc
+            raise
         finally:
-            os.close(fd)
+            if read_failure is None:
+                _close_fd_strict(
+                    fd,
+                    code="receipt-io-error",
+                    detail="cannot close published receipt",
+                )
+            else:
+                _close_fd_best_effort(fd)
         return b"".join(chunks)
     raise LifecycleIntegrityError(f"receipt hard-link count did not settle: {path}")
 
@@ -1223,12 +1262,19 @@ class LifecycleReceiptStore:
                         "root directory was replaced between open and lstat",
                     )
             except OSError as exc:
+                _close_fd_best_effort(fd)
                 raise LifecycleReceiptError(
                     "invalid-receipt-root",
                     f"cannot secure root directory: {exc}",
                 ) from None
-            finally:
-                os.close(fd)
+            except BaseException:
+                _close_fd_best_effort(fd)
+                raise
+            _close_fd_strict(
+                fd,
+                code="invalid-receipt-root",
+                detail="cannot close secured root directory",
+            )
         else:
             try:
                 os.chmod(self._root, _ROOT_MODE)

@@ -191,12 +191,21 @@ is_assistant_first_install() {
 }
 
 _assistant_first_mutation_guard_held() {
-    local descriptor="${ODS_MUTATION_GUARD_FD:-}"
+    local descriptor="${ODS_MUTATION_GUARD_FD:-}" python_cmd=""
     [[ "$descriptor" =~ ^[0-9]+$ ]] || return 1
-    # The Python guard runner clears close-on-exec before replacing itself with
-    # this Bash process. Confirm the inherited descriptor is still open; the
-    # owner-controlled environment marker only prevents recursive reacquisition.
-    { true >&"$descriptor"; } 2>/dev/null
+    [[ -f "${INSTALL_DIR}/scripts/run-with-extension-mutation-guard.py" \
+        && ! -L "${INSTALL_DIR}/scripts/run-with-extension-mutation-guard.py" \
+        && -f "${INSTALL_DIR}/lib/python-cmd.sh" \
+        && ! -L "${INSTALL_DIR}/lib/python-cmd.sh" ]] || return 1
+    # The marker is not trusted by itself. Bind the inherited descriptor to the
+    # canonical guard inode and confirm (or safely acquire) its live flock.
+    # shellcheck source=lib/python-cmd.sh
+    . "${INSTALL_DIR}/lib/python-cmd.sh" >/dev/null 2>&1 || return 1
+    python_cmd=$(ods_detect_python_cmd 2>/dev/null || true)
+    [[ -n "$python_cmd" ]] || return 1
+    "$python_cmd" "${INSTALL_DIR}/scripts/run-with-extension-mutation-guard.py" \
+        --lock-parent "${INSTALL_DIR}/data" \
+        --verify-held-fd "$descriptor" >/dev/null 2>&1
 }
 
 _run_with_assistant_first_mutation_guard() {
@@ -225,7 +234,11 @@ _run_with_assistant_first_mutation_guard() {
         return 74
     }
 
-    "$python_cmd" "${INSTALL_DIR}/scripts/run-with-extension-mutation-guard.py" \
+    # Replace this top-level updater process so terminal signals retain the
+    # same PID after the Python lock holder replaces itself with guarded Bash.
+    # Spawning a child here would strand the recovery traps in the child while
+    # HUP/INT/TERM terminates the waiting parent.
+    exec "$python_cmd" "${INSTALL_DIR}/scripts/run-with-extension-mutation-guard.py" \
         --lock-parent "${INSTALL_DIR}/data" \
         --timeout "${ODS_MUTATION_GUARD_TIMEOUT:-5}" \
         -- bash "${SCRIPT_DIR}/ods-update.sh" "$command" "$@" \
@@ -253,6 +266,9 @@ UPDATE_SOURCE_ORIGINAL_BRANCH=""
 UPDATE_SOURCE_ORIGINAL_UPSTREAM=""
 UPDATE_SOURCE_LOCKFILE_HASH=""
 UPDATE_SOURCE_APPLIED_HEAD=""
+UPDATE_SIGNAL_SNAPSHOT=""
+UPDATE_SIGNAL_COMPOSE_FLAGS=""
+UPDATE_SIGNAL_MUTATION_STARTED=false
 
 _cleanup_update_candidate() {
     local root="${UPDATE_CANDIDATE_ROOT:-}"
@@ -374,7 +390,7 @@ _verify_assistant_first_source_state() {
 }
 
 _restore_assistant_first_source() {
-    local revision="$1" current_head restored_head
+    local revision="$1" current_head current_branch current_upstream restored_head
     if [[ ! "$revision" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]] \
        || ! git -C "$INSTALL_DIR" cat-file -e "${revision}^{commit}" 2>/dev/null; then
         log_error "CRITICAL: The recorded source rollback revision is invalid."
@@ -387,6 +403,19 @@ _restore_assistant_first_source() {
             || [[ "$current_head" != "$UPDATE_SOURCE_APPLIED_HEAD" ]]; }; then
         log_error "CRITICAL: Installed HEAD no longer matches the applied update candidate."
         log_info "Refusing to erase an unexpected source revision; manual recovery is required."
+        return 1
+    fi
+    current_branch=$(_update_source_branch)
+    current_upstream=$(_update_source_upstream)
+    if [[ "$current_branch" != "$UPDATE_SOURCE_ORIGINAL_BRANCH" ]] \
+       || [[ "$current_upstream" != "$UPDATE_SOURCE_ORIGINAL_UPSTREAM" ]]; then
+        log_error "CRITICAL: Installed branch or upstream changed after the update candidate was applied."
+        log_info "Refusing to reset an unexpected source checkout; manual recovery is required."
+        return 1
+    fi
+    if ! _update_tracked_tree_clean; then
+        log_error "CRITICAL: Tracked source files changed after the update candidate was applied."
+        log_info "Refusing to erase concurrent tracked changes; manual recovery is required."
         return 1
     fi
     if ! git -C "$INSTALL_DIR" reset --hard "$revision" >/dev/null 2>&1; then
@@ -410,6 +439,59 @@ _clear_assistant_first_source_state() {
     UPDATE_SOURCE_APPLIED_HEAD=""
 }
 
+_arm_assistant_first_update_signal_rollback() {
+    UPDATE_SIGNAL_SNAPSHOT="$1"
+    UPDATE_SIGNAL_COMPOSE_FLAGS="$2"
+    UPDATE_SIGNAL_MUTATION_STARTED=false
+    trap '_assistant_first_update_interrupted HUP' HUP
+    trap '_assistant_first_update_interrupted INT' INT
+    trap '_assistant_first_update_interrupted TERM' TERM
+}
+
+_disarm_assistant_first_update_signal_rollback() {
+    trap '_cleanup_update_candidate; exit 130' HUP INT TERM
+    UPDATE_SIGNAL_SNAPSHOT=""
+    UPDATE_SIGNAL_COMPOSE_FLAGS=""
+    UPDATE_SIGNAL_MUTATION_STARTED=false
+}
+
+_assistant_first_update_interrupted() {
+    local signal="${1:-INT}" current_head="" rollback_source="" status=130
+
+    # Bash runs traps between commands. Disable re-entry first, then infer a
+    # completed fast-forward even if the signal landed before cmd_update could
+    # record UPDATE_SOURCE_APPLIED_HEAD.
+    trap '' HUP INT TERM
+    log_error "Assistant First update interrupted by ${signal}."
+    current_head=$(git -C "$INSTALL_DIR" rev-parse --verify 'HEAD^{commit}' \
+        2>/dev/null || true)
+    if [[ -n "$UPDATE_CANDIDATE_REVISION" ]] \
+       && [[ "$current_head" == "$UPDATE_CANDIDATE_REVISION" ]] \
+       && [[ "$current_head" != "$UPDATE_SOURCE_ORIGINAL_HEAD" ]]; then
+        UPDATE_SOURCE_APPLIED_HEAD="$current_head"
+        UPDATE_SIGNAL_MUTATION_STARTED=true
+    fi
+    _cleanup_update_candidate
+
+    if $UPDATE_SIGNAL_MUTATION_STARTED; then
+        [[ -n "$UPDATE_SOURCE_APPLIED_HEAD" ]] \
+            && rollback_source="$UPDATE_SOURCE_ORIGINAL_HEAD"
+        if ! _update_rollback "Assistant First update interrupted by ${signal}." \
+            "$UPDATE_SIGNAL_SNAPSHOT" "$UPDATE_SIGNAL_COMPOSE_FLAGS" \
+            "$rollback_source"; then
+            log_error "Interrupted update recovery did not complete; manual recovery is required."
+        fi
+    else
+        log_info "The interrupt arrived before installed source or runtime mutation."
+    fi
+
+    case "$signal" in
+        HUP) status=129 ;;
+        TERM) status=143 ;;
+    esac
+    exit "$status"
+}
+
 _assistant_first_source_branch() {
     local upstream="" branch=""
     upstream=$(git -C "$INSTALL_DIR" rev-parse \
@@ -417,25 +499,24 @@ _assistant_first_source_branch() {
     case "$upstream" in
         origin/*)
             branch="${upstream#origin/}"
-            if git check-ref-format --branch "$branch" >/dev/null 2>&1; then
+            if git -C "$INSTALL_DIR" check-ref-format --branch "$branch" \
+                >/dev/null 2>&1; then
                 printf '%s\n' "$branch"
                 return 0
             fi
+            return 2
             ;;
+        "") return 1 ;;
+        *) return 2 ;;
     esac
-    return 1
 }
 
 _prepare_assistant_first_update_candidate() {
-    local temp_base origin_url object_format python_cmd source_prefix treeish
-    local candidate_tree_oid current_revision branch status error_code
+    local temp_base origin_url object_format python_cmd source_prefix source_root
+    local manifest_object catalog_object current_revision branch status error_code
     local preflight_hash
     local -a branch_candidates=()
 
-    command -v tar >/dev/null 2>&1 || {
-        log_error "tar is required to inspect an Assistant First update candidate."
-        return 1
-    }
     [[ -f "${INSTALL_DIR}/scripts/assess-extension-update.py" \
         && ! -L "${INSTALL_DIR}/scripts/assess-extension-update.py" ]] || {
         log_error "Assistant First update compatibility support is unavailable."
@@ -519,6 +600,13 @@ _prepare_assistant_first_update_candidate() {
     if branch=$(_assistant_first_source_branch); then
         branch_candidates+=("$branch")
     else
+        status=$?
+        if [[ "$status" -eq 2 ]]; then
+            _cleanup_update_candidate
+            log_error "The configured source upstream must use the origin remote."
+            log_info "Refusing to substitute origin/main or origin/master for another remote."
+            return 1
+        fi
         branch_candidates+=(main master)
     fi
 
@@ -557,22 +645,31 @@ _prepare_assistant_first_update_candidate() {
 
     source_prefix=$(git -C "$INSTALL_DIR" rev-parse --show-prefix 2>/dev/null || true)
     source_prefix="${source_prefix%/}"
-    treeish="${UPDATE_CANDIDATE_REVISION}^{tree}"
+    source_root=""
     if [[ -n "$source_prefix" ]]; then
-        treeish="${UPDATE_CANDIDATE_REVISION}:${source_prefix}"
+        source_root="${source_prefix}/"
     fi
-    candidate_tree_oid=$(git -C "$UPDATE_CANDIDATE_REPOSITORY" \
-        rev-parse --verify "$treeish" 2>/dev/null || true)
-    if [[ -z "$candidate_tree_oid" ]] || \
+    manifest_object="${UPDATE_CANDIDATE_REVISION}:${source_root}manifest.json"
+    catalog_object="${UPDATE_CANDIDATE_REVISION}:${source_root}config/extensions-catalog.json"
+
+    # Read the exact committed blob bytes. `git archive` is intentionally not
+    # used here because a candidate-controlled `export-subst` attribute can
+    # transform archive output so it differs from the later checked-out commit.
+    if ! mkdir "${UPDATE_CANDIDATE_TREE}/config" || \
+       ! chmod 700 "${UPDATE_CANDIDATE_TREE}/config" || \
        [[ "$(git -C "$UPDATE_CANDIDATE_REPOSITORY" cat-file -t \
-            "$candidate_tree_oid" 2>/dev/null || true)" != tree ]] || \
-       ! git -C "$UPDATE_CANDIDATE_REPOSITORY" archive --format=tar \
-            --output="${UPDATE_CANDIDATE_ROOT}/candidate.tar" \
-            "$candidate_tree_oid" || \
-       ! tar -xf "${UPDATE_CANDIDATE_ROOT}/candidate.tar" \
-            -C "$UPDATE_CANDIDATE_TREE"; then
+            "$manifest_object" 2>/dev/null || true)" != blob ]] || \
+       [[ "$(git -C "$UPDATE_CANDIDATE_REPOSITORY" cat-file -t \
+            "$catalog_object" 2>/dev/null || true)" != blob ]] || \
+       ! git -C "$UPDATE_CANDIDATE_REPOSITORY" cat-file blob \
+            "$manifest_object" > "${UPDATE_CANDIDATE_TREE}/manifest.json" || \
+       ! git -C "$UPDATE_CANDIDATE_REPOSITORY" cat-file blob \
+            "$catalog_object" > \
+            "${UPDATE_CANDIDATE_TREE}/config/extensions-catalog.json" || \
+       ! chmod 600 "${UPDATE_CANDIDATE_TREE}/manifest.json" \
+            "${UPDATE_CANDIDATE_TREE}/config/extensions-catalog.json"; then
         _cleanup_update_candidate
-        log_error "Could not materialize the exact candidate source tree."
+        log_error "Could not materialize the exact candidate metadata."
         return 1
     fi
 
@@ -648,7 +745,8 @@ _apply_assistant_first_update_candidate() {
         >/dev/null 2>&1 || return 1
     head_revision=$(git -C "$INSTALL_DIR" rev-parse --verify 'HEAD^{commit}' \
         2>/dev/null || true)
-    [[ "$head_revision" == "$UPDATE_CANDIDATE_REVISION" ]]
+    [[ "$head_revision" == "$UPDATE_CANDIDATE_REVISION" ]] \
+        && _update_tracked_tree_clean
 }
 
 # Semver compare: returns 0 if equal, 1 if v1 > v2, 2 if v1 < v2
@@ -976,11 +1074,15 @@ cmd_backup() {
     log_ok "Backup created: ${backup_path}"
     log_info "Files backed up: ${files_backed_up}"
     
-    # Cleanup old backups
-    local backup_dirs
-    backup_dirs=$(find "$BACKUP_DIR" -maxdepth 1 -type d -name "backup-*" | sort -r)
-    local count=0
-    for dir in $backup_dirs; do
+    # Bash's sorted glob preserves whole paths, including spaces/newlines,
+    # without requiring GNU sort -z on macOS. Never follow backup symlinks.
+    local backup_dirs=() dir index count=0
+    for dir in "$BACKUP_DIR"/backup-*; do
+        [[ -d "$dir" && ! -L "$dir" ]] || continue
+        backup_dirs+=("$dir")
+    done
+    for ((index=${#backup_dirs[@]}-1; index>=0; index--)); do
+        dir="${backup_dirs[$index]}"
         count=$((count + 1))
         if ((count > MAX_BACKUPS)); then
             log_info "Removing old backup: $(basename "$dir")"
@@ -1052,6 +1154,7 @@ cmd_update() {
             _cleanup_update_candidate
             return 1
         fi
+        _arm_assistant_first_update_signal_rollback "$snap_dir" "$compose_flags"
         log_info "Applying exact source candidate ${UPDATE_CANDIDATE_REVISION}..."
         if ! _apply_assistant_first_update_candidate; then
             local failed_candidate_revision failed_head
@@ -1061,6 +1164,7 @@ cmd_update() {
             _cleanup_update_candidate
             if [[ "$failed_head" == "$failed_candidate_revision" ]]; then
                 UPDATE_SOURCE_APPLIED_HEAD="$failed_head"
+                trap '' HUP INT TERM
                 _update_rollback "Exact candidate checkout failed." \
                     "$snap_dir" "$compose_flags" "$UPDATE_SOURCE_ORIGINAL_HEAD"
             elif [[ "$failed_head" != "$UPDATE_SOURCE_ORIGINAL_HEAD" ]]; then
@@ -1072,6 +1176,7 @@ cmd_update() {
             fi
             return 1
         fi
+        UPDATE_SIGNAL_MUTATION_STARTED=true
         if [[ "$UPDATE_CANDIDATE_REVISION" != "$UPDATE_SOURCE_ORIGINAL_HEAD" ]]; then
             UPDATE_SOURCE_APPLIED_HEAD="$UPDATE_CANDIDATE_REVISION"
             assistant_first_rollback_source="$UPDATE_SOURCE_ORIGINAL_HEAD"
@@ -1095,6 +1200,7 @@ cmd_update() {
             if [[ -f "$migration" && -x "$migration" ]]; then
                 log_info "Running: $(basename "$migration")"
                 if ! bash "$migration"; then
+                    $assistant_first_update && trap '' HUP INT TERM
                     _update_rollback "Migration failed: $(basename "$migration")." \
                         "$snap_dir" "$compose_flags" \
                         "$assistant_first_rollback_source"
@@ -1131,6 +1237,7 @@ cmd_update() {
 
     # ── Step 5: health-check with timeout ────────────────────────────────────
     if ! wait_for_healthy; then
+        $assistant_first_update && trap '' HUP INT TERM
         _update_rollback \
             "Services failed to become healthy after update (timeout: ${HEALTH_TIMEOUT}s)." \
             "$snap_dir" "$compose_flags" "$assistant_first_rollback_source"
@@ -1152,7 +1259,10 @@ cmd_update() {
         > "$tmp_version_file"
     mv -f "$tmp_version_file" "$VERSION_FILE"
 
-    $assistant_first_update && _clear_assistant_first_source_state
+    if $assistant_first_update; then
+        _disarm_assistant_first_update_signal_rollback
+        _clear_assistant_first_source_state
+    fi
 
     log_ok "Update complete! Version: ${new_version}"
     log_info "Rollback point retained at: ${snap_dir}"

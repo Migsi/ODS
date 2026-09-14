@@ -722,7 +722,7 @@ operations_policy="$TEST_ROOT/operations-policy.json"
 _ods_pixel_write_operations_policy "$owner" "$home" "$operations_policy"
 check test "$(stat -c '%a' "$operations_policy")" = 600
 check python3 -c '
-import json,pathlib,socket,sys
+import json,pathlib,shutil,socket,sys
 v=json.load(open(sys.argv[1]))
 assert v["schemaVersion"] == 2 and v["deployment"] == "ods-default"
 assert v["download"]["stagingRoot"] == "/var/lib/pixel-ops-broker/artifacts"
@@ -743,12 +743,16 @@ host_inventory={"host.uptime","host.processes","host.services","host.cpu","host.
 assert set(v["actions"]) == {"host.identity","host.kernel","host.architecture","host.platform","host.os-release",*host_inventory,"ods.extensions.search","ods.extensions.list","ods.extensions.inspect","ods.extensions.request-plan","ods.extensions.install","ods.extensions.enable","ods.extensions.disable","ods.extensions.remove"}
 for name in {"host.identity","host.kernel","host.architecture","host.platform","host.os-release",*host_inventory,"ods.extensions.search","ods.extensions.list","ods.extensions.inspect"}:
     assert v["actions"][name]["tier"] == "read" and v["actions"][name]["defaultAuthority"] == "observe"
-assert v["actions"]["host.identity"]["argv"] == ["/usr/bin/hostname"]
-assert v["actions"]["host.kernel"]["argv"] == ["/usr/bin/uname", "-sr"]
-assert v["actions"]["host.architecture"]["argv"] == ["/usr/bin/uname", "-m"]
-assert v["actions"]["host.platform"]["argv"] == ["/usr/bin/uname", "-a"]
-assert v["actions"]["host.uptime"]["argv"] == ["/usr/bin/uptime"]
-assert v["actions"]["host.os-release"]["argv"] == ["/usr/bin/cat", "/etc/os-release"]
+hostname_binary=str(pathlib.Path(shutil.which("hostname")).resolve())
+uname_binary=str(pathlib.Path(shutil.which("uname")).resolve())
+uptime_binary=str(pathlib.Path(shutil.which("uptime")).resolve())
+cat_binary=str(pathlib.Path(shutil.which("cat")).resolve())
+assert v["actions"]["host.identity"]["argv"] == [hostname_binary]
+assert v["actions"]["host.kernel"]["argv"] == [uname_binary, "-sr"]
+assert v["actions"]["host.architecture"]["argv"] == [uname_binary, "-m"]
+assert v["actions"]["host.platform"]["argv"] == [uname_binary, "-a"]
+assert v["actions"]["host.uptime"]["argv"] == [uptime_binary]
+assert v["actions"]["host.os-release"]["argv"] == [cat_binary, "/etc/os-release"]
 assert pathlib.Path(v["actions"]["host.processes"]["argv"][0]).name == "ps"
 assert v["actions"]["host.processes"]["argv"][1:] == ["-eo","pid=,ppid=,user=,stat=,%cpu=,%mem=,comm=","--sort=-%cpu"]
 assert pathlib.Path(v["actions"]["host.services"]["argv"][0]).name == "systemctl"
@@ -1941,6 +1945,10 @@ assert "_ods_pixel_wait_ingress \"$owner\" \"$home\"" in installer
 assert installer.index("_ods_pixel_wait_ingress \"$owner\" \"$home\"") < installer.index("_ods_pixel_mark_ready \"$owner\" \"$home\"")
 assert "pixel\" configure --answers \"$answers\" --force" in text
 assert "pixel\" plan" in text
+native_search_provision = installer.index("--base-dir \"$INSTALL_DIR/data/pixel/native-search\"")
+pixel_bootstrap = installer.index("\"$pixel_root/pixel\" bootstrap --apply")
+native_search_digest = installer.index("\"$pixel_root/pixel\" extension-hash \"$parallel_path\"")
+assert native_search_provision < pixel_bootstrap < native_search_digest
 assert "Pixel configure failed. See $pixel_log" in text
 assert "Pixel plan failed. See $pixel_log" in text
 assert "Pixel configure or plan failed" not in text
