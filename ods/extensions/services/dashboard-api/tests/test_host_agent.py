@@ -37,6 +37,24 @@ _split_nmcli_terse = _mod._split_nmcli_terse
 _request_server_shutdown = _mod._request_server_shutdown
 
 
+@pytest.mark.parametrize("value", [
+    "it's $5 \"q\" back\\slash", "  model #1  ", r"C:\models\file.gguf", "ordinary",
+])
+def test_load_env_reads_dashboard_writer(tmp_path, value):
+    from env_values import quote_env_value
+
+    path = tmp_path / ".env"
+    path.write_text("VALUE=" + quote_env_value(value) + "\n", encoding="utf-8")
+    assert _mod.load_env(path)["VALUE"] == value
+
+
+def test_load_env_retains_legacy_shell_quoted_values(tmp_path):
+    path = tmp_path / ".env"
+    value = "it's $5"
+    path.write_text(_mod._env_assignment("VALUE", value) + "\n", encoding="utf-8")
+    assert _mod.load_env(path)["VALUE"] == value
+
+
 @pytest.fixture(autouse=True)
 def _isolate_opencode_config(monkeypatch, tmp_path):
     """Keep host-agent integration tests out of the user's OpenCode config."""
@@ -2301,6 +2319,14 @@ class TestRunInstallCallsPostInstallRecreate:
 # --- _handle_env_update ---
 
 
+class _FakeHeaders(dict):
+    """Single-value test headers with the HTTPMessage lookup surface."""
+
+    def get_all(self, name, failobj=None):
+        value = self.get(name)
+        return failobj if value is None else [value]
+
+
 class _FakeHandler:
     """Minimal stand-in for BaseHTTPRequestHandler used by _handle_env_update."""
 
@@ -2311,7 +2337,7 @@ class _FakeHandler:
         }
         if headers:
             merged.update(headers)
-        self.headers = merged
+        self.headers = _FakeHeaders(merged)
         self.rfile = io.BytesIO(body)
         self.wfile = io.BytesIO()
         self.client_address = ("127.0.0.1", 12345)
@@ -8147,6 +8173,8 @@ class TestLifecycleTransportDetailSanitization:
             ("extension_hook_failed", "Extension hook failed; review host logs"),
             ("extension_install_failed", "Extension installation failed; review host logs"),
             ("extension_retry_failed", "Extension retry failed; review host logs"),
+            ("extension_toggle_failed", "Extension state change failed; review host logs"),
+            ("extension_config_sync_failed", "Extension configuration sync failed; review host logs"),
             ("extension_hook_runtime_missing", "Extension hook requires a supported Bash runtime"),
             ("extension_not_found", "Extension files are unavailable; review installed extension state"),
             ("inference_sharing_failed", "Inference sharing operation failed; reload state before retrying"),
@@ -8272,6 +8300,55 @@ class TestLifecycleTransportDetailSanitization:
             "error": _mod._public_process_failure("compose_recreate_failed"),
             "error_code": "compose_recreate_failed",
         }
+
+    def test_compose_toggle_exception_keeps_500_without_raw_detail(
+        self, tmp_path, monkeypatch, caplog,
+    ):
+        extension_dir = tmp_path / "documents"
+        extension_dir.mkdir()
+        (extension_dir / "manifest.yaml").write_text("service: {}\n", encoding="utf-8")
+        (extension_dir / "compose.yaml.disabled").write_text("services: {}\n", encoding="utf-8")
+        monkeypatch.setattr(_mod, "AGENT_API_KEY", "test-key")
+        monkeypatch.setattr(_mod, "_find_ext_dir", lambda _sid: extension_dir)
+        monkeypatch.setattr(_mod, "_service_locks", {"documents": threading.Lock()})
+        monkeypatch.setattr(
+            _mod.os,
+            "replace",
+            lambda *_args: (_ for _ in ()).throw(OSError(self.RAW_DETAIL)),
+        )
+        handler = _FakeHandler(json.dumps({"service_id": "documents"}).encode())
+
+        with caplog.at_level(logging.WARNING, logger="ods-host-agent"):
+            _mod.AgentHandler._handle_extension_compose_toggle(handler, True)
+
+        assert handler.response_code == 500
+        assert handler.parse_response() == {
+            "error": _mod._public_process_failure("extension_toggle_failed"),
+            "error_code": "extension_toggle_failed",
+        }
+        assert self.RAW_DETAIL not in caplog.text
+
+    def test_hook_runtime_preflight_does_not_expose_probe_detail(
+        self, tmp_path, monkeypatch, caplog,
+    ):
+        monkeypatch.setattr(
+            _mod,
+            "_check_bash_version",
+            lambda: (False, self.RAW_DETAIL),
+        )
+        handler = _FakeHandler(b"")
+
+        with caplog.at_level(logging.WARNING, logger="ods-host-agent"):
+            _mod.AgentHandler._execute_hook(
+                handler, "documents", tmp_path, tmp_path / "hook.sh", "post_install",
+            )
+
+        assert handler.response_code == 500
+        assert handler.parse_response() == {
+            "error": _mod._public_process_failure("extension_hook_runtime_missing"),
+            "error_code": "extension_hook_runtime_missing",
+        }
+        assert self.RAW_DETAIL not in caplog.text
 
     @pytest.mark.parametrize(("hook_name", "expected_status"), [("post_start", 200), ("pre_stop", 500)])
     def test_hook_failure_preserves_envelope_without_raw_stderr(
