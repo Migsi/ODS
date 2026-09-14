@@ -221,7 +221,7 @@ export function createManagedRuntimeRegistry({environment = process.env,
               throw transitionError('managed-transition-invalid-owner');
             }
           }
-          try { return accessRuntime.acquire(token, revision); }
+          try { return await accessRuntime.acquire(token, revision); }
           catch { throw transitionError('managed-transition-access-owner-refused'); }
         }
         current = {accessRuntime, deploymentText: raw, binding: canonical(deployment.binding),

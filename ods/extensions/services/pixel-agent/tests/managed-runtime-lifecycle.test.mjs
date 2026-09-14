@@ -176,6 +176,14 @@ test('only registry-created transition errors expose bounded classifications', a
   await owner.shutdown();
 });
 
+test('asynchronous access-owner refusal retains its trusted classification', async () => {
+  const f = fixture(), owner = f.register(); f.hold();
+  f.access.acquire = async () => { throw new Error('asynchronous refusal'); };
+  const failure = await owner.acquireTransition('a'.repeat(64), 'b'.repeat(64)).catch(error => error);
+  assert.equal(owner.classifyTransitionError(failure), 'managed-transition-access-owner-refused');
+  await owner.shutdown();
+});
+
 test('held management recovery waits for the same routing shutdown to settle', async () => {
   const gate = deferred(), f = fixture({shutdown: () => gate.promise}), owner = f.register();
   f.hold(); changeBinding(f); let done = false;
