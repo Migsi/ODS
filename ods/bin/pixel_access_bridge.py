@@ -56,6 +56,9 @@ RUNTIME_TRANSITION_FAILURES = frozenset((
     "managed-transition-busy",
     "managed-transition-invalid-owner",
     "managed-transition-access-owner-refused",
+    "native-transition-unavailable",
+    "native-transition-revision-changed",
+    "native-transition-busy",
 ))
 
 

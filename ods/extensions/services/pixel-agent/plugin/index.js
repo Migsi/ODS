@@ -319,6 +319,8 @@ export default definePluginEntry({
         } catch (failure) {
           sendJson(res, 409, {error: (typeof managedRuntime?.classifyTransitionError === 'function'
             ? managedRuntime.classifyTransitionError(failure)
+            : null) ?? (typeof accessRuntime.classifyTransitionError === 'function'
+            ? accessRuntime.classifyTransitionError(failure)
             : null)
             ?? "access transition unavailable, busy, or proof failed"});
         }

@@ -446,8 +446,26 @@ test('stale revision and missing run identity cannot gain admission', () => {
   const runtime = createAccessRuntime(fixture());
   const old = runtime.status().revision;
   runtime.admit({}, {runId: 'work'}); runtime.finish({}, {runId: 'work'});
-  assert.throws(() => runtime.acquire(token, old));
+  let failure;
+  try { runtime.acquire(token, old); } catch (error) { failure = error; }
+  assert.ok(failure);
+  assert.equal(runtime.classifyTransitionError(failure), 'native-transition-revision-changed');
+  assert.equal(runtime.classifyTransitionError(new Error('native-transition-revision-changed')), null);
   assert.equal(runtime.admit({}, {}).outcome, 'block');
+});
+
+test('native transition refusal distinguishes unavailable and busy state', () => {
+  const unavailable = createAccessRuntime({...fixture(), hooksAllowed: false});
+  let failure;
+  try { unavailable.acquire(token, token); } catch (error) { failure = error; }
+  assert.ok(failure);
+  assert.equal(unavailable.classifyTransitionError(failure), 'native-transition-unavailable');
+  const busy = createAccessRuntime(fixture());
+  busy.admit({}, {runId: 'work'});
+  failure = null;
+  try { busy.acquire(token, busy.status().revision); } catch (error) { failure = error; }
+  assert.ok(failure);
+  assert.equal(busy.classifyTransitionError(failure), 'native-transition-busy');
 });
 
 test('direct tools and detached exec keep transition busy after agent end', () => {

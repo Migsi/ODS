@@ -153,6 +153,12 @@ export function createAccessRuntime({directory = path.join(os.homedir(), '.openc
   // their hook coverage is qualified. Held state always continues to block.
   const qualified = runtimeVersion === '2026.6.33' && hooksAllowed === true;
   const runs = new Set(), tools = new Set(), detached = new Map(), internalRuns = new Set();
+  const transitionFailures = new WeakMap();
+  const transitionError = code => {
+    const failure = new Error('runtime transition refused');
+    transitionFailures.set(failure, code);
+    return failure;
+  };
   const filename = path.join(directory, 'state.json');
   let state, failed = false, probeRun = null, proof = null, probeFailure = null;
   let processTimer = null, processCheck = null;
@@ -333,9 +339,10 @@ export function createAccessRuntime({directory = path.join(os.homedir(), '.openc
     }
   }
   function acquire(token, expected) {
-    if (failed || !qualified || !hex(token) || !hex(expected)) throw new Error('runtime unavailable');
+    if (failed || !qualified || !hex(token) || !hex(expected)) throw transitionError('native-transition-unavailable');
     if (state.phase === 'held' && state.tokenHash === hash(token)) return status();
-    if (expected !== state.revision || busy() || !['idle','interrupted'].includes(state.phase)) throw new Error('runtime busy or changed');
+    if (expected !== state.revision) throw transitionError('native-transition-revision-changed');
+    if (busy() || !['idle','interrupted'].includes(state.phase)) throw transitionError('native-transition-busy');
     state.phase = 'held'; state.tokenHash = hash(token); proof = null; changed(); return status();
   }
   function owns(token) { return !failed && hex(token) && state.phase === 'held' && state.tokenHash === hash(token); }
@@ -427,5 +434,5 @@ export function createAccessRuntime({directory = path.join(os.homedir(), '.openc
     }
   }
   return {status, admit, finish, beforeTool, afterTool, acquire, release, probe, owns, readSettings, reconcileDetached,
-    isProbe: isInternal};
+    classifyTransitionError: failure => transitionFailures.get(failure) ?? null, isProbe: isInternal};
 }
