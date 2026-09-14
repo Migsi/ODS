@@ -2166,7 +2166,10 @@ assert all(line.startswith("DeviceAllow=/dev/") for line in lines[5:])
 check python3 -c '
 import pathlib,sys
 text=pathlib.Path(sys.argv[1]).read_text()
-assert "trusted_sudo=/usr/bin/sudo" in text
+assert "sudo_entry=/usr/bin/sudo" in text
+assert "trusted_sudo=\"$(readlink -e -- \"$sudo_entry\")\"" in text
+assert "/usr/bin/sudo|/usr/lib/cargo/bin/sudo" in text
+assert "stat -Lc" in text and "\"$trusted_parent\"" in text
 assert "if [[ $# == 1 && \"$1\" == -v ]]" in text
 assert "exec \"$trusted_sudo\" -n \"$@\"" in text
 ' "$ROOT/extensions/services/pixel-agent/host/noninteractive-sudo.sh"
