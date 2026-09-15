@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import json
+import errno
 import sys
 import tarfile
 from pathlib import Path
@@ -168,6 +169,45 @@ def test_index_rejects_noncanonical_or_out_of_range_time(value):
     with pytest.raises(LifecycleWorkExecutionError) as caught:
         snapshots._verified_time_ns(value)
     assert caught.value.code == "lifecycle-work-data-snapshot-index-invalid"
+
+
+@linux_effect
+def test_archive_verify_rejects_tampered_timestamp_index(tmp_path: Path):
+    install, data, backup, alpha = _roots(tmp_path)
+    _write(alpha / "note", b"content")
+    value = _command()
+    store = snapshots.StreamSnapshotStore(install, data, backup)
+    store.backup(value)
+    archive_path = backup / f"{value.transaction_id}.{value.plan_hash}.tar"
+    with tarfile.open(archive_path, "r:") as archive:
+        index = archive.getmember(snapshots.INDEX_MEMBER)
+        raw = archive.extractfile(index).read()
+        position = raw.index(b'"rootAtimeNs":"') + len(b'"rootAtimeNs":"')
+    archive_path.chmod(0o600)
+    with archive_path.open("r+b") as stream:
+        stream.seek(index.offset_data + position)
+        stream.write(b"x")
+    archive_path.chmod(0o400)
+    with pytest.raises(LifecycleWorkExecutionError) as caught:
+        store.verify(value)
+    assert caught.value.code == "lifecycle-work-data-snapshot-index-invalid"
+
+
+@linux_effect
+def test_xattr_visibility_failure_refuses_publication(tmp_path: Path, monkeypatch):
+    install, data, backup, alpha = _roots(tmp_path)
+    _write(alpha / "note", b"content")
+    value = _command()
+    store = snapshots.StreamSnapshotStore(install, data, backup)
+
+    def unavailable(_descriptor):
+        raise OSError(errno.EPERM, "simulated inaccessible metadata")
+
+    monkeypatch.setattr(snapshots.os, "listxattr", unavailable)
+    with pytest.raises(LifecycleWorkExecutionError) as caught:
+        store.backup(value)
+    assert caught.value.code == "lifecycle-work-data-snapshot-metadata-unavailable"
+    assert not (backup / f"{value.transaction_id}.{value.plan_hash}.tar").exists()
 
 
 @linux_effect
