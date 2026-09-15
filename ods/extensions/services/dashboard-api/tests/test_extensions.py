@@ -520,8 +520,8 @@ class TestInstallExtension:
         assert (user_dir / "my-ext").is_dir()
         assert (user_dir / "my-ext" / "compose.yaml").exists()
 
-    def test_install_cleans_broken_directory(self, test_client, monkeypatch, tmp_path):
-        """Install succeeds when dest dir exists but has no compose files (broken state)."""
+    def test_install_preserves_broken_directory(self, test_client, monkeypatch, tmp_path):
+        """A broken destination is not deleted or overwritten by a retry."""
         lib_dir = _setup_library_ext(tmp_path, "my-ext")
         # Create a broken user extension directory (no compose.yaml or compose.yaml.disabled)
         user_dir = tmp_path / "user"
@@ -537,10 +537,9 @@ class TestInstallExtension:
             headers=test_client.auth_headers,
         )
 
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["action"] == "installed"
-        assert (user_dir / "my-ext" / "compose.yaml").exists()
+        assert resp.status_code == 409
+        assert (broken_dir / "manifest.yaml").read_text() == "leftover: true\n"
+        assert not (broken_dir / "compose.yaml").exists()
 
     def test_install_stages_tmp_under_user_extensions_dir(
         self, test_client, monkeypatch, tmp_path,
@@ -584,8 +583,10 @@ class TestInstallExtension:
         )
         assert resp.status_code == 409
 
-    def test_install_retries_after_error_progress(self, test_client, monkeypatch, tmp_path):
-        """A terminal install error should allow retrying the library install."""
+    def test_install_failed_retry_preserves_existing_files_and_error(
+        self, test_client, monkeypatch, tmp_path
+    ):
+        """A failed retry cannot silently remove owner files or its error receipt."""
         lib_dir = _setup_library_ext(tmp_path, "my-ext")
         user_dir = _setup_user_ext(tmp_path, "my-ext", enabled=True)
         progress_dir = tmp_path / "extension-progress"
@@ -606,10 +607,33 @@ class TestInstallExtension:
             headers=test_client.auth_headers,
         )
 
-        assert resp.status_code == 200
-        assert not (user_dir / "my-ext" / "stale.txt").exists()
+        assert resp.status_code == 409
+        assert "owner recovery" in resp.json()["detail"]
+        assert (user_dir / "my-ext" / "stale.txt").read_text() == "left over"
         assert (user_dir / "my-ext" / "compose.yaml").exists()
-        assert resp.json()["action"] == "installed"
+        assert json.loads((progress_dir / "my-ext.json").read_text())["status"] == "error"
+
+    def test_install_symlink_destination_preserves_external_target(
+        self, test_client, monkeypatch, tmp_path
+    ):
+        lib_dir = _setup_library_ext(tmp_path, "my-ext")
+        user_dir = tmp_path / "user"
+        user_dir.mkdir()
+        external = tmp_path / "outside-user-extensions"
+        external.mkdir()
+        (external / "owner-notes.txt").write_text("keep me")
+        (user_dir / "my-ext").symlink_to(external, target_is_directory=True)
+        _patch_mutation_config(
+            monkeypatch, tmp_path, lib_dir=lib_dir, user_dir=user_dir
+        )
+
+        resp = test_client.post(
+            "/api/extensions/my-ext/install",
+            headers=test_client.auth_headers,
+        )
+        assert resp.status_code == 409
+        assert (external / "owner-notes.txt").read_text() == "keep me"
+        assert not (external / "compose.yaml").exists()
 
     def test_install_unknown_extension_404(self, test_client, monkeypatch, tmp_path):
         """404 when extension is not in the library."""
