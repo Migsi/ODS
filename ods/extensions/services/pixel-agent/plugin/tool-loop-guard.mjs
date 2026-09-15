@@ -5747,7 +5747,7 @@ function exactDownloadWorkspacePath(text, sourceUrl) {
     value.length > 512 ||
     parts.length < 1 ||
     parts.length > 16 ||
-    parts.some(
+    parts.slice(0, -1).some(
       (part) =>
         ["", ".", ".."].includes(part) || !WORKSPACE_PATH_COMPONENT.test(part)
     ) ||

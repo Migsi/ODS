@@ -79,6 +79,28 @@ class RelayTests(unittest.IsolatedAsyncioTestCase):
             response.close()
             await asyncio.wait_for(self.disconnected.wait(), timeout=3)
 
+    async def test_stalled_local_reader_times_out(self):
+        class StalledResponse:
+            async def write(self, _chunk):
+                await asyncio.sleep(10)
+
+        original = relay.WRITE_TIMEOUT_SECONDS
+        relay.WRITE_TIMEOUT_SECONDS = 0.05
+        try:
+            with self.assertRaises(asyncio.TimeoutError):
+                await relay._write(StalledResponse(), b"data: stalled\n\n")
+        finally:
+            relay.WRITE_TIMEOUT_SECONDS = original
+
+    async def test_non_ascii_key_fails_at_startup(self):
+        original = relay.KEY
+        relay.KEY = "not-ascii-\u00e9"
+        try:
+            with self.assertRaisesRegex(RuntimeError, "invalid Pixel model relay key"):
+                relay.create_app()
+        finally:
+            relay.KEY = original
+
 
 if __name__ == "__main__":
     unittest.main()

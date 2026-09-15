@@ -61,8 +61,8 @@ export default function PixelPreviewSource({ preview, file }) {
       <header className="code-block-header"><PixelLanguageBadge path={path}/><span title={path}>{path}</span><PixelArtifactDownload key={`${preview.siteId}/${path}/${expectedDigest}`} preview={preview} file={{path, sha256:expectedDigest, bytes:file?.bytes}}/>{language && <button type="button" aria-label="Copy code" onClick={copy} disabled={source === null}>{copied ? 'Copied' : 'Copy'}</button>}</header>
       {source !== null && <>
         <div className="p-2 text-xs"><button type="button" aria-pressed={wrapLines} onClick={() => setWrapLines(value => !value)}>Wrap lines</button></div>
-        <PixelSourceExcerpt key={`${preview.siteId}/${path}/${expectedDigest}`} source={source}/>
-        {plain ? <p role="status">Large source is shown as plain text. Use browser find or download the file; line search and highlighting are disabled.</p> : <PixelSourceFind key={`${preview.siteId}/${path}/${expectedDigest}`} source={source} codeRef={codeRef}/>}
+        <PixelSourceExcerpt key={`excerpt/${preview.siteId}/${path}/${expectedDigest}`} source={source}/>
+        {plain ? <p role="status">Large source is shown as plain text. Use browser find or download the file; line search and highlighting are disabled.</p> : <PixelSourceFind key={`find/${preview.siteId}/${path}/${expectedDigest}`} source={source} codeRef={codeRef}/>}
         <pre ref={codeRef} tabIndex={0} aria-label={`Code for ${path}`}><PixelCodeLines source={source} language={language}/></pre>
       </>}
 

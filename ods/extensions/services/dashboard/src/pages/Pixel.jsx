@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import PixelConversationRecovery from '../components/PixelConversationRecovery'
-import { readConversations, saveConversation, SELECT_EVENT, DELETE_EVENT, deleteConversation, isConversationDeleted } from '../lib/pixelConversations'
+import { readConversations, saveConversation, createConversationWriter, SELECT_EVENT, DELETE_EVENT, deleteConversation, isConversationDeleted } from '../lib/pixelConversations'
 import ReactMarkdown from 'react-markdown'
+import {usePixelAutoScroll} from '../lib/usePixelAutoScroll'
 import remarkGfm from 'remark-gfm'
 import rehypeHighlight from 'rehype-highlight'
 import { Link } from 'react-router-dom'
@@ -16,6 +17,7 @@ import PixelDraftPreview from '../components/PixelDraftPreview'
 import PixelDictation from '../components/PixelDictation'
 import PixelCommandSearch, { OPEN_PIXEL_SEARCH } from '../components/PixelCommandSearch'
 import PixelConversationImport from '../components/PixelConversationImport'
+import { appendComposerText } from '../lib/pixelComposerText'
 import PixelSelectionActions from '../components/PixelSelectionActions'
 import PixelTaskFiles from '../components/PixelTaskFiles'
 import PixelTaskActivity from '../components/PixelTaskActivity'
@@ -481,6 +483,7 @@ function loadStoredChat(selected) {
       // A damaged preview must not discard an otherwise valid conversation.
     }
     return {
+      persistenceSnapshot: stored,
       chatId: stored.chatId, messages, preview,
       contextStart: Number.isInteger(stored.contextStart) && stored.contextStart >= 0 && stored.contextStart <= messages.length ? stored.contextStart : 0,
       workspaceOpen: stored.workspaceOpen !== false && (stored.workspaceOpen === true || Boolean(preview)),
@@ -521,6 +524,8 @@ export default function Pixel({ systemStatus = null }) {
   const profile = useLocalProfile()
   const { displayName } = usePortalIdentity()
   const [initialChat] = useState(loadStoredChat)
+  const conversationWriter = useRef(null)
+  if (!conversationWriter.current) conversationWriter.current = createConversationWriter(initialChat?.persistenceSnapshot)
   const pendingImport = useRef(null)
   const sendKey = usePixelSendKey()
 
@@ -554,6 +559,7 @@ export default function Pixel({ systemStatus = null }) {
   const requestIdRef = useRef(initialChat?.requestId || null)
   const inputRef = useRef(null)
   const scrollRef = useRef(null)
+  const chatScroll = usePixelAutoScroll(messages, chatIdRef.current, scrollRef)
 
   const activeModel = agentRuntime?.model || systemStatus?.inference?.loadedModel || systemStatus?.model?.name || ''
   const activeContext = formatContext(
@@ -738,10 +744,6 @@ export default function Pixel({ systemStatus = null }) {
   }, [sending])
 
   useEffect(() => {
-    scrollRef.current?.scrollIntoView?.({ behavior: 'smooth' })
-  }, [messages])
-
-  useEffect(() => {
     const field = inputRef.current
     if (!field) return
     field.style.height = 'auto'
@@ -756,7 +758,7 @@ export default function Pixel({ systemStatus = null }) {
       })
       // Report storage limits without silently trimming previous turns.
       if (storedMessages.length > MAX_STORED_MESSAGES || storedMessages.reduce((total, message) => total + new TextEncoder().encode(message.content).byteLength, 0) > MAX_STORED_MESSAGE_BYTES) throw new Error('stored Pixel chat is too large')
-      saveConversation({
+      conversationWriter.current({
         schema: 1,
         chatId: chatIdRef.current,
         requestId: requestIdRef.current,
@@ -769,10 +771,11 @@ export default function Pixel({ systemStatus = null }) {
         workspaceOpen,
       })
       setPersistenceError('')
-    } catch {
+    } catch (error) {
       // Conversation persistence is a convenience; chat remains usable when
       // storage is unavailable, full, or blocked by the browser.
-      setPersistenceError('Your browser could not save this conversation. Keep this page open to avoid losing it.')
+      setPersistenceError(error?.code === 'conversation-changed' ? error.message
+        : 'Your browser could not save this conversation. Keep this page open to avoid losing it.')
     }
   }, [messages, preview, workspaceOpen, sending, interrupted, input])
 
@@ -820,7 +823,7 @@ export default function Pixel({ systemStatus = null }) {
         // Commit the attempt identity before the POST can start tool work.
         // A page close before React's persistence effect must still recover it.
         try {
-          saveConversation({
+          conversationWriter.current({
             schema: 1, chatId, requestId, inFlight: true, interrupted: false,
             messages: [...visibleConversation, { role: 'assistant', content: '' }], preview,
             draft: '', contextStart: contextStartRef.current, workspaceOpen,
@@ -1153,7 +1156,7 @@ export default function Pixel({ systemStatus = null }) {
 
   const insertComposerText = useCallback(text => {
     if (sending || restoredActive || restoredChecking || stopping) return
-    setInput(value => value === '/' ? text : `${value}${value && !value.endsWith(' ') && !value.endsWith('\n') ? ' ' : ''}${text}`)
+    setInput(value => appendComposerText(value, text))
     inputRef.current?.focus?.()
   }, [sending, restoredActive, restoredChecking, stopping])
 
@@ -1170,6 +1173,7 @@ export default function Pixel({ systemStatus = null }) {
       }
       const chat = loadStoredChat(readConversations().find(item => item.chatId === event.detail))
       if (!chat || chat.chatId === chatIdRef.current) return
+      conversationWriter.current = createConversationWriter(chat.persistenceSnapshot)
       chatIdRef.current = chat.chatId
       requestIdRef.current = chat.requestId
       contextStartRef.current = chat.contextStart
@@ -1302,7 +1306,7 @@ export default function Pixel({ systemStatus = null }) {
           </span>
         </div>
       </header>
-      <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-4 py-5 sm:px-6">
+      <div role="region" aria-label="Conversation messages" tabIndex={-1} onScroll={chatScroll.onScroll} className="min-h-0 flex-1 space-y-4 overflow-y-auto px-4 py-5 sm:px-6">
         {interrupted && !sending && (
           <div role="status" className="mx-auto w-full max-w-5xl rounded-xl border border-amber-500/25 bg-amber-500/10 px-4 py-3 text-sm text-amber-300">
             {restoredActivity === 'active'
@@ -1411,6 +1415,7 @@ export default function Pixel({ systemStatus = null }) {
       </div>
 
       <div className="pixel-composer px-4 py-3 sm:px-6">
+        {chatScroll.showLatest && <div className="mb-2 text-center"><button type="button" onClick={chatScroll.jumpToLatest} className="rounded border border-theme-border px-3 py-1 text-xs">Jump to latest</button></div>}
         <div className="mx-auto max-w-5xl">
           <div className="pixel-composer-row">
           <textarea

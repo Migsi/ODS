@@ -99,6 +99,8 @@ else
 
     # shellcheck source=../../lib/dotenv-quote.sh
     source "$SCRIPT_DIR/lib/dotenv-quote.sh"
+    # shellcheck source=../../lib/safe-env.sh
+    source "$SCRIPT_DIR/lib/safe-env.sh"
 
     # A Pixel-to-Hermes rerun must retire the exact ODS-managed host runtime,
     # not merely remove the Compose edge from the next launch. Do this before
@@ -179,19 +181,21 @@ else
     [[ -f "$INSTALL_DIR/.env" ]] && _env_existing="$INSTALL_DIR/.env"
 
     # Safe reader: extract a value from existing .env without sourcing it.
+    # Decode it with the same grammar as lib/safe-env.sh, so a value the
+    # dashboard or the owner quoted ('pa$$word', "it's") comes back literally;
+    # the .env template writes preserved values back with dotenv_value.
     _env_get() {
         local key="$1" default="${2:-}"
         if [[ -n "$_env_existing" ]]; then
             local val
             val=$(grep -m1 "^${key}=" "$_env_existing" 2>/dev/null | cut -d= -f2- || true)
-            val="${val%\"}" && val="${val#\"}"
-            val="${val%\'}" && val="${val#\'}"
+            val="$(safe_env_decode_value "$val")"
             if [[ -n "$val" ]]; then
-                echo "$val"
+                printf '%s\n' "$val"
                 return
             fi
         fi
-        echo "$default"
+        printf '%s\n' "$default"
     }
 
     _phase06_compose_uid=$(_env_get ODS_UID "")
@@ -508,9 +512,8 @@ Fix with: sudo chown -R \$(id -u):\$(id -g) $INSTALL_DIR/config $INSTALL_DIR/dat
         local key="$1" default="${2:-}" val
         if [[ -n "$_env_existing" ]] && grep -q -m1 "^${key}=" "$_env_existing" 2>/dev/null; then
             val=$(grep -m1 "^${key}=" "$_env_existing" 2>/dev/null | cut -d= -f2- || true)
-            val="${val%\"}" && val="${val#\"}"
-            val="${val%\'}" && val="${val#\'}"
-            printf '%s\n' "$val"
+            safe_env_decode_value "$val"
+            printf '\n'
             return
         fi
         printf '%s\n' "$default"
@@ -1080,23 +1083,23 @@ ODS_VERSION=${VERSION:-2.6.0}
 #=== Network Binding ===
 # 127.0.0.1 = localhost only (secure default)
 # 0.0.0.0   = accessible from LAN (install with --lan or set manually)
-BIND_ADDRESS=${BIND_ADDRESS}
+BIND_ADDRESS=$(dotenv_value "${BIND_ADDRESS}")
 # Host LAN IP (populated when BIND_ADDRESS=0.0.0.0; empty otherwise).
 # Containers like openclaw read this to advertise the host's LAN address.
-HOST_LAN_IP=${HOST_LAN_IP}
+HOST_LAN_IP=$(dotenv_value "${HOST_LAN_IP}")
 # Lets the non-root remote-provider services read only lifecycle secrets that
 # the host agent writes mode 0640 under this installation owner's data group.
 REMOTE_PROVIDER_DATA_GID=$(id -g 2>/dev/null || echo 1000)
 
 #=== LLM Backend Mode ===
 ODS_MODE=${ODS_MODE_VALUE}
-ODS_MODEL_SWITCHBOARD=${ODS_MODEL_SWITCHBOARD_VALUE}
-LLM_API_URL=${LLM_API_URL_VALUE}
-OPEN_WEBUI_LLM_BASE_URL=${OPEN_WEBUI_LLM_BASE_URL_VALUE}
-OPEN_WEBUI_LLM_API_KEY=${OPEN_WEBUI_LLM_API_KEY_VALUE}
-OPEN_WEBUI_TASK_MODEL=${OPEN_WEBUI_TASK_MODEL_VALUE}
+ODS_MODEL_SWITCHBOARD=$(dotenv_value "${ODS_MODEL_SWITCHBOARD_VALUE}")
+LLM_API_URL=$(dotenv_value "${LLM_API_URL_VALUE}")
+OPEN_WEBUI_LLM_BASE_URL=$(dotenv_value "${OPEN_WEBUI_LLM_BASE_URL_VALUE}")
+OPEN_WEBUI_LLM_API_KEY=$(dotenv_value "${OPEN_WEBUI_LLM_API_KEY_VALUE}")
+OPEN_WEBUI_TASK_MODEL=$(dotenv_value "${OPEN_WEBUI_TASK_MODEL_VALUE}")
 LLM_BACKEND=$(if [[ "$EXTERNAL_LLM_ACTIVE" == "true" ]]; then echo "external"; elif [[ "$ODS_MODE_VALUE" == "lemonade" ]]; then echo "lemonade"; else echo "llama-server"; fi)
-LLM_API_BASE_PATH=$(if [[ "$ODS_MODE_VALUE" == "lemonade" ]]; then echo "${LEMONADE_API_BASE_PATH_VALUE}"; else echo "/v1"; fi)
+LLM_API_BASE_PATH=$(if [[ "$ODS_MODE_VALUE" == "lemonade" ]]; then dotenv_value "${LEMONADE_API_BASE_PATH_VALUE}"; else echo "/v1"; fi)
 EXTERNAL_LLM_URL=${EXTERNAL_LLM_URL_VALUE}
 EXTERNAL_LLM_CONTAINER_URL=${EXTERNAL_LLM_CONTAINER_URL_VALUE}
 EXTERNAL_LLM_PROVIDER=${EXTERNAL_LLM_PROVIDER_VALUE}
@@ -1110,22 +1113,22 @@ AMD_INFERENCE_SUPPORTED_BACKENDS=$(if [[ "$EXTERNAL_LLM_ACTIVE" == "true" ]]; th
 AMD_INFERENCE_RUNTIME_MODE=$(if [[ "$EXTERNAL_LLM_ACTIVE" == "true" ]]; then echo ""; elif [[ "$LEMONADE_EXTERNAL_VALUE" == "true" ]]; then echo "external-lemonade"; elif [[ "$GPU_BACKEND" == "amd" && "${ODS_MODE:-local}" == "local" ]]; then echo "linux-container"; else echo ""; fi)
 AMD_INFERENCE_MANAGED=$(if [[ "$EXTERNAL_LLM_ACTIVE" == "true" ]]; then echo ""; elif [[ "$LEMONADE_EXTERNAL_VALUE" == "true" ]]; then echo "false"; elif [[ "$GPU_BACKEND" == "amd" && "${ODS_MODE:-local}" == "local" ]]; then echo "true"; else echo ""; fi)
 LEMONADE_EXTERNAL=${LEMONADE_EXTERNAL_VALUE}
-LEMONADE_BASE_URL=${LEMONADE_BASE_URL_VALUE}
-LEMONADE_CONTAINER_BASE_URL=${LEMONADE_CONTAINER_BASE_URL_VALUE}
-LEMONADE_API_BASE_PATH=${LEMONADE_API_BASE_PATH_VALUE}
-LEMONADE_MODEL=$(if [[ "$LEMONADE_EXTERNAL_VALUE" == "true" ]]; then echo "${LEMONADE_MODEL_VALUE:-}"; else echo "${LEMONADE_MODEL:-}"; fi)
+LEMONADE_BASE_URL=$(dotenv_value "${LEMONADE_BASE_URL_VALUE}")
+LEMONADE_CONTAINER_BASE_URL=$(dotenv_value "${LEMONADE_CONTAINER_BASE_URL_VALUE}")
+LEMONADE_API_BASE_PATH=$(dotenv_value "${LEMONADE_API_BASE_PATH_VALUE}")
+LEMONADE_MODEL=$(if [[ "$LEMONADE_EXTERNAL_VALUE" == "true" ]]; then dotenv_value "${LEMONADE_MODEL_VALUE:-}"; else echo "${LEMONADE_MODEL:-}"; fi)
 
 #=== Cloud API Keys ===
-ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
-OPENAI_API_KEY=${OPENAI_API_KEY:-}
-TOGETHER_API_KEY=${TOGETHER_API_KEY:-}
-MINIMAX_API_KEY=${MINIMAX_API_KEY:-}
+ANTHROPIC_API_KEY=$(dotenv_value "${ANTHROPIC_API_KEY:-}")
+OPENAI_API_KEY=$(dotenv_value "${OPENAI_API_KEY:-}")
+TOGETHER_API_KEY=$(dotenv_value "${TOGETHER_API_KEY:-}")
+MINIMAX_API_KEY=$(dotenv_value "${MINIMAX_API_KEY:-}")
 
 #=== Service Auth (LiteLLM proxy) ===
 TARGET_API_KEY=not-needed
 
 #=== LLM Settings (llama-server) ===
-MODEL_PROFILE=${MODEL_PROFILE_VALUE}
+MODEL_PROFILE=$(dotenv_value "${MODEL_PROFILE_VALUE}")
 # Effective model profile for this hardware: ${MODEL_PROFILE_EFFECTIVE:-qwen}
 LLM_MODEL=${LLM_MODEL}
 GGUF_FILE=${GGUF_FILE}
@@ -1150,7 +1153,7 @@ MODEL_RUNTIME_PROFILE_LABEL=$(dotenv_quote "${MODEL_RUNTIME_PROFILE_LABEL:-}")
 MODEL_RUNTIME_PROFILE_SOURCE=$(dotenv_quote "${MODEL_RUNTIME_PROFILE_SOURCE:-}")
 GPU_BACKEND=${GPU_BACKEND}
 SYSTEM_RAM_GB=${RAM_GB:-0}
-N_GPU_LAYERS=${N_GPU_LAYERS_VALUE}
+N_GPU_LAYERS=$(dotenv_value "${N_GPU_LAYERS_VALUE}")
 $(if [[ -n "${LLAMA_SERVER_IMAGE:-}" ]]; then echo "LLAMA_SERVER_IMAGE=${LLAMA_SERVER_IMAGE}"; fi)
 $(if [[ -n "${LLAMA_SERVER_IMAGE_FALLBACK:-}" ]]; then echo "LLAMA_SERVER_IMAGE_FALLBACK=${LLAMA_SERVER_IMAGE_FALLBACK}"; fi)
 $(if [[ -n "$LLAMA_SERVER_MEMORY_LIMIT_VALUE" ]]; then echo "LLAMA_SERVER_MEMORY_LIMIT=${LLAMA_SERVER_MEMORY_LIMIT_VALUE}"; fi)
@@ -1232,7 +1235,7 @@ LLAMA_CPP_REF=b8763
 ${_amd_custom_bin}
 
 #=== LiteLLM → Lemonade outbound key (AMD only) ===
-LITELLM_LEMONADE_API_KEY=${LITELLM_LEMONADE_API_KEY}
+LITELLM_LEMONADE_API_KEY=$(dotenv_value "${LITELLM_LEMONADE_API_KEY}")
 AMD_ENV
     unset _amd_gfx_detected _amd_hsa_override _amd_custom_bin
 fi)
@@ -1253,7 +1256,7 @@ OLLAMA_PORT=11434
 WEBUI_PORT=3000
 SEARXNG_PORT=8888
 PERPLEXICA_PORT=3004
-WHISPER_PORT=${WHISPER_PORT_VALUE}
+WHISPER_PORT=$(dotenv_value "${WHISPER_PORT_VALUE}")
 TTS_PORT=8880
 N8N_PORT=5678
 QDRANT_PORT=6333
@@ -1261,7 +1264,7 @@ QDRANT_GRPC_PORT=6334
 EMBEDDINGS_PORT=8090
 LITELLM_PORT=4000
 OPENCLAW_PORT=7860
-LANGFUSE_PORT=${LANGFUSE_PORT}
+LANGFUSE_PORT=$(dotenv_value "${LANGFUSE_PORT}")
 
 #=== Hermes Agent ===
 # On AMD/Lemonade hosts, route Hermes through litellm. Lemonade is strict
@@ -1271,68 +1274,68 @@ LANGFUSE_PORT=${LANGFUSE_PORT}
 # APIConnectionError. litellm wraps with "*" wildcard normalization +
 # retry logic, hiding both bumps. On non-AMD installs, talk direct to
 # llama-server (native llama.cpp tolerates any model field).
-HERMES_LLM_BASE_URL=${HERMES_LLM_BASE_URL_VALUE}
-HERMES_LLM_API_KEY=${HERMES_LLM_API_KEY_VALUE}
+HERMES_LLM_BASE_URL=$(dotenv_value "${HERMES_LLM_BASE_URL_VALUE}")
+HERMES_LLM_API_KEY=$(dotenv_value "${HERMES_LLM_API_KEY_VALUE}")
 HERMES_LANGUAGE=${HERMES_LANGUAGE:-en}
 HERMES_PROXY_PORT=${HERMES_PROXY_PORT:-9120}
 HERMES_PROXY_UPSTREAM=${HERMES_PROXY_UPSTREAM:-ods-hermes:9119}
 ODS_AUTH_UPSTREAM=${ODS_AUTH_UPSTREAM:-ods-dashboard-api:3002}
 
 #=== Security (auto-generated, keep secret!) ===
-WEBUI_SECRET=${WEBUI_SECRET}
-DASHBOARD_API_KEY=${DASHBOARD_API_KEY}
-ODS_AGENT_KEY=${ODS_AGENT_KEY}
-ODS_SESSION_SECRET=${ODS_SESSION_SECRET}
-HERMES_DASHBOARD_SESSION_TOKEN=${HERMES_DASHBOARD_SESSION_TOKEN}
+WEBUI_SECRET=$(dotenv_value "${WEBUI_SECRET}")
+DASHBOARD_API_KEY=$(dotenv_value "${DASHBOARD_API_KEY}")
+ODS_AGENT_KEY=$(dotenv_value "${ODS_AGENT_KEY}")
+ODS_SESSION_SECRET=$(dotenv_value "${ODS_SESSION_SECRET}")
+HERMES_DASHBOARD_SESSION_TOKEN=$(dotenv_value "${HERMES_DASHBOARD_SESSION_TOKEN}")
 $(if [[ "${ENABLE_PIXEL_RUNTIME:-false}" == "true" ]]; then cat << PIXEL_ENV
 
 #=== Pixel core agent (separate written license required) ===
 PIXEL_AGENT_MODE=pixel
 PIXEL_LICENSE_ACCEPTED=true
 PIXEL_SOURCE_URL=$(dotenv_quote "$PIXEL_SOURCE_URL_VALUE")
-PIXEL_SOURCE_REF=${PIXEL_SOURCE_REF_VALUE}
+PIXEL_SOURCE_REF=$(dotenv_value "${PIXEL_SOURCE_REF_VALUE}")
 PIXEL_SOURCE_DIR=$(dotenv_quote "$PIXEL_SOURCE_DIR_VALUE")
 $(if [[ -n "$PIXEL_WEB_SEARCH_PROVIDER_VALUE" ]]; then printf 'PIXEL_WEB_SEARCH_PROVIDER=%s\n' "$PIXEL_WEB_SEARCH_PROVIDER_VALUE"; fi)
-PIXEL_OPENWEBUI_KEY=${PIXEL_OPENWEBUI_KEY_VALUE}
-PIXEL_MODEL_RELAY_KEY=${PIXEL_MODEL_RELAY_KEY_VALUE}
-PIXEL_MODEL_RELAY_PORT=${PIXEL_MODEL_RELAY_PORT_VALUE}
+PIXEL_OPENWEBUI_KEY=$(dotenv_value "${PIXEL_OPENWEBUI_KEY_VALUE}")
+PIXEL_MODEL_RELAY_KEY=$(dotenv_value "${PIXEL_MODEL_RELAY_KEY_VALUE}")
+PIXEL_MODEL_RELAY_PORT=$(dotenv_value "${PIXEL_MODEL_RELAY_PORT_VALUE}")
 PIXEL_INGRESS_RUNTIME_DIR=/run/ods-pixel
 PIXEL_PREVIEW_RUNTIME_DIR=/run/ods-pixel-preview
 PIXEL_INGRESS_GID=${PIXEL_INGRESS_GID_VALUE}
-PIXEL_GATEWAY_PORT=${PIXEL_GATEWAY_PORT_VALUE}
-PIXEL_PREVIEW_PORT=${PIXEL_PREVIEW_PORT_VALUE}
+PIXEL_GATEWAY_PORT=$(dotenv_value "${PIXEL_GATEWAY_PORT_VALUE}")
+PIXEL_PREVIEW_PORT=$(dotenv_value "${PIXEL_PREVIEW_PORT_VALUE}")
 PIXEL_ENV
 fi)
-SHIELD_API_KEY=${SHIELD_API_KEY}
+SHIELD_API_KEY=$(dotenv_value "${SHIELD_API_KEY}")
 N8N_USER=admin@ods.local
-N8N_PASS=${N8N_PASS}
-LITELLM_KEY=${LITELLM_KEY}
-LIVEKIT_API_KEY=${LIVEKIT_API_KEY}
-LIVEKIT_API_SECRET=${LIVEKIT_SECRET}
-OPENCLAW_TOKEN=${OPENCLAW_TOKEN}
-QDRANT_API_KEY=${QDRANT_API_KEY}
-TOKEN_SPY_API_KEY=${TOKEN_SPY_API_KEY}
-OPENCODE_SERVER_PASSWORD=${OPENCODE_SERVER_PASSWORD}
-SEARXNG_SECRET=${SEARXNG_SECRET}
-DIFY_SECRET_KEY=${DIFY_SECRET_KEY}
+N8N_PASS=$(dotenv_value "${N8N_PASS}")
+LITELLM_KEY=$(dotenv_value "${LITELLM_KEY}")
+LIVEKIT_API_KEY=$(dotenv_value "${LIVEKIT_API_KEY}")
+LIVEKIT_API_SECRET=$(dotenv_value "${LIVEKIT_SECRET}")
+OPENCLAW_TOKEN=$(dotenv_value "${OPENCLAW_TOKEN}")
+QDRANT_API_KEY=$(dotenv_value "${QDRANT_API_KEY}")
+TOKEN_SPY_API_KEY=$(dotenv_value "${TOKEN_SPY_API_KEY}")
+OPENCODE_SERVER_PASSWORD=$(dotenv_value "${OPENCODE_SERVER_PASSWORD}")
+SEARXNG_SECRET=$(dotenv_value "${SEARXNG_SECRET}")
+DIFY_SECRET_KEY=$(dotenv_value "${DIFY_SECRET_KEY}")
 
 #=== Voice Settings ===
 WHISPER_MODEL=base
 # Whisper acceleration is independently capability-gated from the LLM GPU.
-WHISPER_ACCELERATION=${WHISPER_ACCELERATION_VALUE}
-WHISPER_IMAGE=${WHISPER_IMAGE_VALUE}
+WHISPER_ACCELERATION=$(dotenv_value "${WHISPER_ACCELERATION_VALUE}")
+WHISPER_IMAGE=$(dotenv_value "${WHISPER_IMAGE_VALUE}")
 # Whisper STT model passed to Open WebUI and pre-downloaded by Phase 12.
-AUDIO_STT_MODEL=${AUDIO_STT_MODEL}
+AUDIO_STT_MODEL=$(dotenv_value "${AUDIO_STT_MODEL}")
 TTS_VOICE=en_US-lessac-medium
 
 #=== Embeddings / RAG ===
 # Open WebUI uses this canonical model at first boot unless an explicit
 # external-provider override is configured.
-EMBEDDING_MODEL=${EMBEDDING_MODEL_VALUE}
-RAG_EMBEDDING_MODEL=${RAG_EMBEDDING_MODEL_VALUE}
-RAG_OPENAI_API_BASE_URL=${RAG_OPENAI_API_BASE_URL_VALUE}
-RAG_OPENAI_API_KEY=${RAG_OPENAI_API_KEY_VALUE}
-EMBEDDINGS_MEMORY_LIMIT=${EMBEDDINGS_MEMORY_LIMIT_VALUE}
+EMBEDDING_MODEL=$(dotenv_value "${EMBEDDING_MODEL_VALUE}")
+RAG_EMBEDDING_MODEL=$(dotenv_value "${RAG_EMBEDDING_MODEL_VALUE}")
+RAG_OPENAI_API_BASE_URL=$(dotenv_value "${RAG_OPENAI_API_BASE_URL_VALUE}")
+RAG_OPENAI_API_KEY=$(dotenv_value "${RAG_OPENAI_API_KEY_VALUE}")
+EMBEDDINGS_MEMORY_LIMIT=$(dotenv_value "${EMBEDDINGS_MEMORY_LIMIT_VALUE}")
 
 #=== Device Name / mDNS / Proxy hostnames ===
 # Used by ods-mdns to publish <name>.local on the LAN, by ods-proxy
@@ -1341,11 +1344,11 @@ EMBEDDINGS_MEMORY_LIMIT=${EMBEDDINGS_MEMORY_LIMIT_VALUE}
 # hostname at install time so multiple ODS installs on the
 # same LAN don't collide on a shared default name. Override by editing
 # this line and restarting ods-mdns + ods-proxy.
-ODS_DEVICE_NAME=${ODS_DEVICE_NAME}
+ODS_DEVICE_NAME=$(dotenv_value "${ODS_DEVICE_NAME}")
 
 #=== Web UI Settings ===
 # Loopback installs open directly. Network-bound installs require a login.
-WEBUI_AUTH=${WEBUI_AUTH}
+WEBUI_AUTH=$(dotenv_value "${WEBUI_AUTH}")
 ENABLE_WEB_SEARCH=${ENABLE_WEB_SEARCH:-true}
 WEB_SEARCH_ENGINE=searxng
 
@@ -1355,20 +1358,20 @@ N8N_WEBHOOK_URL=http://localhost:5678
 TIMEZONE=${SYSTEM_TZ:-UTC}
 
 #=== Langfuse (LLM Observability) ===
-LANGFUSE_ENABLED=${LANGFUSE_ENABLED}
-LANGFUSE_NEXTAUTH_SECRET=${LANGFUSE_NEXTAUTH_SECRET}
-LANGFUSE_SALT=${LANGFUSE_SALT}
-LANGFUSE_ENCRYPTION_KEY=${LANGFUSE_ENCRYPTION_KEY}
-LANGFUSE_DB_PASSWORD=${LANGFUSE_DB_PASSWORD}
-LANGFUSE_CLICKHOUSE_PASSWORD=${LANGFUSE_CLICKHOUSE_PASSWORD}
-LANGFUSE_REDIS_PASSWORD=${LANGFUSE_REDIS_PASSWORD}
-LANGFUSE_MINIO_ACCESS_KEY=${LANGFUSE_MINIO_ACCESS_KEY}
-LANGFUSE_MINIO_SECRET_KEY=${LANGFUSE_MINIO_SECRET_KEY}
-LANGFUSE_PROJECT_PUBLIC_KEY=${LANGFUSE_PROJECT_PUBLIC_KEY}
-LANGFUSE_PROJECT_SECRET_KEY=${LANGFUSE_PROJECT_SECRET_KEY}
-LANGFUSE_INIT_PROJECT_ID=${LANGFUSE_INIT_PROJECT_ID}
-LANGFUSE_INIT_USER_EMAIL=${LANGFUSE_INIT_USER_EMAIL}
-LANGFUSE_INIT_USER_PASSWORD=${LANGFUSE_INIT_USER_PASSWORD}
+LANGFUSE_ENABLED=$(dotenv_value "${LANGFUSE_ENABLED}")
+LANGFUSE_NEXTAUTH_SECRET=$(dotenv_value "${LANGFUSE_NEXTAUTH_SECRET}")
+LANGFUSE_SALT=$(dotenv_value "${LANGFUSE_SALT}")
+LANGFUSE_ENCRYPTION_KEY=$(dotenv_value "${LANGFUSE_ENCRYPTION_KEY}")
+LANGFUSE_DB_PASSWORD=$(dotenv_value "${LANGFUSE_DB_PASSWORD}")
+LANGFUSE_CLICKHOUSE_PASSWORD=$(dotenv_value "${LANGFUSE_CLICKHOUSE_PASSWORD}")
+LANGFUSE_REDIS_PASSWORD=$(dotenv_value "${LANGFUSE_REDIS_PASSWORD}")
+LANGFUSE_MINIO_ACCESS_KEY=$(dotenv_value "${LANGFUSE_MINIO_ACCESS_KEY}")
+LANGFUSE_MINIO_SECRET_KEY=$(dotenv_value "${LANGFUSE_MINIO_SECRET_KEY}")
+LANGFUSE_PROJECT_PUBLIC_KEY=$(dotenv_value "${LANGFUSE_PROJECT_PUBLIC_KEY}")
+LANGFUSE_PROJECT_SECRET_KEY=$(dotenv_value "${LANGFUSE_PROJECT_SECRET_KEY}")
+LANGFUSE_INIT_PROJECT_ID=$(dotenv_value "${LANGFUSE_INIT_PROJECT_ID}")
+LANGFUSE_INIT_USER_EMAIL=$(dotenv_value "${LANGFUSE_INIT_USER_EMAIL}")
+LANGFUSE_INIT_USER_PASSWORD=$(dotenv_value "${LANGFUSE_INIT_USER_PASSWORD}")
 
 # ── Image Generation ──
 ENABLE_IMAGE_GENERATION=${ENABLE_COMFYUI:-true}

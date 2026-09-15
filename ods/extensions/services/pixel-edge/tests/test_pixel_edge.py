@@ -741,6 +741,30 @@ class TestCancellation(BaseEdgeTest):
 # ---------------------------------------------------------------------------
 
 class TestModelAllowlist(BaseEdgeTest):
+
+    async def test_non_string_models_are_client_errors_without_forwarding(self):
+        for model in ([], {}, ["pixel/default"], {"id": "pixel/default"}, None, 1, True):
+            with self.subTest(model=model):
+                async with self.client.post(
+                    "http://localhost/v1/chat/completions",
+                    headers=self.auth(),
+                    json={"model": model, "messages": []},
+                ) as resp:
+                    self.assertEqual(resp.status, 400)
+                    self.assertEqual(await resp.json(), {"error": "model not allowed"})
+                self.assertEqual(self.up_runner.app["chat_requests"], [])
+
+    async def test_excessively_nested_json_is_a_client_error_without_forwarding(self):
+        raw = b'{"model":"pixel/default","messages":[],"extra":' + b'[' * 10000 + b'0' + b']' * 10000 + b'}'
+        async with self.client.post(
+            "http://localhost/v1/chat/completions",
+            headers={**self.auth(), "Content-Type": "application/json"},
+            data=raw,
+        ) as resp:
+            self.assertEqual(resp.status, 400)
+            self.assertEqual(await resp.json(), {"error": "invalid JSON"})
+        self.assertEqual(self.up_runner.app["chat_requests"], [])
+
     async def test_allowed_model_ok(self):
         async with self.client.post(
             "http://localhost/v1/chat/completions",

@@ -3117,6 +3117,22 @@ test("classifies exact-byte downloads without capturing ordinary page research",
   );
 });
 
+test("routes exact downloads with supported long filenames to staging", () => {
+  for (const length of [129, 200]) {
+    const filename = "a".repeat(length - 4) + ".pdf";
+    const url = `https://example.com/${filename}`;
+    for (const destination of ["", ` as workspace file named \`downloads/${filename}\``]) {
+      const prompt = `Download the exact bytes of the remote file ${url}${destination}.`;
+      assert.equal(userMessageExactDownloadRequest([], prompt).relativePath, `downloads/${filename}`);
+      const guard = createToolLoopGuard();
+      guard.observeRun({ agentId: "pixel", runId: "run-1", sessionId: "session-1" }, "pixel", { prompt });
+      assert.notEqual(call(guard, "pixel_ops_download_stage", { event: { params: { url, filename } } })?.block, true);
+    }
+  }
+  const prompt = `Download the exact bytes of https://example.com/file.pdf as workspace file named \`${"a".repeat(129)}/file.pdf\`.`;
+  assert.equal(userMessageExactDownloadRequest([], prompt).relativePath, undefined);
+});
+
 test("blocks exact-download tools when source or destination is ambiguous", () => {
   const guard = createToolLoopGuard();
   guard.observeRun(

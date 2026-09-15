@@ -68,7 +68,8 @@ function validRelativePath(value, filename) {
     parts.length >= 1 &&
     parts.length <= 16 &&
     parts.at(-1) === filename &&
-    parts.every((part) => !["", ".", ".."].includes(part) && PATH_COMPONENT.test(part))
+    FILENAME.test(parts.at(-1)) &&
+    parts.slice(0, -1).every((part) => !["", ".", ".."].includes(part) && PATH_COMPONENT.test(part))
   );
 }
 

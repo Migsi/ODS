@@ -43,20 +43,21 @@ fmt_bytes() {
 # Available bytes on filesystem containing a path
 free_bytes_for_path() {
     local path="$1"
-    df -Pk "$path" 2>/dev/null | awk 'NR==2 { print $4 * 1024 }'
+    # Bash arithmetic requires decimal integers, including above 2 GiB.
+    df -Pk "$path" 2>/dev/null | awk 'NR==2 { printf "%.0f\n", $4 * 1024 }'
 }
 
 # Estimate the backup size on disk (uncompressed)
 estimate_restore_bytes_dir() {
     local backup_dir="$1"
-    du -sk "$backup_dir" 2>/dev/null | awk '{print $1 * 1024}'
+    du -sk "$backup_dir" 2>/dev/null | awk '{printf "%.0f\n", $1 * 1024}'
 }
 
 # Estimate restore size for a tar.gz (uncompressed file sizes)
 estimate_restore_bytes_tar() {
     local tar_path="$1"
     # tar -tv lists size in column 3
-    tar -tvzf "$tar_path" 2>/dev/null | awk '{sum += $3} END {print sum+0}'
+    tar -tvzf "$tar_path" 2>/dev/null | awk '{sum += $3} END {printf "%.0f\n", sum+0}'
 }
 
 ensure_restore_space() {
@@ -78,7 +79,7 @@ ensure_restore_space() {
     local free
     free=$(free_bytes_for_path "$ODS_DIR")
 
-    if [[ -n "$free" && "$free" -gt 0 && "$free" -lt "$need" ]]; then
+    if [[ -n "$free" && "$free" -lt "$need" ]]; then
         log_error "Not enough disk space to restore into: $ODS_DIR"
         log_error "Need ~$(fmt_bytes "$need"), have ~$(fmt_bytes "$free")."
         log_error "Free up space or restore to a different location (set ODS_DIR)."

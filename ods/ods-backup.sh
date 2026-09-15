@@ -48,7 +48,8 @@ fmt_bytes() {
 free_bytes_for_path() {
     local path="$1"
     # df -P gives POSIX output; field 4 = available 1K-blocks
-    df -Pk "$path" 2>/dev/null | awk 'NR==2 { print $4 * 1024 }'
+    # Older mawk prints large integers in exponent notation with plain print.
+    df -Pk "$path" 2>/dev/null | awk 'NR==2 { printf "%.0f\n", $4 * 1024 }'
 }
 
 # Estimate bytes needed for a backup type (rough but safe)
@@ -64,7 +65,7 @@ estimate_backup_bytes() {
         for p in "${user_data_paths[@]}"; do
             if [[ -d "$ODS_DIR/$p" ]]; then
                 local b
-                b=$(du -sk "$ODS_DIR/$p" 2>/dev/null | awk '{print $1 * 1024}')
+                b=$(du -sk "$ODS_DIR/$p" 2>/dev/null | awk '{printf "%.0f\n", $1 * 1024}')
                 total=$(( total + ${b:-0} ))
             fi
         done
@@ -74,7 +75,7 @@ estimate_backup_bytes() {
     if [[ "$backup_type" == "full" || "$backup_type" == "config" ]]; then
         if [[ -d "$ODS_DIR/config" ]]; then
             local b
-            b=$(du -sk "$ODS_DIR/config" 2>/dev/null | awk '{print $1 * 1024}')
+            b=$(du -sk "$ODS_DIR/config" 2>/dev/null | awk '{printf "%.0f\n", $1 * 1024}')
             total=$(( total + ${b:-0} ))
         fi
         for f in "$ODS_DIR"/.env "$ODS_DIR"/.version "$ODS_DIR"/docker-compose*.y*ml "$ODS_DIR"/ods-preflight.sh "$ODS_DIR"/ods-update.sh; do
@@ -90,14 +91,14 @@ estimate_backup_bytes() {
     if [[ "$backup_type" == "full" ]]; then
         if [[ -d "$ODS_DIR/models" ]]; then
             local b
-            b=$(du -sk "$ODS_DIR/models" 2>/dev/null | awk '{print $1 * 1024}')
+            b=$(du -sk "$ODS_DIR/models" 2>/dev/null | awk '{printf "%.0f\n", $1 * 1024}')
             total=$(( total + ${b:-0} ))
         fi
         local -a cache_paths=("data/whisper/cache" "data/kokoro/cache")
         for p in "${cache_paths[@]}"; do
             if [[ -d "$ODS_DIR/$p" ]]; then
                 local b
-                b=$(du -sk "$ODS_DIR/$p" 2>/dev/null | awk '{print $1 * 1024}')
+                b=$(du -sk "$ODS_DIR/$p" 2>/dev/null | awk '{printf "%.0f\n", $1 * 1024}')
                 total=$(( total + ${b:-0} ))
             fi
         done
@@ -120,7 +121,7 @@ ensure_backup_space() {
     local free
     free=$(free_bytes_for_path "$BACKUP_ROOT")
 
-    if [[ -n "$free" && "$free" -gt 0 && "$free" -lt "$need" ]]; then
+    if [[ -n "$free" && "$free" -lt "$need" ]]; then
         log_error "Not enough disk space in $(dirname "$BACKUP_ROOT") to create backup."
         log_error "Need ~$(fmt_bytes "$need"), have ~$(fmt_bytes "$free")."
         log_error "Free up space or use --output to write backups to another disk."
@@ -265,7 +266,10 @@ delete_backup() {
 
     read -rp "Are you sure you want to delete backup $(basename "$target")? [y/N] " confirm || confirm=""
     if [[ "$confirm" =~ ^[Yy]$ ]]; then
-        rm -rf "$target"
+        if ! rm -rf -- "$target"; then
+            log_error "Failed to delete backup: $(basename "$target")"
+            return 1
+        fi
         log_success "Deleted backup: $(basename "$target")"
     else
         log_info "Deletion cancelled"
@@ -677,7 +681,7 @@ main() {
     # Delete mode
     if [[ -n "$delete_id" ]]; then
         delete_backup "$delete_id"
-        exit 0
+        exit $?
     fi
 
     # Verify mode
@@ -710,4 +714,6 @@ main() {
     do_backup "$backup_type" "$compress" "$description"
 }
 
-main "$@"
+if [[ "${ODS_BACKUP_SOURCE_ONLY:-false}" != "true" ]]; then
+    main "$@"
+fi

@@ -766,10 +766,13 @@ def _is_terminal_stream_payload(payload: dict[str, Any]) -> bool:
 class _SSERewriter:
     """Incrementally frames SSE so transport chunk boundaries are irrelevant."""
 
-    def __init__(self, alias: str) -> None:
+    def __init__(self, alias: str, expected_model: str) -> None:
         self.alias = alias
+        self.expected_model = expected_model
         self.buffer = b""
-        self.models: list[str] = []
+        # Evidence needs only an irreversible mismatch verdict. Retaining one
+        # decoded model string per token makes long responses grow in memory.
+        self.identity_matches = True
         self.usage = {
             "input_tokens": 0,
             "output_tokens": 0,
@@ -804,7 +807,9 @@ class _SSERewriter:
             rewritten, models, payloads, saw_done = _rewrite_sse_event(
                 event, self.alias
             )
-            self.models.extend(models)
+            self.identity_matches = self.identity_matches and all(
+                model == self.expected_model for model in models
+            )
             self._observe(payloads, saw_done=saw_done)
             output.append(rewritten + delimiter)
         return output
@@ -815,7 +820,9 @@ class _SSERewriter:
         rewritten, models, payloads, saw_done = _rewrite_sse_event(
             self.buffer, self.alias
         )
-        self.models.extend(models)
+        self.identity_matches = self.identity_matches and all(
+            model == self.expected_model for model in models
+        )
         self._observe(payloads, saw_done=saw_done)
         self.buffer = b""
         return rewritten
@@ -1211,19 +1218,17 @@ async def _forward_inner(request: Request, path: str, payload: dict[str, Any],
                     await _release_admission()
 
             async def stream_body() -> AsyncIterator[bytes]:
-                rewriter = _SSERewriter(requested_alias)
+                rewriter = _SSERewriter(requested_alias, route["runtimeModelId"])
                 completed = False
                 try:
                     async for chunk in upstream.aiter_bytes():
-                        before = len(rewriter.models)
                         events = rewriter.feed(chunk)
-                        if pinned_route and any(model != route['runtimeModelId'] for model in rewriter.models[before:]):
+                        if pinned_route and not rewriter.identity_matches:
                             raise RouterError(502, 'response_identity_mismatch', 'Backend response identity changed')
                         for event in events:
                             yield event
-                    before = len(rewriter.models)
                     tail = rewriter.finish()
-                    if pinned_route and any(model != route['runtimeModelId'] for model in rewriter.models[before:]):
+                    if pinned_route and not rewriter.identity_matches:
                         raise RouterError(502, 'response_identity_mismatch', 'Backend response identity changed')
                     if tail:
                         yield tail
@@ -1234,10 +1239,7 @@ async def _forward_inner(request: Request, path: str, payload: dict[str, Any],
                         and rewriter.completed
                         and probe_id
                         and 200 <= upstream.status_code < 300
-                        and all(
-                            model == route["runtimeModelId"]
-                            for model in rewriter.models
-                        )
+                        and rewriter.identity_matches
                     ):
                         _record_evidence({
                             **evidence_base,

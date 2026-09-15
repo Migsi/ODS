@@ -789,7 +789,7 @@ async def handle_chat_completions(request: web.Request):
 
     try:
         data = json.loads(body)
-    except (json.JSONDecodeError, ValueError):
+    except (json.JSONDecodeError, ValueError, RecursionError):
         return web.json_response({"error": "invalid JSON"}, status=400)
 
     if not isinstance(data, dict):

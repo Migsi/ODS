@@ -8,6 +8,30 @@ on:
       - master
 
 jobs:
+  backup-space:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 5
+    strategy:
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04]
+    defaults:
+      run:
+        working-directory: ods
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - name: Install backup test tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y rsync jq mawk
+      - name: Backup and restore disk-space boundaries
+        env:
+          ODS_TEST_AWK: mawk
+        run: python3 tests/test-backup-space-arithmetic.py -v
+      - name: Backup integrity and restore round trip
+        run: |
+          bash tests/test-backup-integrity.sh
+          bash tests/test-backup-restore-roundtrip.sh
+
   pixel-advice-host-stdlib:
     runs-on: ubuntu-latest
     strategy:
@@ -37,6 +61,8 @@ jobs:
           python-version: ${{ matrix.python }}
       - name: Install isolated inference test dependencies
         run: python -m pip install -r extensions/services/pixel-inference/requirements.txt 'pytest>=8,<9'
+      - name: GPU assignment capacity contracts
+        run: python -m pytest tests/test-assign-gpus.py tests/test_gpu_spare_capacity.py -q
       - name: Sharing credential and owner control tests
         run: python -m pytest tests/pixel_inference -q
       - name: Inference perimeter and cancellation tests
@@ -49,6 +75,9 @@ jobs:
             extensions/services/pixel-agent/tests/test_workspace_preview_charset.py \
             extensions/services/pixel-agent/tests/test_workspace_preview_git.py \
             extensions/services/pixel-agent/tests/test_preview_empty_assets.py
+
+      - name: Lemonade context cache persistence
+        run: sudo env LEMONADE_REQUIRE_NAMESPACE=1 "$(command -v python)" -m pytest tests/test_lemonade_context_persistence.py -q
 
       - name: Settings transaction and access preservation contracts
         run: |
@@ -153,6 +182,7 @@ jobs:
 
       - name: Manifest Compatibility Checks
         run: |
+          python3 tests/test_compatibility_compose_list.py
           bash scripts/check-compatibility.sh
           bash scripts/check-release-claims.sh
 
@@ -187,6 +217,8 @@ jobs:
 
       - name: Health Check Tests
         run: bash tests/test-health-check.sh
+      - name: Post-install Inference Validation Tests
+        run: python3 tests/test_validate_chat_response.py
 
       - name: QR Code Helper Tests
         run: bash tests/test-qrcode-helper.sh
@@ -248,11 +280,17 @@ jobs:
       - name: Safe Env Loading Tests
         run: bash tests/test-safe-env.sh
 
+      - name: Installer Rerun .env Quoting Tests
+        run: bash tests/test-phase06-env-rerun-quoting.sh
+
       - name: Dotenv Serializer Tests
         run: bash tests/test-dotenv-serializer.sh
 
       - name: Mode Switch Tests
         run: bash tests/test-mode-switch-status.sh
+
+      - name: .env Upserts After an Unterminated Last Line
+        run: bash tests/test-env-append-final-newline.sh
 
       - name: CLI Install Directory Resolution Tests
         run: bash tests/test-cli-install-dir-resolution.sh
@@ -276,10 +314,17 @@ jobs:
         run: python3 tests/test-dependency-pins.py
 
       - name: Offline Model Validation Tests
-        run: python3 tests/test-offline-model-validation.py
+        run: |
+          python3 tests/test-offline-model-validation.py
+          python3 tests/test_external_model_validation.py
 
       - name: Runtime Config Renderer Tests
         run: python3 tests/test-render-runtime-configs.py
+
+      - name: Runtime Renderer Environment Modes
+        run: |
+          python3 -m pip install pytest==8.4.2
+          python3 -m pytest -q tests/test_renderer_environment_modes.py
 
       - name: Runtime Config Wiring Tests
         run: python3 tests/test-runtime-config-wiring.py
@@ -289,6 +334,11 @@ jobs:
 
       - name: Perplexica Entrypoint Contract Tests
         run: python3 tests/test-perplexica-entrypoint.py
+
+      - name: Perplexica Repair Interpreter Tests
+        run: |
+          python3 -m pip install pytest==8.4.2
+          python3 -m pytest -q tests/test_perplexica_repair_python.py
 
       - name: CPU-Only Path Tests
         run: bash tests/test-cpu-only-path.sh
@@ -304,6 +354,7 @@ jobs:
           bash tests/test-external-services.sh
           bash tests/test-resolve-compose-resilient.sh
           bash tests/test-phase03-multigpu-tty.sh
+          bash tests/test-pixel-support-services.sh
           bash tests/contracts/test-preflight-fixtures.sh
           bash tests/test-preflight-resolver-bug.sh
           bash tests/test-desktop-agent-host-env.sh
@@ -336,8 +387,14 @@ jobs:
           test -f artifacts/installer-sim/SUMMARY.md
           python3 scripts/validate-sim-summary.py artifacts/installer-sim/summary.json
 
+      - name: Rollback Picks the Newest Backup
+        run: bash tests/test-update-rollback-latest-backup.sh
+
       - name: Update Rollback Contract
         run: bash tests/test-update-rollback-contract.sh
+
+      - name: Update Backup Retention By Creation Time
+        run: bash tests/test-update-backup-retention-labels.sh
 
       - name: Backup Data Coverage Contract
         run: |
@@ -370,6 +427,9 @@ jobs:
 
       - name: Atomic Environment Write Tests
         run: bash tests/test-atomic-env-writes.sh
+
+      - name: Installer mode dotenv compatibility
+        run: python3 -m pytest -q tests/test_installer_mode_dotenv.py
 
       - name: Issue-to-PR Security Contract Tests
         run: bash tests/test-issue-to-pr-security.sh

@@ -724,7 +724,7 @@ def parse_remote_enabled(value: str) -> bool:
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--surface", choices=["all", *sorted(RENDERERS)], default="all")
-    parser.add_argument(
+    switchboard_mode = parser.add_argument(
         "--switchboard-mode",
         choices=["legacy", "observe", "enabled"],
         default=os.environ.get("ODS_MODEL_SWITCHBOARD", "enabled"),
@@ -746,12 +746,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     parser.add_argument("--opencode-port", type=int, default=3003)
     parser.add_argument("--context-length", type=int, default=DEFAULT_CONTEXT)
-    parser.add_argument(
+    remote_enabled = parser.add_argument(
         "--remote-llm-enabled",
         choices=["", "true", "false"],
         default=os.environ.get("REMOTE_LLM_ENABLED", "false").strip().lower(),
     )
-    parser.add_argument(
+    remote_transport = parser.add_argument(
         "--remote-llm-transport",
         choices=["", "direct", "ssh"],
         default=os.environ.get("REMOTE_LLM_TRANSPORT", ""),
@@ -775,7 +775,16 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     parser.add_argument("--output-root", default=".", help="Root directory used with --write")
     parser.add_argument("--write", action="store_true", help="Write rendered files under --output-root")
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    # argparse checks explicit choices, but not string defaults from the
+    # environment. A typo must not silently select a different routing mode
+    # and overwrite working runtime configs. Validate effective values so an
+    # explicit valid CLI override can still repair a bad environment default.
+    for action in (switchboard_mode, remote_enabled, remote_transport):
+        value = getattr(args, action.dest)
+        if value not in action.choices:
+            parser.error(f"{action.option_strings[0]}: invalid choice {value!r}; choose from {action.choices}")
+    return args
 
 
 def select_surfaces(

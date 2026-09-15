@@ -26,3 +26,5 @@ jobs:
           python -m pytest -q
           ods/extensions/services/pixel-edge/tests/test_transition_gate.py
           ods/extensions/services/pixel-edge/tests/test_transition_gate_special_files.py
+      - name: Verify edge HTTP and streaming contracts
+        run: python -m pytest -q ods/extensions/services/pixel-edge/tests/test_pixel_edge.py

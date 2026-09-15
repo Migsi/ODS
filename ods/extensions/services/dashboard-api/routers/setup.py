@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 import re
+import signal
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -151,12 +152,15 @@ async def run_setup_diagnostics(api_key: str = Depends(verify_api_key)):
         process = await asyncio.create_subprocess_exec(
             "bash", str(script_path),
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+            start_new_session=os.name == "posix",
         )
+        completed = False
         try:
             try:
                 async for line in process.stdout:
                     yield line.decode()
                 await process.wait()
+                completed = True
                 # Emit the human-readable trailer AND the machine-readable sentinel
                 # as a SINGLE chunk. Starlette's StreamingResponse finalizes the
                 # HTTP stream as soon as the async generator exits; when trailer
@@ -180,9 +184,14 @@ async def run_setup_diagnostics(api_key: str = Depends(verify_api_key)):
                 logger.exception("run_setup_diagnostics generator raised: %s", exc)
                 yield f"\nDiagnostic runner error: {exc}\n__ODS_RESULT__:FAIL:1\n"
         finally:
-            if process.returncode is None:
+            if not completed:
                 try:
-                    process.kill()
+                    # Shell diagnostics spawn curl and other descendants that
+                    # can keep stdout open after the shell itself has exited.
+                    if os.name == "posix":
+                        os.killpg(process.pid, signal.SIGKILL)
+                    else:
+                        process.kill()
                 except OSError:
                     pass
                 await process.wait()

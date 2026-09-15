@@ -1267,7 +1267,16 @@ MODELS_INI_EOF
     $DOCKER_CMD start $($DOCKER_CMD ps -a --filter status=created -q) 2>/dev/null || true
     # Step 2: wait for services to stabilize, then compose pass
     sleep 10
-    $DOCKER_COMPOSE_CMD "${COMPOSE_FLAGS_ARR[@]}" up -d --remove-orphans --no-build --pull never >> "$LOG_FILE" 2>&1 || true
+    # Preserve the recovery result. A successful recovery must be allowed to
+    # clear an earlier transient compose failure; a failed recovery must not
+    # be hidden behind the installer success path.
+    _phase11_recovery_compose_ok=false
+    if $DOCKER_COMPOSE_CMD "${COMPOSE_FLAGS_ARR[@]}" up -d --remove-orphans --no-build --pull never >> "$LOG_FILE" 2>&1; then
+        _phase11_recovery_compose_ok=true
+    fi
+    if ! $compose_ok && $_phase11_recovery_compose_ok; then
+        compose_ok=true
+    fi
     # Step 3: catch any stragglers from the second pass
     $DOCKER_CMD start $($DOCKER_CMD ps -a --filter status=created -q) 2>/dev/null || true
 

@@ -206,8 +206,8 @@ function wrappedEvidence(text, sourceUrl) {
   ].join("\n");
 }
 
-function textResult(text, details) {
-  return { content: [{ type: "text", text }], details };
+function textResult(text, details, isError = false) {
+  return { content: [{ type: "text", text }], details, ...(isError ? { isError: true } : {}) };
 }
 
 export function createPublicWebExtractTool({
@@ -251,7 +251,7 @@ export function createPublicWebExtractTool({
         return textResult(`Pixel blocked targeted web extraction: ${error.message}`, {
           boundary: "public-web-read-only",
           matched: false,
-        });
+        }, true);
       }
 
       let guarded;
@@ -274,7 +274,8 @@ export function createPublicWebExtractTool({
         if (!response.ok) {
           return textResult(
             `The public page returned HTTP ${response.status}; no evidence was extracted.`,
-            { boundary: "public-web-read-only", matched: false, status: response.status }
+            { boundary: "public-web-read-only", matched: false, status: response.status },
+            true
           );
         }
         const contentType = (response.headers.get("content-type") ?? "")
@@ -294,7 +295,7 @@ export function createPublicWebExtractTool({
             boundary: "public-web-read-only",
             matched: false,
             content_type: contentType || "unknown",
-          });
+          }, true);
         }
         const body = await readResponseText(response, { maxBytes: MAX_RESPONSE_BYTES });
         let extractedText = body.text;
@@ -331,7 +332,8 @@ export function createPublicWebExtractTool({
       } catch {
         return textResult(
           "Targeted public web extraction was blocked or unavailable; no evidence was returned.",
-          { boundary: "public-web-read-only", matched: false }
+          { boundary: "public-web-read-only", matched: false },
+          true
         );
       } finally {
         guarded?.release?.();

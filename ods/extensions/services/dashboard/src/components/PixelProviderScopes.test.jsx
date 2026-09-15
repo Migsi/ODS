@@ -2,6 +2,7 @@ import { act, cleanup, fireEvent, screen, waitFor } from '@testing-library/react
 import { createElement } from 'react'
 import { render } from '../test/test-utils'
 import PixelProviderScopes from './PixelProviderScopes.jsx'
+import {mockHttpCrypto} from '../test/httpCrypto'
 
 const response = value => ({ ok: true, json: async () => value })
 const taskId = '8d23bf56-9f23-4afd-9cd6-c24e6e2931b8'
@@ -31,6 +32,15 @@ afterEach(() => {
   cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals()
   delete window.HTMLDialogElement.prototype.showModal
   delete window.HTMLDialogElement.prototype.close
+})
+
+it('begins a new preference task on an HTTP LAN origin', async () => {
+  const {fetchMock} = await setup({state:{...initial(),taskId:null}})
+  mockHttpCrypto(taskId)
+  fireEvent.click(screen.getByRole('button', {name:'Begin task'}))
+  await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => url.endsWith('/begin'))).toBe(true))
+  const call = fetchMock.mock.calls.find(([url]) => url.endsWith('/begin'))
+  expect(JSON.parse(call[1].body).taskId).toBe(taskId)
 })
 
 it('only reads on open and reload; never begins or approves work implicitly', async () => {

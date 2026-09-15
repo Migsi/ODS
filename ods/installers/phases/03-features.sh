@@ -229,7 +229,30 @@ if ! $DRY_RUN; then
     _pixel_support_services="${ENABLE_RECOMMENDED:-false}"
     [[ "${ENABLE_PIXEL_RUNTIME:-false}" == "true" ]] && _pixel_support_services=true
     [[ -n "${EXTERNAL_LLM_URL:-}" ]] && _pixel_support_services=true
-    _sync_extension_compose "$_pixel_support_services" litellm    "LiteLLM"       "neither recommended services nor Pixel are enabled"
+    # With the default ODS_MODEL_SWITCHBOARD=enabled, phase 06 routes Open WebUI
+    # through the gateway (OPEN_WEBUI_LLM_BASE_URL=http://litellm:4000), so it
+    # must run even when recommended services are off. Resolve the mode as
+    # phase 06 does: an existing .env value wins on reruns, then the caller's
+    # value, then the default; anything but legacy or observe means enabled.
+    _switchboard_mode=""
+    if [[ -f "${INSTALL_DIR:-}/.env" ]]; then
+        _switchboard_mode="$(awk -F= '$1 == "ODS_MODEL_SWITCHBOARD" { print substr($0, index($0, "=") + 1); exit }' \
+            "$INSTALL_DIR/.env" 2>/dev/null | tr -d '\r' || true)"
+        _switchboard_mode="${_switchboard_mode%% #*}"
+        _switchboard_mode="${_switchboard_mode#"${_switchboard_mode%%[![:space:]]*}"}"
+        _switchboard_mode="${_switchboard_mode%"${_switchboard_mode##*[![:space:]]}"}"
+        # Only exact modes can disable the gateway. Do not turn invalid
+        # quoted values such as 'legacy # literal' or ' legacy ' into legacy.
+        case "$_switchboard_mode" in
+            \"legacy\"|\'legacy\') _switchboard_mode=legacy ;;
+            \"observe\"|\'observe\') _switchboard_mode=observe ;;
+            \"\"|\'\') _switchboard_mode="" ;;
+        esac
+    fi
+    [[ -n "$_switchboard_mode" ]] || _switchboard_mode="${ODS_MODEL_SWITCHBOARD:-enabled}"
+    [[ "$_switchboard_mode" == "legacy" || "$_switchboard_mode" == "observe" ]] || _pixel_support_services=true
+    unset _switchboard_mode
+    _sync_extension_compose "$_pixel_support_services" litellm    "LiteLLM"       "no enabled feature routes through the LiteLLM gateway"
     # SearXNG backs Pixel, Open WebUI web search, Perplexica, and agent web tools.
     # It is not only a recommended extra — --no-recommended with Perplexica
     # still needs the search backend.

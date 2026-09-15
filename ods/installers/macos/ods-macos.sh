@@ -202,8 +202,8 @@ read_ods_env() {
     if [[ ! -f "$env_file" ]]; then
         return
     fi
-    # Parse .env safely (no eval)
-    while IFS= read -r line; do
+    # Parse .env safely (no eval). Keep a last line that has no newline.
+    while IFS= read -r line || [[ -n "$line" ]]; do
         line=$(echo "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
         [[ "$line" =~ ^# ]] && continue
         [[ -z "$line" ]] && continue
@@ -428,6 +428,11 @@ upsert_env_value() {
     if grep -qE "^${key}=" "$env_file" 2>/dev/null; then
         sed -i '' "s|^${key}=.*|${key}=${value}|" "$env_file"
     else
+        # Appending after a last line that has no newline would join the new
+        # assignment onto that line and corrupt both keys.
+        if [[ -s "$env_file" && -n "$(tail -c 1 "$env_file")" ]]; then
+            printf '\n' >> "$env_file"
+        fi
         printf '%s=%s\n' "$key" "$value" >> "$env_file"
     fi
 }
