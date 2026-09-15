@@ -4334,7 +4334,7 @@ _ods_pixel_wait_ingress() {
 
 _ods_pixel_restart_ingress_and_verify() {
     local owner="$1" home="$2" answers="$3"
-    local previous_pid current_pid unit_user restart_policy owner_uid process_uid attempt
+    local previous_pid current_pid unit_user restart_policy restart_force owner_uid process_uid attempt
     [[ "$answers" == /* && -f "$answers" && ! -L "$answers" ]] || return 1
     if ! systemctl is-active --quiet pixel-ingress.service; then
         # First installation reconciles the model before it installs ingress.
@@ -4347,10 +4347,12 @@ _ods_pixel_restart_ingress_and_verify() {
     else
         unit_user="$(systemctl show pixel-ingress.service -p User --value 2>/dev/null || true)"
         restart_policy="$(systemctl show pixel-ingress.service -p Restart --value 2>/dev/null || true)"
+        restart_force="$(systemctl show pixel-ingress.service -p RestartForceExitStatus --value 2>/dev/null || true)"
         owner_uid="$(id -u "$owner" 2>/dev/null || true)"
         process_uid="$(awk '/^Uid:/ { print $2; exit }' "/proc/${previous_pid}/status" 2>/dev/null || true)"
         [[ "$(id -un)" == "$owner" && "$unit_user" == "$owner" \
-            && "$restart_policy" == "on-failure" && "$owner_uid" =~ ^[0-9]+$ \
+            && "$restart_policy" == "on-failure" && "$restart_force" == *SIGHUP* \
+            && "$owner_uid" =~ ^[0-9]+$ \
             && "$process_uid" == "$owner_uid" ]] || return 1
         current_pid="$(systemctl show pixel-ingress.service -p MainPID --value 2>/dev/null || true)"
         [[ "$current_pid" == "$previous_pid" ]] || return 1

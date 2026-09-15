@@ -2393,6 +2393,8 @@ for diagnostic in (
 assert "pixel\" verify >>\"$pixel_log\"" in text
 assert "if ! _ods_pixel_install_ingress" in text
 assert "systemctl restart pixel-ingress.service" in text
+assert "RestartForceExitStatus --value" in text
+assert '"$restart_force" == *SIGHUP*' in text
 assert "if ! _ods_pixel_mark_verified_installing" in text
 assert text.index("_ods_pixel_mark_verified_installing \"$owner\"") < text.index("_ods_pixel_install_ingress \"$owner\"")
 assert "if ! _ods_pixel_mark_ready" in text
@@ -2454,6 +2456,8 @@ text=pathlib.Path(sys.argv[1]).read_text()
 assert "ProtectHome=true" in text
 assert "RestrictNamespaces=true" in text
 assert "RuntimeDirectoryPreserve=restart" in text
+assert "Restart=on-failure" in text
+assert "RestartForceExitStatus=SIGHUP" in text
 assert "BindReadOnlyPaths=__PIXEL_GATEWAY_TOKEN_SOURCE__:__PIXEL_GATEWAY_TOKEN_FILE__" in text
 ' "$ROOT/extensions/services/pixel-agent/host/pixel-ingress.service"
 check python3 -c '
