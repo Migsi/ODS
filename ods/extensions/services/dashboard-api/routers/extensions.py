@@ -1712,7 +1712,24 @@ def install_extension(service_id: str, api_key: str = Depends(verify_api_key)):
     # Some extensions (continue, sillytavern) ship a config/<id>/ directory
     # that the compose.yaml bind-mounts relative to the compose project root
     # (INSTALL_DIR), not relative to the extension directory.
-    _sync_extension_config(service_id)
+    # A library definition without shipped config has nothing to copy.  For
+    # definitions that do ship config, a failed host sync must stop before the
+    # asynchronous setup/pull/start job: otherwise Docker may create an empty
+    # bind-mount source while the dashboard reports an accepted install.
+    shipped_config = dest / "config"
+    has_shipped_config = shipped_config.exists() or shipped_config.is_symlink()
+    if has_shipped_config and not _sync_extension_config(service_id):
+        _write_error_progress(
+            service_id,
+            "Extension config sync failed; installed files were preserved and no start was requested.",
+        )
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                f"Extension config sync failed for {service_id}. Installed files were "
+                "preserved; resolve the host-agent/config issue before explicit recovery."
+            ),
+        )
 
     # Write initial progress file so status shows "installing" immediately
     # (before host agent starts processing — closes the race window)
