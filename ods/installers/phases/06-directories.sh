@@ -665,6 +665,8 @@ Fix with: sudo chown -R \$(id -u):\$(id -g) $INSTALL_DIR/config $INSTALL_DIR/dat
     SEARXNG_SECRET=$(_phase06_env_hex_secret SEARXNG_SECRET 32)
 
     PIXEL_OPENWEBUI_KEY_VALUE=""
+    PIXEL_MODEL_RELAY_KEY_VALUE=""
+    PIXEL_MODEL_RELAY_PORT_VALUE=""
     PIXEL_INGRESS_GID_VALUE=""
     PIXEL_SOURCE_URL_VALUE=""
     PIXEL_SOURCE_REF_VALUE=""
@@ -677,6 +679,15 @@ Fix with: sudo chown -R \$(id -u):\$(id -g) $INSTALL_DIR/config $INSTALL_DIR/dat
             PIXEL_OPENWEBUI_KEY_VALUE="$(ods_pixel_generate_key)" || error "Could not generate Pixel edge key"
         fi
         [[ "$PIXEL_OPENWEBUI_KEY_VALUE" =~ ^[0-9a-f]{64}$ ]] || error "Existing PIXEL_OPENWEBUI_KEY is invalid"
+        PIXEL_MODEL_RELAY_KEY_VALUE="$(_env_get PIXEL_MODEL_RELAY_KEY "")"
+        if [[ -z "$PIXEL_MODEL_RELAY_KEY_VALUE" ]]; then
+            PIXEL_MODEL_RELAY_KEY_VALUE="$(ods_pixel_generate_key)" || error "Could not generate Pixel model relay key"
+        fi
+        [[ "$PIXEL_MODEL_RELAY_KEY_VALUE" =~ ^[0-9a-f]{64}$ ]] || error "Existing PIXEL_MODEL_RELAY_KEY is invalid"
+        PIXEL_MODEL_RELAY_PORT_VALUE="$(_env_get_explicit_first PIXEL_MODEL_RELAY_PORT "4006")"
+        [[ "$PIXEL_MODEL_RELAY_PORT_VALUE" =~ ^[1-9][0-9]{0,4}$ \
+            && "$PIXEL_MODEL_RELAY_PORT_VALUE" -le 65535 ]] || \
+            error "PIXEL_MODEL_RELAY_PORT must be an integer from 1 to 65535"
 
         # Phase 11 creates/resolves ods-pixel immediately before Compose
         # validation, then atomically fills this initially empty numeric GID.
@@ -695,6 +706,12 @@ Fix with: sudo chown -R \$(id -u):\$(id -g) $INSTALL_DIR/config $INSTALL_DIR/dat
             error "Pixel gateway and preview ports must be integers from 1 to 65535"
         [[ "$PIXEL_GATEWAY_PORT_VALUE" != "$PIXEL_PREVIEW_PORT_VALUE" ]] || \
             error "PIXEL_GATEWAY_PORT and PIXEL_PREVIEW_PORT must be different"
+        [[ "$PIXEL_MODEL_RELAY_PORT_VALUE" != "$PIXEL_GATEWAY_PORT_VALUE" \
+            && "$PIXEL_MODEL_RELAY_PORT_VALUE" != "$PIXEL_PREVIEW_PORT_VALUE" \
+            && "$PIXEL_MODEL_RELAY_PORT_VALUE" != "${LITELLM_PORT:-4000}" ]] || \
+            error "Pixel model relay port conflicts with another Pixel or LiteLLM port"
+        export PIXEL_MODEL_RELAY_PORT="$PIXEL_MODEL_RELAY_PORT_VALUE"
+        export PIXEL_MODEL_RELAY_KEY="$PIXEL_MODEL_RELAY_KEY_VALUE"
         export PIXEL_GATEWAY_PORT="$PIXEL_GATEWAY_PORT_VALUE"
         export PIXEL_PREVIEW_PORT="$PIXEL_PREVIEW_PORT_VALUE"
         PIXEL_WEB_SEARCH_PROVIDER_VALUE="$(_env_get_explicit_first PIXEL_WEB_SEARCH_PROVIDER "")"
@@ -1277,6 +1294,8 @@ PIXEL_SOURCE_REF=${PIXEL_SOURCE_REF_VALUE}
 PIXEL_SOURCE_DIR=$(dotenv_quote "$PIXEL_SOURCE_DIR_VALUE")
 $(if [[ -n "$PIXEL_WEB_SEARCH_PROVIDER_VALUE" ]]; then printf 'PIXEL_WEB_SEARCH_PROVIDER=%s\n' "$PIXEL_WEB_SEARCH_PROVIDER_VALUE"; fi)
 PIXEL_OPENWEBUI_KEY=${PIXEL_OPENWEBUI_KEY_VALUE}
+PIXEL_MODEL_RELAY_KEY=${PIXEL_MODEL_RELAY_KEY_VALUE}
+PIXEL_MODEL_RELAY_PORT=${PIXEL_MODEL_RELAY_PORT_VALUE}
 PIXEL_INGRESS_RUNTIME_DIR=/run/ods-pixel
 PIXEL_PREVIEW_RUNTIME_DIR=/run/ods-pixel-preview
 PIXEL_INGRESS_GID=${PIXEL_INGRESS_GID_VALUE}

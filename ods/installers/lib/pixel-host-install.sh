@@ -3837,7 +3837,7 @@ _ods_pixel_write_onboarding() {
     local owner="$1" home="$2" answers="$3" openclaw_bin="$4" plugin_path="$5" plugin_digest="$6"
     local web_search_provider="${7:-searxng}" parallel_path="${8:-}" parallel_digest="${9:-}"
     local context="${MAX_CONTEXT:-16384}" max_tokens reasoning=false
-    local gateway_alias gateway_label runtime_model model_gateway_port="${LITELLM_PORT:-4000}" pixel_gateway_port gateway_key="${LITELLM_KEY:-}"
+    local gateway_alias gateway_label runtime_model model_gateway_port="${PIXEL_MODEL_RELAY_PORT:-4006}" pixel_gateway_port gateway_key="${PIXEL_MODEL_RELAY_KEY:-}"
     local gateway_key_file write_status=0
     if [[ "$context" =~ ^[0-9]+$ && "$context" -ge 4096 ]]; then
         :
@@ -3864,7 +3864,7 @@ _ods_pixel_write_onboarding() {
     [[ "$gateway_alias" == "ods/current" ]] && gateway_label="Current"
     runtime_model="$(_ods_pixel_runtime_model_identity)" || return 1
     if [[ ! "$model_gateway_port" =~ ^[0-9]+$ ]] || (( model_gateway_port < 1 || model_gateway_port > 65535 )); then
-        ai_bad "Pixel requires a valid loopback LiteLLM port."
+        ai_bad "Pixel requires a valid loopback model relay port."
         return 1
     fi
     pixel_gateway_port="$(_ods_pixel_gateway_port)" || {
@@ -3872,7 +3872,7 @@ _ods_pixel_write_onboarding() {
         return 1
     }
     [[ -n "$gateway_key" && ${#gateway_key} -le 4096 ]] || {
-        ai_bad "Pixel requires the generated LiteLLM gateway key."
+        ai_bad "Pixel requires the generated model relay key."
         return 1
     }
 
@@ -4423,7 +4423,7 @@ ods_pixel_install_default_agent() {
     # transition gate. Start the edge before the host ingress is installed;
     # its transition endpoint is independent of upstream chat readiness, and
     # the final access reproof below still runs only after ingress is healthy.
-    local -a pixel_prerequisites=(litellm dashboard-api pixel-edge)
+    local -a pixel_prerequisites=(litellm dashboard-api pixel-edge pixel-model-relay)
     owner="${PIXEL_SERVICE_USER:-$(ods_pixel_install_owner)}" || return 1
     home="$(ods_pixel_owner_home "$owner")" || return 1
     pixel_gateway_port="$(_ods_pixel_gateway_port)" || {
@@ -4511,8 +4511,8 @@ ods_pixel_install_default_agent() {
         ai_bad "Could not start Pixel's exact ODS prerequisite services. See $LOG_FILE."
         return 1
     fi
-    _ods_pixel_wait_model_gateway "ODS model gateway" "${LITELLM_PORT:-4000}" \
-        "${LITELLM_KEY:-}" "$gateway_alias" 180
+    _ods_pixel_wait_model_gateway "ODS Pixel model relay" "${PIXEL_MODEL_RELAY_PORT:-4006}" \
+        "${PIXEL_MODEL_RELAY_KEY:-}" "$gateway_alias" 180
     if [[ "$web_search_provider" == searxng ]]; then
         _ods_pixel_wait_http "ODS local search" "http://127.0.0.1:${SEARXNG_PORT:-8888}/search?q=pixel-preflight&format=json" 90 '.results | type == "array"'
     fi

@@ -841,6 +841,8 @@ export OLLAMA_PORT=11434
 export SEARXNG_PORT=8888
 export LITELLM_PORT=4000
 export LITELLM_KEY=test-litellm-secret
+export PIXEL_MODEL_RELAY_PORT=4006
+export PIXEL_MODEL_RELAY_KEY=test-pixel-relay-secret
 export ODS_MODEL_SWITCHBOARD=observe
 digest="$(printf 'a%.0s' {1..64})"
 mkdir -p "$INSTALL_DIR/bin" "$INSTALL_DIR/config" \
@@ -1252,8 +1254,8 @@ import json,sys
 v=json.load(open(sys.argv[1]))
 assert v["capabilityProfile"] == "engineering-operator"
 assert v["modelProvider"] == "ods-gateway"
-assert v["modelBaseUrl"] == "http://127.0.0.1:4000/v1"
-assert v["modelApiKey"] == "test-litellm-secret"
+assert v["modelBaseUrl"] == "http://127.0.0.1:4006/v1"
+assert v["modelApiKey"] == "test-pixel-relay-secret"
 assert v["modelId"] == "ods/current"
 assert v["modelName"] == "ODS Current (qwen-test)"
 assert v["modelContextWindow"] == 32768
@@ -1271,15 +1273,15 @@ check test -z "$(find "${answers%/*}" -maxdepth 1 -name '.pixel-gateway-key.*' -
 ODS_MODEL_SWITCHBOARD=enabled
 _ods_pixel_write_onboarding "$owner" "$home" "$TEST_ROOT/switchboard-onboarding.json" \
     /usr/bin/openclaw /opt/ods/pixel-plugin "$digest"
-check python3 -c 'import json,sys; v=json.load(open(sys.argv[1])); assert v["modelProvider"] == "ods-gateway" and v["modelId"] == "ods/current" and v["modelName"] == "ODS Current (qwen-test)" and v["modelBaseUrl"] == "http://127.0.0.1:4000/v1"' \
+check python3 -c 'import json,sys; v=json.load(open(sys.argv[1])); assert v["modelProvider"] == "ods-gateway" and v["modelId"] == "ods/current" and v["modelName"] == "ODS Current (qwen-test)" and v["modelBaseUrl"] == "http://127.0.0.1:4006/v1"' \
     "$TEST_ROOT/switchboard-onboarding.json"
 ODS_MODEL_SWITCHBOARD=observe
-if LITELLM_KEY='' _ods_pixel_write_onboarding "$owner" "$home" \
+if PIXEL_MODEL_RELAY_KEY='' _ods_pixel_write_onboarding "$owner" "$home" \
     "$TEST_ROOT/missing-gateway-key-onboarding.json" /usr/bin/openclaw \
     /opt/ods/pixel-plugin "$digest" >/dev/null 2>&1; then
-    fail "Pixel onboarding without a LiteLLM key rejected"
+    fail "Pixel onboarding without a model relay key rejected"
 else
-    pass "Pixel onboarding without a LiteLLM key rejected"
+    pass "Pixel onboarding without a model relay key rejected"
 fi
 if (
     curl() {
@@ -1930,8 +1932,8 @@ value = json.loads(source.read_text())
 providers = value["models"]["providers"]
 provider = providers.pop("ods-local")
 providers["ods-gateway"] = provider
-provider["apiKey"] = "test-litellm-secret"
-provider["baseUrl"] = "http://127.0.0.1:4000/v1"
+provider["apiKey"] = "test-pixel-relay-secret"
+provider["baseUrl"] = "http://127.0.0.1:4006/v1"
 model = provider["models"][0]
 model.update({
     "id": "ods/current",
@@ -2240,7 +2242,7 @@ import pathlib,sys
 text=pathlib.Path(sys.argv[1]).read_text()
 access_bridge=pathlib.Path(sys.argv[2]).read_text()
 installer=text[text.index("ods_pixel_install_default_agent() {"):]
-assert "local -a pixel_prerequisites=(litellm dashboard-api pixel-edge)" in installer
+assert "local -a pixel_prerequisites=(litellm dashboard-api pixel-edge pixel-model-relay)" in installer
 assert "ods_pixel_run_as_owner \"$owner\" \"$home\" curl" in text
 assert "_ods_pixel_wait_ingress \"$owner\" \"$home\"" in installer
 assert installer.index("_ods_pixel_wait_ingress \"$owner\" \"$home\"") < installer.index("_ods_pixel_mark_ready \"$owner\" \"$home\"")
