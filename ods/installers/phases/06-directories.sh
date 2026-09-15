@@ -572,6 +572,16 @@ Fix with: sudo chown -R \$(id -u):\$(id -g) $INSTALL_DIR/config $INSTALL_DIR/dat
         printf '%s\n' "$model_id"
     }
 
+    # The local llama-server port may already belong to another owner service
+    # (for example a fleet worker). Honor an explicit install override before
+    # preserving an older .env value, and reject malformed ports before Compose.
+    OLLAMA_PORT_VALUE="$(_env_get_explicit_first OLLAMA_PORT "11434")"
+    if [[ ! "$OLLAMA_PORT_VALUE" =~ ^[1-9][0-9]{0,4}$ ]] \
+        || (( 10#$OLLAMA_PORT_VALUE > 65535 )); then
+        error "OLLAMA_PORT must be a port from 1 to 65535"
+        return 1
+    fi
+
     # Secrets: reuse existing values, generate only if missing
     WEBUI_SECRET=$(_phase06_env_hex_secret WEBUI_SECRET 32)
     N8N_PASS=$(_env_get N8N_PASS "$(openssl rand -base64 16 2>/dev/null || head -c 16 /dev/urandom | base64)")
@@ -1252,7 +1262,7 @@ INTEL_ENV
 fi)
 
 #=== Ports ===
-OLLAMA_PORT=11434
+OLLAMA_PORT=$(dotenv_value "${OLLAMA_PORT_VALUE}")
 WEBUI_PORT=3000
 SEARXNG_PORT=8888
 PERPLEXICA_PORT=3004
