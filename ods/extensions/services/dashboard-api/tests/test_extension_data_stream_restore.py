@@ -154,3 +154,49 @@ def test_nested_tree_modes_and_nanosecond_times_are_staged_exactly(tmp_path: Pat
         assert (observed.st_mode & 0o7777, observed.st_atime_ns, observed.st_mtime_ns) == (mode, *times)
         assert (prior.st_mode & 0o7777, prior.st_atime_ns, prior.st_mtime_ns) == (mode, *times)
     assert stager.stage(restore_command, "alpha", 0) == stage_name
+
+
+@linux_effect
+@pytest.mark.parametrize("tamper", ["content", "extra"])
+def test_complete_stage_replay_refuses_tampered_or_foreign_tree(tmp_path: Path, tamper: str):
+    install, _backup, alpha, store, command, _root, journal = _ready(tmp_path)
+    stager = restores.StreamRestoreStager(install, store, journal)
+    stage_name = stager.stage(command, "alpha", 0)
+    assert stage_name is not None
+    stage = install / "data" / stage_name
+    if tamper == "content":
+        (stage / "note").write_bytes(b"unapproved bytes")
+    else:
+        (stage / "unexpected").write_bytes(b"foreign")
+    with pytest.raises(LifecycleWorkExecutionError) as caught:
+        stager.stage(command, "alpha", 0)
+    assert caught.value.code == "lifecycle-work-data-restore-stage-readback-invalid"
+    assert stage.is_dir() and (alpha / "note").read_bytes() == b"private source"
+
+
+@linux_effect
+def test_stage_path_swap_after_descriptor_pin_cannot_write_into_live_tree(tmp_path: Path, monkeypatch):
+    install, _backup, alpha, store, command, _root, journal = _ready(tmp_path)
+    with store.open_verified(command) as (_archive, document, receipt):
+        path = document["services"][0]["paths"][0]
+        intent = journal.begin(command, receipt, "alpha", 0, path)
+    visible = install / "data" / intent["stageName"]
+    held = install / "data" / "held-stage"
+    original = restores._copy_file
+    swapped = False
+
+    def swap_before_copy(parent, name, archive, member, entry):
+        nonlocal swapped
+        if not swapped:
+            swapped = True
+            visible.rename(held)
+            visible.symlink_to(alpha, target_is_directory=True)
+        return original(parent, name, archive, member, entry)
+
+    monkeypatch.setattr(restores, "_copy_file", swap_before_copy)
+    with pytest.raises(LifecycleWorkExecutionError) as caught:
+        restores.StreamRestoreStager(install, store, journal).stage(command, "alpha", 0)
+    assert caught.value.code == "lifecycle-work-data-restore-stage-drift"
+    assert swapped and visible.is_symlink()
+    assert (held / "note").read_bytes() == b"private source"
+    assert (alpha / "note").read_bytes() == b"private source"
