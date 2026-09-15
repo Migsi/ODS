@@ -87,15 +87,15 @@ def _load_yaml(text: str) -> object:
     return yaml.load(text, Loader=_UniqueKeyLoader)
 
 
-def _validate_v2_compose_images(compose_path: Path | None, images: tuple[dict, ...]) -> None:
+def _validate_v2_compose_images(compose_payload: bytes | None, images: tuple[dict, ...]) -> None:
     """Bind image-only v2 artifacts to the ordinary primary Compose definition."""
 
     mismatch = "v2-compose-image-artifact-mismatch"
-    if compose_path is None:
+    if compose_payload is None:
         raise ValueError(mismatch)
     try:
-        compose = _load_yaml(compose_path.read_text(encoding="utf-8"))
-    except (yaml.YAMLError, OSError, UnicodeError) as exc:
+        compose = _load_yaml(compose_payload.decode("utf-8"))
+    except (yaml.YAMLError, UnicodeError) as exc:
         raise ValueError(mismatch) from exc
     if not isinstance(compose, dict):
         raise ValueError(mismatch)
@@ -244,6 +244,7 @@ def extract_entry(
     compose_sha256 = ""
     compose_file = None
     compose_path = None
+    compose_payload = None
     raw_compose_name = service.get("compose_file")
     compose_name = (
         raw_compose_name
@@ -266,12 +267,16 @@ def extract_entry(
             compose_path = _compose_path(manifest_path, compose_name)
             if compose_path is not None:
                 compose_file = compose_name
-                try:
-                    compose_sha256 = canonical_document_sha256(compose_path)
-                except ValueError as exc:
-                    if v2_image_candidate:
+                if v2_image_candidate:
+                    try:
+                        compose_payload = compose_path.read_bytes()
+                        compose_sha256 = DOCUMENT_DIGEST.canonical_document_sha256(
+                            compose_payload
+                        )
+                    except (OSError, DOCUMENT_DIGEST.CanonicalDocumentError) as exc:
                         raise ValueError("v2-compose-image-artifact-mismatch") from exc
-                    raise
+                else:
+                    compose_sha256 = canonical_document_sha256(compose_path)
     planning_record = PLANNER.adapt_manifest(
         {
             **manifest,
@@ -291,7 +296,7 @@ def extract_entry(
         if planning_record["artifacts"]["builds"]:
             raise ValueError("v2-compose-image-artifact-mismatch")
         _validate_v2_compose_images(
-            compose_path, planning_record["artifacts"]["images"]
+            compose_payload, planning_record["artifacts"]["images"]
         )
     planning = {
         "serviceType": planning_record["serviceType"],

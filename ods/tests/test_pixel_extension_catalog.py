@@ -83,9 +83,9 @@ class CatalogTests(unittest.TestCase):
         reference = "example.invalid/ods-test:1"
         digest = "sha256:" + "a" * 64
         image = f"{reference}@{digest}"
-        manifest["service"]["planning"]["artifacts"]["images"] = images or [
+        manifest["service"]["planning"]["artifacts"]["images"] = [
             {"reference": reference, "digest": digest, "download_bytes": 10}
-        ]
+        ] if images is None else images
         manifest_path.write_text(json.dumps(manifest))
         compose_path = directory / "compose.yaml"
         compose_path.write_text(json.dumps(compose or {"services": {"app": {"image": image}}}))
@@ -147,6 +147,19 @@ class CatalogTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "^v2-compose-image-artifact-mismatch$"):
             generator.extract_entry(manifest, path, definition_source="builtin")
 
+    def test_v2_image_artifacts_require_a_primary_compose_declaration(self):
+        manifest, path, _compose_path, _image = self.image_manifest("no-compose-declaration")
+        manifest["service"]["compose_file"] = ""
+        path.write_text(json.dumps(manifest))
+        with self.assertRaisesRegex(ValueError, "^v2-compose-image-artifact-mismatch$"):
+            generator.extract_entry(manifest, path, definition_source="builtin")
+
+    def test_v2_without_image_artifacts_keeps_existing_catalog_behavior(self):
+        manifest, path, compose_path, _image = self.image_manifest("no-image-artifacts", images=[])
+        compose_path.write_text("services:\n  app:\n    image: example.invalid/legacy:latest\n")
+        entry = generator.extract_entry(manifest, path, definition_source="builtin")
+        self.assertEqual(entry["planning"]["artifacts"]["images"], [])
+
     def test_v2_image_artifacts_reject_builds_and_interpolated_references(self):
         manifest, path, _compose_path, image = self.image_manifest("mixed-build")
         manifest["service"]["planning"]["artifacts"]["builds"] = [{
@@ -173,6 +186,10 @@ class CatalogTests(unittest.TestCase):
         manifest = json.loads(manifest_path.read_text())
         entry = generator.extract_entry(manifest, manifest_path, definition_source="builtin")
         self.assertTrue(entry["planning"]["legacy"])
+        self.assertEqual(
+            entry["planning"]["composeSha256"],
+            generator.canonical_document_sha256(directory / "compose.yaml"),
+        )
 
     def build(self, entries):
         catalog = self.root / "catalog.json"
