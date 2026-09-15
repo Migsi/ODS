@@ -89,6 +89,15 @@ set +e
     pkg_install() { printf 'UNEXPECTED package install: %s\n' "$*"; return 1; }
     pkg_update() { printf 'UNEXPECTED package update\n'; return 1; }
     pkg_resolve() { printf '%s\n' "$1"; }
+    # The fixture tests a broken Docker Desktop shim with no alternate runtime.
+    # Some CI images happen to ship Podman, which would exercise a different
+    # supported branch and make this test dependent on the runner image.
+    command() {
+        if [[ "${1:-}" == "-v" && "${2:-}" == "podman" ]]; then
+            return 1
+        fi
+        builtin command "$@"
+    }
     ods_sudo_available() { return 0; }
     ods_sudo() { return 0; }
     id() {
