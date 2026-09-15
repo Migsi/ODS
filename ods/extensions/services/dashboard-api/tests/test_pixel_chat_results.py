@@ -225,7 +225,8 @@ def test_terminal_upstream_error_is_replayable_but_never_complete(store, monkeyp
     asyncio.run(run())
 
 
-def test_edge_abort_ack_survives_empty_done_during_cancel_round_trip(store, monkeypatch):
+@pytest.mark.parametrize("ack", [True, False])
+def test_edge_abort_ack_survives_empty_done_during_cancel_round_trip(store, monkeypatch, ack):
     """A real Edge abort can race its empty DONE through the retained producer."""
     async def run():
         started = asyncio.Event()
@@ -245,7 +246,7 @@ def test_edge_abort_ack_survives_empty_done_during_cancel_round_trip(store, monk
             cancel_entered.set()
             release_done.set()
             await asyncio.gather(*list(pixel._result_tasks.values()))
-            return True
+            return ack
 
         monkeypatch.setattr(pixel, "_cancel_edge_run", cancel)
         await pixel.pixel_chat_stream(ConnectedRequest(), body(), OWNER)
@@ -253,8 +254,9 @@ def test_edge_abort_ack_survives_empty_done_during_cancel_round_trip(store, monk
         stop = asyncio.create_task(pixel.pixel_chat_cancel(
             pixel.ChatCancelRequest(chat_id="chat-test", request_id="attempt-one"), OWNER))
         await cancel_entered.wait()
-        assert await stop == {"aborted": True}
-        assert store.get(IDENTITY)["state"] == "interrupted"
+        assert await stop == {"aborted": ack}
+        assert store.get(IDENTITY)["state"] == ("cancelled" if ack else "unresolved")
+        assert store.has_pending(IDENTITY[:2]) is not ack
         assert b"Pixel returned no answer" in b"".join(
             row["data"] for row in store.chunks(IDENTITY))
 
@@ -287,6 +289,9 @@ def test_done_without_user_answer_is_never_a_complete_receipt(store, monkeypatch
         assert "Pixel returned no answer" in result["events"]
         assert result["events"].count("[DONE]") == 1
         assert not store.has_pending(IDENTITY[:2])
+        assert await pixel.pixel_chat_cancel(
+            pixel.ChatCancelRequest(chat_id="chat-test", request_id="attempt-one"), OWNER
+        ) == {"aborted": False}
         assert not cancels
     asyncio.run(run())
 

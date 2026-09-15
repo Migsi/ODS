@@ -648,6 +648,7 @@ async def _produce_retained_result(store, identity, body, config):
     edge_url, key = config
     done_seen = False
     answer_seen = False
+    empty_done_seen = False
     terminal_error_seen = False
     cancelled = False
     failed = False
@@ -700,6 +701,7 @@ async def _produce_retained_result(store, identity, body, config):
                                     # aborted, so a syntactic DONE is not a user answer.
                                     # Do not persist it as a successful receipt.
                                     terminal_error_seen = True
+                                    empty_done_seen = True
                                     failed = True
                                     store.append(identity, _error_event("Pixel returned no answer. Try again.")
                                                  + b"data: [DONE]\n\n", terminal=True)
@@ -736,6 +738,11 @@ async def _produce_retained_result(store, identity, body, config):
             state = (
                 "complete" if done_seen and not terminal_error_seen
                 else "cancelled" if cancelled
+                # A DONE-only frame can overtake the Edge Stop acknowledgment.
+                # Keep the attempt reserved until Stop resolves; an acknowledged
+                # abort then commits cancelled, while an unacknowledged native
+                # run must remain unresolved instead of admitting a successor.
+                else "unresolved" if empty_done_seen and identity[:2] in _result_stops
                 else "interrupted" if terminal_error_seen or failed and stopped
                 else "unresolved" if failed
                 else "complete"
