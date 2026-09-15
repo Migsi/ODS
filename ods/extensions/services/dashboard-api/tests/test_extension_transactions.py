@@ -1379,7 +1379,131 @@ def test_decode_canonical_object_tuple_rejects_extra_missing_and_mixed(tmp_path)
 
     # An empty alternation matches no key set: fail closed, never permissive.
     with pytest.raises(transactions.IntegrityError) as caught:
-        transactions._decode_canonical_object(
-            path, (), "approval"
-        )
+        transactions._decode_canonical_object(path, (), "approval")
     assert caught.value.code == "approval-keys"
+
+
+def _replace_test_approval_with_v2(store, transaction_id, envelope):
+    """Fabricate a v2 approval only in a temporary, already-approved test store."""
+    loaded = store.read(transaction_id)
+    record = loaded["configuration"]
+    schema_hash = configuration.configuration_schema(
+        envelope, expected_plan_hash=envelope["planHash"]
+    )["schemaHash"]
+    safe_hash = transactions.configuration_attestation_hash(
+        transaction_id,
+        envelope["planHash"],
+        schema_hash,
+        record is not None,
+        record["values"] if record else {},
+        record["presentConfigKeys"] if record else [],
+        record["presentSecretKeys"] if record else [],
+        record["appliedDefaultKeys"] if record else [],
+    )
+    approval = {
+        **loaded["approval"],
+        "configurationHash": safe_hash,
+        "configurationSchemaHash": schema_hash,
+        "privateConfigurationDigest": transactions.configuration_record_digest(
+            record, schema_hash
+        ),
+    }
+    path = store._tx_dir / transaction_id / "approval.json"
+    _write_private(path, approval)
+    return approval
+
+
+def test_attested_v2_approval_reads_without_exposing_secret_reference(tmp_path):
+    store = transactions.TransactionStore(tmp_path / "transactions")
+    envelope = build_envelope()
+    descriptor = create(store, envelope)
+    transaction_id = descriptor["transactionId"]
+    store.approve_exact(
+        transaction_id, envelope["planHash"], "owner-" + "a" * 16,
+        APPROVED_AT, NOW,
+    )
+    legacy = store.read(transaction_id)["approval"]
+    assert set(legacy) == transactions.APPROVAL_KEYS
+
+    v2 = _replace_test_approval_with_v2(store, transaction_id, envelope)
+    assert store.read(transaction_id)["approval"] == v2
+    raw = (store._tx_dir / transaction_id / "approval.json").read_bytes()
+    assert b"secretReference" not in raw
+    assert b"secretValues" not in raw
+
+
+@pytest.mark.parametrize(
+    ("field", "code"),
+    [
+        ("configurationSchemaHash", "approval-v2-schema-mismatch"),
+        ("configurationHash", "approval-v2-configuration-mismatch"),
+        ("privateConfigurationDigest", "approval-v2-custody-mismatch"),
+    ],
+)
+def test_attested_v2_approval_hash_tampering_fails_closed(tmp_path, field, code):
+    store = transactions.TransactionStore(tmp_path / "transactions")
+    envelope = build_envelope()
+    descriptor = create(store, envelope)
+    transaction_id = descriptor["transactionId"]
+    store.approve_exact(
+        transaction_id, envelope["planHash"], "owner-" + "a" * 16,
+        APPROVED_AT, NOW,
+    )
+    v2 = _replace_test_approval_with_v2(store, transaction_id, envelope)
+    bad = {**v2, field: "0" * 64}
+    _write_private(store._tx_dir / transaction_id / "approval.json", bad)
+    with pytest.raises(transactions.IntegrityError) as caught:
+        store.read(transaction_id)
+    assert caught.value.code == code
+
+
+def test_attested_v2_approval_rejects_malformed_digest(tmp_path):
+    store = transactions.TransactionStore(tmp_path / "transactions")
+    envelope = build_envelope()
+    descriptor = create(store, envelope)
+    transaction_id = descriptor["transactionId"]
+    store.approve_exact(
+        transaction_id, envelope["planHash"], "owner-" + "a" * 16,
+        APPROVED_AT, NOW,
+    )
+    v2 = _replace_test_approval_with_v2(store, transaction_id, envelope)
+    _write_private(
+        store._tx_dir / transaction_id / "approval.json",
+        {**v2, "privateConfigurationDigest": "not-a-hash"},
+    )
+    with pytest.raises(transactions.IntegrityError) as caught:
+        store.read(transaction_id)
+    assert caught.value.code == "approval-v2-digest-invalid"
+
+
+def test_attested_v2_approval_detects_swapped_opaque_secret_reference(tmp_path):
+    store = transactions.TransactionStore(tmp_path / "transactions")
+    envelope = build_configured_envelope()
+    descriptor = create(store, envelope)
+    transaction_id = descriptor["transactionId"]
+    schema_hash = configuration.configuration_schema(
+        envelope, expected_plan_hash=envelope["planHash"]
+    )["schemaHash"]
+    store.begin_configuration_exact(
+        transaction_id, envelope["planHash"], schema_hash, "2" * 64,
+        {"ENDPOINT": "https://example.invalid/v1", "OFFSET": -1},
+        ["TOKEN"], [], CREATED_AT, NOW,
+    )
+    store.finish_configuration_exact(
+        transaction_id, envelope["planHash"], "2" * 64,
+        "secret-v1-" + "3" * 48,
+    )
+    store.approve_exact(
+        transaction_id, envelope["planHash"], "owner-" + "a" * 16,
+        APPROVED_AT, NOW,
+    )
+    _replace_test_approval_with_v2(store, transaction_id, envelope)
+    assert store.read(transaction_id)["state"] == "approved"
+
+    path = store._tx_dir / transaction_id / "configuration.json"
+    record = json.loads(path.read_text(encoding="utf-8"))
+    record["secretReference"] = "secret-v1-" + "4" * 48
+    _write_private(path, record)
+    with pytest.raises(transactions.IntegrityError) as caught:
+        store.read(transaction_id)
+    assert caught.value.code == "approval-v2-custody-mismatch"

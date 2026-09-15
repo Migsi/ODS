@@ -10,7 +10,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-
 # ── Exceptions ───────────────────────────────────────────────────────────────
 class TransactionError(Exception):
     """Base transaction error."""
@@ -1412,11 +1411,80 @@ class TransactionStore:
             raise IntegrityError("idempotency-index-mismatch")
         return index
 
-    def _load_approval(self, tx_dir, transaction_id, envelope, binding):
+    def _load_approval(
+        self, tx_dir, transaction_id, envelope, binding, configuration=None
+    ):
         path = tx_dir / "approval.json"
         if not self._entry_exists(path):
             raise IntegrityError("missing-approval")
-        approval = _decode_canonical_object(path, APPROVAL_KEYS, "approval")
+        approval = _decode_canonical_object(
+            path, (APPROVAL_KEYS, APPROVAL_V2_KEYS), "approval"
+        )
+        if set(approval) == APPROVAL_V2_KEYS:
+            from extension_configuration import (
+                configuration_schema,
+                ExtensionConfigurationError,
+            )
+
+            for field in (
+                "configurationHash",
+                "configurationSchemaHash",
+                "privateConfigurationDigest",
+            ):
+                value = approval[field]
+                if not isinstance(value, str) or not HEX64_RE.fullmatch(value):
+                    raise IntegrityError("approval-v2-digest-invalid")
+
+            # Derive schema from envelope and validate v2 schema hash
+            try:
+                schema = configuration_schema(
+                    envelope, expected_plan_hash=envelope["planHash"]
+                )
+            except ExtensionConfigurationError:
+                raise IntegrityError("approval-v2-schema-invalid")
+            schema_hash = schema["schemaHash"]
+            if approval["configurationSchemaHash"] != schema_hash:
+                raise IntegrityError("approval-v2-schema-mismatch")
+            # If a stored configuration record exists, its schemaHash must match
+            if configuration is not None:
+                if approval["configurationSchemaHash"] != configuration["schemaHash"]:
+                    raise IntegrityError("approval-v2-schema-mismatch")
+
+            # Recompute and verify configuration attestation hash
+            configured = configuration is not None
+            if configured:
+                attestation_hash = configuration_attestation_hash(
+                    transaction_id,
+                    envelope["planHash"],
+                    schema_hash,
+                    True,
+                    configuration["values"],
+                    configuration["presentConfigKeys"],
+                    configuration["presentSecretKeys"],
+                    configuration["appliedDefaultKeys"],
+                )
+                private_digest = configuration_record_digest(
+                    configuration, schema_hash
+                )
+            else:
+                attestation_hash = configuration_attestation_hash(
+                    transaction_id,
+                    envelope["planHash"],
+                    schema_hash,
+                    False,
+                    {},
+                    [],
+                    [],
+                    [],
+                )
+                private_digest = configuration_record_digest(None, schema_hash)
+
+            if approval["configurationHash"] != attestation_hash:
+                raise IntegrityError("approval-v2-configuration-mismatch")
+            if approval["privateConfigurationDigest"] != private_digest:
+                raise IntegrityError("approval-v2-custody-mismatch")
+
+            # v2 fell through digest checks; continue with common binding checks below
         try:
             _validate_actor_id(approval["actor"])
             _validate_approver_id(approval["approvedBy"])
@@ -1548,13 +1616,15 @@ class TransactionStore:
             raise IntegrityError("missing-configuration")
         approval_path = tx_dir / "approval.json"
         if has_approved:
-            approval = self._load_approval(tx_dir, transaction_id, envelope, binding)
+            approval = self._load_approval(
+                tx_dir, transaction_id, envelope, binding, configuration
+            )
         else:
             if self._entry_exists(approval_path):
                 if not allow_unjournaled_approval:
                     raise IntegrityError("unexpected-approval")
                 approval = self._load_approval(
-                    tx_dir, transaction_id, envelope, binding
+                    tx_dir, transaction_id, envelope, binding, configuration
                 )
             else:
                 approval = None

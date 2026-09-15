@@ -700,6 +700,10 @@ def test_status_is_no_store_and_redacts_approval_binding(api):
         "actor": "assistant-manager",
         "idempotencyKey": IDEMPOTENCY_KEY,
         "validUntil": "2026-10-01T00:00:00Z",
+        "configurationHash": "f" * 64,
+        "configurationSchemaHash": "e" * 64,
+        "privateConfigurationDigest": "0" * 64,
+        "secretReference": "private-host-pointer",
     }
     response = api.client.get(
         f"/api/extensions/transactions/{TX_ID}", headers=api.headers
@@ -713,6 +717,8 @@ def test_status_is_no_store_and_redacts_approval_binding(api):
         "approvedBy": "owner-" + "1" * 16,
     }
     assert IDEMPOTENCY_KEY not in response.text
+    assert "privateConfigurationDigest" not in response.text
+    assert "private-host-pointer" not in response.text
     assert response.json()["plan"]["requiredSecretKeys"] == ["NOTES_API_KEY"]
     assert response.json()["desiredState"] == {
         "status": "not-committed",
