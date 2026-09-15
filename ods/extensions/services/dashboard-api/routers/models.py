@@ -2003,8 +2003,26 @@ def load_model(
 
     # Activation includes downstream synchronization and a bounded rollback.
     activation_body: dict[str, Any] = {"model_id": model_id}
-    if requested_context is not None:
-        activation_body["context_length"] = requested_context
+    activation_context = requested_context
+    if (
+        activation_context is None
+        and loaded_model
+        and (_model_name_tokens(loaded_model) & _catalog_model_tokens(model))
+    ):
+        # A matching live backend may still require reconciliation when its
+        # activation receipt is absent or stale (for example immediately after
+        # bootstrap promotion).  Preserve the verified runtime context across
+        # that repair.  Otherwise the host agent falls back to the catalog's
+        # conservative default and can silently shrink a 64K Hermes-capable
+        # runtime to 32K during an idempotent dashboard reload.
+        configured_context = _configured_context_length()
+        if (
+            configured_context is not None
+            and _MIN_MODEL_CONTEXT <= configured_context <= _MAX_MODEL_CONTEXT
+        ):
+            activation_context = configured_context
+    if activation_context is not None:
+        activation_body["context_length"] = activation_context
     result = _call_agent_model(
         "/v1/model/activate",
         activation_body,

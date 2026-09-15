@@ -2231,7 +2231,11 @@ def test_load_model_reconciles_matching_runtime_without_completion_receipt(
     _write_model_library(install_dir, [model])
     (data_dir / "models" / model["gguf_file"]).write_text("model", encoding="utf-8")
     (install_dir / ".env").write_text(
-        "ODS_MODE=local\nLLM_MODEL=qwen3.5-9b\nGGUF_FILE=Qwen3.5-9B-Q4_K_M.gguf\n",
+        "ODS_MODE=local\n"
+        "LLM_MODEL=qwen3.5-9b\n"
+        "GGUF_FILE=Qwen3.5-9B-Q4_K_M.gguf\n"
+        "CTX_SIZE=65536\n"
+        "MAX_CONTEXT=65536\n",
         encoding="utf-8",
     )
     monkeypatch.setattr(
@@ -2252,7 +2256,11 @@ def test_load_model_reconciles_matching_runtime_without_completion_receipt(
 
     assert resp.status_code == 200
     assert resp.json()["status"] == "activated"
-    assert calls and calls[0][0] == "/v1/model/activate"
+    assert calls == [(
+        "/v1/model/activate",
+        {"model_id": model["id"], "context_length": 65536},
+        2700,
+    )]
 
 
 def test_load_model_delegates_when_live_backend_reports_different_model(test_client, monkeypatch, tmp_path):
