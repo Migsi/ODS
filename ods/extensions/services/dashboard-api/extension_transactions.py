@@ -197,12 +197,67 @@ CONFIGURATION_KEYS = frozenset(
         "values",
     }
 )
+APPROVAL_V2_KEYS = APPROVAL_KEYS | frozenset(
+    {"configurationHash", "configurationSchemaHash", "privateConfigurationDigest"}
+)
 CONFIGURATION_INTENT_KEYS = CONFIGURATION_KEYS - {"secretReference"}
 CONFIGURATION_KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,127}$")
 SECRET_REFERENCE_RE = re.compile(r"^secret-v1-[0-9a-f]{48}$")
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
+def configuration_attestation_hash(
+    transaction_id: str,
+    plan_hash: str,
+    schema_hash: str,
+    configured: bool,
+    values: dict[str, Any],
+    present_config_keys: list[str],
+    present_secret_keys: list[str],
+    applied_default_keys: list[str],
+) -> str:
+    """Compute the owner-visible configuration attestation hash.
+
+    SHA-256 over a domain-separated canonical JSON preimage containing ONLY
+    the listed nonsecret fields.  secretReference, resolved/raw secret values,
+    idempotencyKey, timestamps, and owner identity are deliberately excluded
+    so the hash is safe to expose in public projections.  Shared by
+    TransactionConfigurationManager and TransactionStore without circular
+    imports.
+    """
+    preimage = {
+        "schema": "ods.assistant-first.configuration-attestation.v1",
+        "transactionId": transaction_id,
+        "planHash": plan_hash,
+        "schemaHash": schema_hash,
+        "configured": configured,
+        "values": values,
+        "presentConfigKeys": present_config_keys,
+        "presentSecretKeys": present_secret_keys,
+        "appliedDefaultKeys": applied_default_keys,
+    }
+    return _sha256(canonical_json_bytes(preimage))
+
+
+def configuration_record_digest(
+    configuration: dict[str, Any], schema_hash: str
+) -> str:
+    """Compute the private configuration record digest for owner-approval files.
+
+    SHA-256 over a domain-separated canonical JSON preimage containing the
+    FULL validated configuration record INCLUDING the opaque secretReference
+    (or None) plus the schemaHash.  Resolved or raw secret values are never
+    part of the preimage.  The digest is host-owner-only material and must
+    not appear in public projections or API responses.
+    """
+    preimage = {
+        "schema": "ods.assistant-first.configuration-record-digest.v1",
+        "schemaHash": schema_hash,
+        "configuration": configuration,
+    }
+    return _sha256(canonical_json_bytes(preimage))
+
+
 def _json_safe(v, depth=0):
     """Reject non-JSON-safe types: tuples, surrogates, excessive sizes.
 
@@ -927,6 +982,16 @@ def _read_checked(path, max_bytes=None):
 
 
 def _decode_canonical_object(path, expected_keys, error_prefix):
+    """Decode a canonical JSON object, enforcing exact expected key sets.
+
+    ``expected_keys`` may be a single set-like value (exact-match semantics,
+    used by all existing callers) or an explicit tuple of set-like values
+    (strict alternation: the decoded object must match exactly one of the
+    given sets; no union, subset, or extra keys are tolerated).
+    """
+    key_sets = (
+        expected_keys if isinstance(expected_keys, tuple) else (expected_keys,)
+    )
     raw = _read_checked(path, MAX_INPUT_BYTES)
     try:
         value = json.loads(
@@ -937,7 +1002,7 @@ def _decode_canonical_object(path, expected_keys, error_prefix):
         raise IntegrityError(f"{error_prefix}-parse-error") from exc
     if not isinstance(value, dict):
         raise IntegrityError(f"{error_prefix}-not-object")
-    if set(value) != expected_keys:
+    if not any(set(value) == key_set for key_set in key_sets):
         raise IntegrityError(f"{error_prefix}-keys")
     try:
         encoded = canonical_json_bytes(value)

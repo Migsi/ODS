@@ -1292,3 +1292,94 @@ def test_finalization_receipt_tampering_fails_closed(tmp_path):
     with pytest.raises(transactions.IntegrityError) as caught:
         store.read(descriptor["transactionId"])
     assert caught.value.code == "finalization-keys"
+
+
+def _write_private(path, value):
+    """Write a canonical JSON file with store-qualified 0600 permissions."""
+    path.write_bytes(transactions.canonical_json_bytes(value))
+    os.chmod(path, 0o600)
+    os.chmod(path.parent, 0o700)
+
+
+def _approval_record_v1() -> dict:
+    return {
+        "actor": "owner-42",
+        "approvedAt": APPROVED_AT,
+        "approvedBy": "owner-42",
+        "catalogRevision": CATALOG_REVISION,
+        "idempotencyKey": IDEMPOTENCY_KEY,
+        "observedStateRevision": STATE_REVISION,
+        "planHash": "e" * 64,
+        "policyRevision": POLICY_REVISION,
+        "transactionId": "txn-" + "1" * 24,
+        "validUntil": VALID_UNTIL,
+    }
+
+
+def test_decode_canonical_object_accepts_exact_v1_or_v2_key_sets(tmp_path):
+    path = tmp_path / "approval.json"
+    v1 = _approval_record_v1()
+    v2 = {
+        **v1,
+        "configurationHash": "b" * 64,
+        "configurationSchemaHash": "c" * 64,
+        "privateConfigurationDigest": "d" * 64,
+    }
+
+    _write_private(path, v1)
+    decoded = transactions._decode_canonical_object(
+        path, (transactions.APPROVAL_KEYS, transactions.APPROVAL_V2_KEYS),
+        "approval",
+    )
+    assert decoded == v1
+
+    _write_private(path, v2)
+    decoded = transactions._decode_canonical_object(
+        path, (transactions.APPROVAL_KEYS, transactions.APPROVAL_V2_KEYS),
+        "approval",
+    )
+    assert decoded == v2
+
+
+def test_decode_canonical_object_tuple_rejects_extra_missing_and_mixed(tmp_path):
+    path = tmp_path / "approval.json"
+    base = _approval_record_v1()
+    full_v2 = {
+        **base,
+        "configurationHash": "b" * 64,
+        "configurationSchemaHash": "c" * 64,
+        "privateConfigurationDigest": "d" * 64,
+    }
+    # Extra v2 field over v1: matches neither set.
+    extra = {**base, "configurationHash": "b" * 64}
+    # Missing v2 field over v2: matches neither set.
+    missing = {k: v for k, v in full_v2.items() if k != "privateConfigurationDigest"}
+    # All ten v1 fields plus a dropped v1 field: matches neither set.
+    mixed = {**full_v2}
+    del mixed["actor"]
+
+    for candidate in (extra, missing, mixed):
+        _write_private(path, candidate)
+        with pytest.raises(transactions.IntegrityError) as caught:
+            transactions._decode_canonical_object(
+                path,
+                (transactions.APPROVAL_KEYS, transactions.APPROVAL_V2_KEYS),
+                "approval",
+            )
+        assert caught.value.code == "approval-keys"
+
+    # Union keys are never accepted implicitly: passing the bare union set
+    # must also reject a strict v1 record.
+    _write_private(path, base)
+    with pytest.raises(transactions.IntegrityError) as caught:
+        transactions._decode_canonical_object(
+            path, transactions.APPROVAL_V2_KEYS, "approval"
+        )
+    assert caught.value.code == "approval-keys"
+
+    # An empty alternation matches no key set: fail closed, never permissive.
+    with pytest.raises(transactions.IntegrityError) as caught:
+        transactions._decode_canonical_object(
+            path, (), "approval"
+        )
+    assert caught.value.code == "approval-keys"

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 from typing import Any
 
 from assistant_first_secret_client import SecretCustodyError
@@ -13,7 +12,7 @@ from extension_configuration import (
     validate_stored_configuration,
 )
 from extension_transactions import (
-    canonical_json_bytes,
+    configuration_attestation_hash,
     IntegrityError,
     TransitionError,
     ValidationRejected,
@@ -220,19 +219,16 @@ class TransactionConfigurationManager:
         secretValues, idempotencyKey, timestamps, owner identity, and fields
         are deliberately excluded.
         """
-        preimage = {
-            "schema": "ods.assistant-first.configuration-attestation.v1",
-            "transactionId": transaction_id,
-            "planHash": plan_hash,
-            "schemaHash": schema_hash,
-            "configured": configured,
-            "values": values,
-            "presentConfigKeys": present_config_keys,
-            "presentSecretKeys": present_secret_keys,
-            "appliedDefaultKeys": applied_default_keys,
-        }
-        raw = canonical_json_bytes(preimage)
-        return hashlib.sha256(raw).hexdigest()
+        return configuration_attestation_hash(
+            transaction_id,
+            plan_hash,
+            schema_hash,
+            configured,
+            values,
+            present_config_keys,
+            present_secret_keys,
+            applied_default_keys,
+        )
 
     @staticmethod
     def _schema(
