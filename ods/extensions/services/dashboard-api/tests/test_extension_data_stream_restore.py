@@ -149,6 +149,44 @@ def test_second_interrupted_append_replays_same_inode_again(tmp_path: Path, monk
 
 
 @linux_effect
+def test_crash_before_first_file_replays_only_missing_indexed_entry(tmp_path: Path, monkeypatch):
+    install, _backup, alpha, store, command, _root, journal = _ready(tmp_path)
+    with store.open_verified(command) as (_archive, document, receipt):
+        intent = journal.begin(command, receipt, "alpha", 0, document["services"][0]["paths"][0])
+    stager = restores.StreamRestoreStager(install, store, journal)
+
+    def interrupt_copy(*_args):
+        raise OSError("copy interrupted")
+
+    with monkeypatch.context() as patcher:
+        patcher.setattr(restores, "_copy_file", interrupt_copy)
+        with pytest.raises(LifecycleWorkExecutionError):
+            stager.stage(command, "alpha", 0)
+    stage = install / "data" / intent["stageName"]
+    original_inode = stage.stat().st_ino
+    assert stage.is_dir() and not list(stage.iterdir())
+    assert stager.stage(command, "alpha", 0) == intent["stageName"]
+    assert stage.stat().st_ino == original_inode
+    assert _read_noatime(stage / "note") == _read_noatime(alpha / "note") == b"private source"
+
+
+@linux_effect
+def test_hardlinked_staged_file_is_foreign_and_never_repaired(tmp_path: Path):
+    install, _backup, alpha, store, command, _root, journal = _ready(tmp_path)
+    stager = restores.StreamRestoreStager(install, store, journal)
+    stage_name = stager.stage(command, "alpha", 0)
+    assert stage_name is not None
+    staged_file = install / "data" / stage_name / "note"
+    outside = install / "data" / "foreign-hardlink"
+    os.link(staged_file, outside)
+    with pytest.raises(LifecycleWorkExecutionError) as caught:
+        stager.stage(command, "alpha", 0)
+    assert caught.value.code == "lifecycle-work-data-restore-stage-foreign"
+    assert staged_file.stat().st_nlink == 2 and outside.stat().st_ino == staged_file.stat().st_ino
+    assert _read_noatime(alpha / "note") == b"private source"
+
+
+@linux_effect
 def test_full_content_before_metadata_fault_replays_without_writing_bytes(tmp_path: Path, monkeypatch):
     install, _backup, alpha, store, command, _root, journal = _ready(tmp_path, source_mode=0o440)
     with store.open_verified(command) as (_archive, document, receipt):
