@@ -448,6 +448,44 @@ def _verify_archive(
     )
 
 
+def _stabilize_published_link(
+    root: int, descriptor: int, info: os.stat_result, command: LifecycleWorkCommand,
+) -> None:
+    """Remove only a proved in-root temp link left after archive publication."""
+    if info.st_nlink == 1:
+        return
+    if info.st_nlink != 2:
+        _fail("lifecycle-work-data-snapshot-custody-invalid")
+    prefix = f".tmp-{command.transaction_id}-"
+    try:
+        names = os.listdir(root)
+        if len(names) > 100000:
+            _fail("lifecycle-work-data-snapshot-custody-invalid")
+        matches: list[str] = []
+        for name in names:
+            if not name.startswith(prefix) or not name.endswith(".tar"):
+                continue
+            token = name[len(prefix):-4]
+            if len(token) != 32 or any(character not in "0123456789abcdef" for character in token):
+                continue
+            candidate = os.stat(name, dir_fd=root, follow_symlinks=False)
+            if (
+                stat.S_ISREG(candidate.st_mode)
+                and (candidate.st_dev, candidate.st_ino) == (info.st_dev, info.st_ino)
+                and candidate.st_nlink == 2
+                and stat.S_IMODE(candidate.st_mode) == _SEALED_MODE
+            ):
+                matches.append(name)
+        if len(matches) != 1:
+            _fail("lifecycle-work-data-snapshot-custody-invalid")
+        os.unlink(matches[0], dir_fd=root)
+        os.fsync(root)
+        if os.fstat(descriptor).st_nlink != 1:
+            _fail("lifecycle-work-data-snapshot-custody-invalid")
+    except OSError as exc:
+        _fail("lifecycle-work-data-snapshot-custody-invalid", exc)
+
+
 class StreamSnapshotStore:
     """First-write-wins tar snapshots; no restore or production dispatch."""
 
@@ -520,6 +558,20 @@ class StreamSnapshotStore:
         except (OSError, tarfile.TarError) as exc:
             _fail("lifecycle-work-data-snapshot-write-failed", exc)
         finally:
+            if temporary_name is not None and temp is not None:
+                try:
+                    temporary = os.stat(temporary_name, dir_fd=root, follow_symlinks=False)
+                    opened = os.fstat(temp)
+                    if (
+                        (temporary.st_dev, temporary.st_ino) == (opened.st_dev, opened.st_ino)
+                        and temporary.st_nlink == 1
+                    ):
+                        os.unlink(temporary_name, dir_fd=root)
+                        os.fsync(root)
+                except OSError:
+                    # A failed effect remains failed; never infer publication
+                    # or remove a different inode during cleanup.
+                    pass
             _close_quietly(temp)
             _close_quietly(install)
             _close_quietly(root)
@@ -536,7 +588,7 @@ class StreamSnapshotStore:
             info = os.fstat(descriptor)
             if (
                 not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
-                or info.st_gid != os.getegid() or info.st_nlink != 1
+                or info.st_gid != os.getegid() or info.st_nlink not in {1, 2}
                 or stat.S_IMODE(info.st_mode) != _SEALED_MODE
                 or not 0 < info.st_size <= _MAX_ARCHIVE_BYTES
             ):
@@ -554,9 +606,11 @@ class StreamSnapshotStore:
             os.lseek(descriptor, 0, os.SEEK_SET)
             with os.fdopen(os.dup(descriptor), "rb", closefd=True) as reader:
                 with tarfile.open(fileobj=reader, mode="r:") as archive:
-                    return _verify_archive(
+                    receipt = _verify_archive(
                         archive, _snapshot_document(command, scope), archive_digest.hexdigest(),
                     )
+            _stabilize_published_link(root, descriptor, info, command)
+            return receipt
         except (OSError, tarfile.TarError) as exc:
             _fail("lifecycle-work-data-snapshot-readback-invalid", exc)
         finally:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
+import tarfile
 from pathlib import Path
 
 import pytest
@@ -110,3 +111,74 @@ def test_file_budget_refuses_snapshot_before_publication(tmp_path: Path, monkeyp
     with pytest.raises(LifecycleWorkExecutionError):
         store.backup(value)
     assert not (backup / f"{value.transaction_id}.{value.plan_hash}.tar").exists()
+
+
+@linux_effect
+def test_hardlink_fifo_and_group_writable_tree_fail_closed(tmp_path: Path):
+    install, data, backup, alpha = _roots(tmp_path)
+    outside = tmp_path / "shared"
+    _write(outside, b"shared")
+    os.link(outside, alpha / "hardlink")
+    value = _command()
+    store = snapshots.StreamSnapshotStore(install, data, backup)
+    with pytest.raises(LifecycleWorkExecutionError):
+        store.backup(value)
+    (alpha / "hardlink").unlink()
+    fifo = alpha / "pipe"
+    os.mkfifo(fifo)
+    with pytest.raises(LifecycleWorkExecutionError):
+        store.backup(value)
+    fifo.unlink()
+    _write(alpha / "safe", b"safe")
+    alpha.chmod(0o770)
+    with pytest.raises(LifecycleWorkExecutionError):
+        store.backup(value)
+    assert not (backup / f"{value.transaction_id}.{value.plan_hash}.tar").exists()
+
+
+@linux_effect
+def test_archive_content_tampering_is_detected(tmp_path: Path):
+    install, data, backup, alpha = _roots(tmp_path)
+    _write(alpha / "note", b"original-content")
+    value = _command()
+    store = snapshots.StreamSnapshotStore(install, data, backup)
+    store.backup(value)
+    archive_path = backup / f"{value.transaction_id}.{value.plan_hash}.tar"
+    with tarfile.open(archive_path, "r:") as archive:
+        payload = next(member for member in archive.getmembers() if member.name.endswith("/note"))
+        offset = payload.offset_data
+    archive_path.chmod(0o600)
+    with archive_path.open("r+b") as stream:
+        stream.seek(offset)
+        stream.write(b"X")
+    archive_path.chmod(0o400)
+    with pytest.raises(LifecycleWorkExecutionError):
+        store.verify(value)
+
+
+@linux_effect
+def test_crash_after_hardlink_recovers_only_matching_temp_link(tmp_path: Path, monkeypatch):
+    install, data, backup, alpha = _roots(tmp_path)
+    _write(alpha / "note", b"sealed")
+    value = _command()
+    store = snapshots.StreamSnapshotStore(install, data, backup)
+    original = snapshots.os.unlink
+    interrupted = False
+
+    def fail_first_temp(name, *, dir_fd=None):
+        nonlocal interrupted
+        if not interrupted and isinstance(name, str) and name.startswith(".tmp-"):
+            interrupted = True
+            raise OSError("simulated crash after archive link")
+        return original(name, dir_fd=dir_fd)
+
+    monkeypatch.setattr(snapshots.os, "unlink", fail_first_temp)
+    with pytest.raises(LifecycleWorkExecutionError):
+        store.backup(value)
+    monkeypatch.setattr(snapshots.os, "unlink", original)
+    archive = backup / f"{value.transaction_id}.{value.plan_hash}.tar"
+    assert archive.exists() and archive.stat().st_nlink == 2
+    receipt = store.verify(value)
+    assert receipt.file_count == 1
+    assert archive.stat().st_nlink == 1
+    assert len(list(backup.iterdir())) == 1
