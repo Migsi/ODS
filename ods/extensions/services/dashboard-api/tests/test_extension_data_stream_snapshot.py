@@ -255,6 +255,33 @@ def test_reconciling_command_rebinds_original_backup_archive_without_rebackup(tm
 
 
 @linux_effect
+def test_verified_restore_archive_lease_keeps_original_inode_on_path_swap(tmp_path: Path):
+    install, data, backup, alpha = _roots(tmp_path)
+    _write(alpha / "note", b"sealed original")
+    value = _command()
+    value = replace(value, request_hash=_protocol_hash(value, "backup"))
+    store = snapshots.StreamSnapshotStore(install, data, backup)
+    store.backup(value)
+    restore = replace(
+        value, operation_key="restore",
+        plan_material=replace(value.plan_material, state="reconciling"),
+        request_hash=_protocol_hash(value, "restore"),
+    )
+    archive_path = backup / f"{value.transaction_id}.{value.plan_hash}.tar"
+    held = backup / "held-original.tar"
+    with store.open_verified(restore) as (archive, document, receipt):
+        assert receipt.file_count == 1
+        assert document["schema"] == snapshots.SNAPSHOT_SCHEMA
+        member = next(item for item in archive.getmembers() if item.name.endswith("/note"))
+        archive_path.rename(held)
+        archive_path.write_bytes(b"invalid replacement")
+        archive_path.chmod(0o400)
+        assert archive.extractfile(member).read() == b"sealed original"
+    with pytest.raises(LifecycleWorkExecutionError):
+        store.verify(restore)
+
+
+@linux_effect
 def test_source_symlink_fails_without_published_archive(tmp_path: Path):
     install, data, backup, alpha = _roots(tmp_path)
     outside = tmp_path / "outside"

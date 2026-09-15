@@ -20,9 +20,10 @@ import re
 import secrets
 import stat
 import tarfile
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from extension_data_backup_runtime import (
     DataBackupRuntimeError,
@@ -416,7 +417,7 @@ def _index_document(raw: bytes) -> dict[str, Any]:
 
 def _verify_archive(
     archive: tarfile.TarFile, expected: dict[str, Any], archive_sha256: str,
-) -> StreamSnapshotReceipt:
+) -> tuple[StreamSnapshotReceipt, dict[str, Any]]:
     members = archive.getmembers()
     if not members or len(members) > _MAX_ENTRIES + 1:
         _fail("lifecycle-work-data-snapshot-index-invalid")
@@ -549,10 +550,13 @@ def _verify_archive(
             remaining -= len(chunk)
         if digest.hexdigest() != entry["sha256"]:
             _fail("lifecycle-work-data-snapshot-content-invalid")
-    return StreamSnapshotReceipt(
-        archive_sha256=archive_sha256,
-        index_sha256=hashlib.sha256(raw).hexdigest(),
-        file_count=file_count, content_bytes=content_bytes,
+    return (
+        StreamSnapshotReceipt(
+            archive_sha256=archive_sha256,
+            index_sha256=hashlib.sha256(raw).hexdigest(),
+            file_count=file_count, content_bytes=content_bytes,
+        ),
+        document,
     )
 
 
@@ -686,46 +690,53 @@ class StreamSnapshotStore:
             _close_quietly(install)
             _close_quietly(root)
 
-    def verify(self, command: LifecycleWorkCommand) -> StreamSnapshotReceipt:
+    @contextmanager
+    def open_verified(self, command: LifecycleWorkCommand) -> Iterator[
+        tuple[tarfile.TarFile, dict[str, Any], StreamSnapshotReceipt]
+    ]:
+        """Hold the exact fully verified sealed inode while a restore stages it."""
         scope = bind_data_scope(command)
-        root = _open_absolute_directory(self.backup_root, private=True)
-        descriptor: int | None = None
-        try:
-            descriptor = os.open(
-                _archive_name(command), os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
-                dir_fd=root,
-            )
-            info = os.fstat(descriptor)
-            if (
-                not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
-                or info.st_gid != os.getegid() or info.st_nlink not in {1, 2}
-                or stat.S_IMODE(info.st_mode) != _SEALED_MODE
-                or not 0 < info.st_size <= _MAX_ARCHIVE_BYTES
-            ):
-                _fail("lifecycle-work-data-snapshot-custody-invalid")
-            archive_digest = hashlib.sha256()
-            remaining = info.st_size
-            while remaining:
-                chunk = os.read(descriptor, min(remaining, 64 * 1024))
-                if not chunk:
+        with ExitStack() as stack:
+            root = _open_absolute_directory(self.backup_root, private=True)
+            stack.callback(_close_quietly, root)
+            try:
+                descriptor = os.open(
+                    _archive_name(command), os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+                    dir_fd=root,
+                )
+                stack.callback(_close_quietly, descriptor)
+                info = os.fstat(descriptor)
+                if (
+                    not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
+                    or info.st_gid != os.getegid() or info.st_nlink not in {1, 2}
+                    or stat.S_IMODE(info.st_mode) != _SEALED_MODE
+                    or not 0 < info.st_size <= _MAX_ARCHIVE_BYTES
+                ):
+                    _fail("lifecycle-work-data-snapshot-custody-invalid")
+                archive_digest = hashlib.sha256()
+                remaining = info.st_size
+                while remaining:
+                    chunk = os.read(descriptor, min(remaining, 64 * 1024))
+                    if not chunk:
+                        _fail("lifecycle-work-data-snapshot-readback-invalid")
+                    archive_digest.update(chunk)
+                    remaining -= len(chunk)
+                if os.read(descriptor, 1) or _identity(os.fstat(descriptor)) != _identity(info):
                     _fail("lifecycle-work-data-snapshot-readback-invalid")
-                archive_digest.update(chunk)
-                remaining -= len(chunk)
-            if os.read(descriptor, 1) or _identity(os.fstat(descriptor)) != _identity(info):
-                _fail("lifecycle-work-data-snapshot-readback-invalid")
-            os.lseek(descriptor, 0, os.SEEK_SET)
-            with os.fdopen(os.dup(descriptor), "rb", closefd=True) as reader:
-                with tarfile.open(fileobj=reader, mode="r:") as archive:
-                    receipt = _verify_archive(
-                        archive, _snapshot_document(command, scope), archive_digest.hexdigest(),
-                    )
-            _stabilize_published_link(root, descriptor, info, command)
+                os.lseek(descriptor, 0, os.SEEK_SET)
+                reader = stack.enter_context(os.fdopen(os.dup(descriptor), "rb", closefd=True))
+                archive = stack.enter_context(tarfile.open(fileobj=reader, mode="r:"))
+                receipt, document = _verify_archive(
+                    archive, _snapshot_document(command, scope), archive_digest.hexdigest(),
+                )
+                _stabilize_published_link(root, descriptor, info, command)
+            except (OSError, tarfile.TarError) as exc:
+                _fail("lifecycle-work-data-snapshot-readback-invalid", exc)
+            yield archive, document, receipt
+
+    def verify(self, command: LifecycleWorkCommand) -> StreamSnapshotReceipt:
+        with self.open_verified(command) as (_archive, _document, receipt):
             return receipt
-        except (OSError, tarfile.TarError) as exc:
-            _fail("lifecycle-work-data-snapshot-readback-invalid", exc)
-        finally:
-            _close_quietly(descriptor)
-            _close_quietly(root)
 
 
 __all__ = ["SNAPSHOT_SCHEMA", "StreamSnapshotError", "StreamSnapshotReceipt", "StreamSnapshotStore"]
