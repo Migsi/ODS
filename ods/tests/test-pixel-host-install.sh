@@ -2448,8 +2448,9 @@ assert "PIXEL_GATEWAY_PORT_VALUE=\"$(_env_get_explicit_first PIXEL_GATEWAY_PORT 
 assert "PIXEL_PREVIEW_PORT_VALUE=\"$(_env_get_explicit_first PIXEL_PREVIEW_PORT \"9437\")\"" in phase
 assert "export PIXEL_GATEWAY_PORT=\"$PIXEL_GATEWAY_PORT_VALUE\"" in phase
 assert "export PIXEL_PREVIEW_PORT=\"$PIXEL_PREVIEW_PORT_VALUE\"" in phase
-assert "PIXEL_GATEWAY_PORT=${PIXEL_GATEWAY_PORT_VALUE}" in phase
-assert "PIXEL_PREVIEW_PORT=${PIXEL_PREVIEW_PORT_VALUE}" in phase
+assert "PIXEL_GATEWAY_PORT=$(dotenv_value \"${PIXEL_GATEWAY_PORT_VALUE}\")" in phase
+assert "PIXEL_PREVIEW_PORT=$(dotenv_value \"${PIXEL_PREVIEW_PORT_VALUE}\")" in phase
+assert "PIXEL_MODEL_RELAY_PORT=$(dotenv_value \"${PIXEL_MODEL_RELAY_PORT_VALUE}\")" in phase
 assert "PIXEL_GATEWAY_PORT and PIXEL_PREVIEW_PORT must be different" in phase
 ' "$ROOT/installers/phases/06-directories.sh"
 check python3 -c '
