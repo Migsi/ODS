@@ -93,8 +93,10 @@ linux_phase="$ROOT_DIR/installers/phases/11-services.sh"
 uninstaller="$ROOT_DIR/ods-uninstall.sh"
 grep -q 'systemd-run --user --unit="${_upgrade_unit%.service}" --no-block' "$linux_phase" \
     || fail "linux phase 11: remote installs must prefer a user service outside the SSH session cgroup"
-grep -q -- '--property=Restart=on-abnormal' "$linux_phase" \
+grep -q -- '--property=Restart=on-failure' "$linux_phase" \
     || fail "linux phase 11: model upgrade service must recover from abnormal bridge/session termination"
+grep -q -- '--property=RestartPreventExitStatus=1' "$linux_phase" \
+    || fail "linux phase 11: genuine bounded upgrade failures must remain terminal"
 grep -q -- '--property=RestartSec=2s' "$linux_phase" \
     || fail "linux phase 11: abnormal model upgrade restart must use a bounded delay"
 if grep -q -- '--collect' "$linux_phase"; then
@@ -102,6 +104,8 @@ if grep -q -- '--collect' "$linux_phase"; then
 fi
 grep -q 'StandardOutput=append:$_upgrade_log' "$linux_phase" \
     || fail "linux phase 11: transient model upgrade must retain its durable log"
+grep -q "trap .*exit 75.*HUP TERM INT" "$ROOT_DIR/scripts/bootstrap-upgrade.sh" \
+    || fail "bootstrap upgrade must identify session interruption as supervisor-retryable"
 grep -q 'systemctl --user stop ods-model-upgrade.service' "$uninstaller" \
     || fail "uninstaller: transient model upgrade service must stop before install-tree removal"
 systemd_line="$(grep -n 'systemd-run --user --unit=' "$linux_phase" | head -1 | cut -d: -f1)"

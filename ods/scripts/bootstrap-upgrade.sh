@@ -2530,7 +2530,11 @@ fi
 if [[ "$_dl_success" != "true" ]]; then
     monitor_download "$_part_path" "$TOTAL_BYTES" &
     _monitor_pid=$!
-    trap 'kill $_monitor_pid 2>/dev/null || true; write_failed_download_status "$_part_path" "$TOTAL_BYTES" "Download interrupted; partial file preserved for resume."; release_model_lifecycle_lock; release_upgrade_lock; exit 1' TERM INT
+    # Exit 75 distinguishes a supervisor-retryable session/bridge interruption
+    # from a genuine bounded download failure (exit 1). A deliberate
+    # `systemctl stop` still suppresses Restart=, while the portable nohup path
+    # remains honestly failed until `ods start` or `ods restart` resumes it.
+    trap 'kill $_monitor_pid 2>/dev/null || true; write_failed_download_status "$_part_path" "$TOTAL_BYTES" "Download interrupted; partial file preserved for resume."; release_model_lifecycle_lock; release_upgrade_lock; exit 75' HUP TERM INT
 
     # Download with resume support. curl success is not enough: finalizing the
     # .part file can fail, and checksum verification can expose a corrupt

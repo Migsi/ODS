@@ -1411,7 +1411,8 @@ MODELS_INI_EOF
             systemctl --user reset-failed "$_upgrade_unit" >/dev/null 2>&1 || true
             if systemd-run --user --unit="${_upgrade_unit%.service}" --no-block \
                 --property=Type=exec \
-                --property=Restart=on-abnormal \
+                --property=Restart=on-failure \
+                --property=RestartPreventExitStatus=1 \
                 --property=RestartSec=2s \
                 --property="StandardOutput=append:$_upgrade_log" \
                 --property="StandardError=append:$_upgrade_log" \
