@@ -487,6 +487,26 @@ def test_attested_library_image_count_is_bounded_before_any_effect():
     assert runner.calls == []
 
 
+def test_attested_library_accepts_exactly_64_distinct_images():
+    images = tuple(
+        PlannedImage(f"example.invalid/documents:{index}", "sha256:" + "8" * 64, 1)
+        for index in range(64)
+    )
+    runner = Runner(
+        [response for _ in images for response in (
+            completed(), completed(stdout=IMAGE_ID)
+        )]
+    )
+
+    evidence = image_runtime.ImageArtifactDispatcher(runner)(
+        library_command(definitions=(library_definition(images=images),))
+    )
+
+    assert len(evidence) == 64
+    assert len(runner.calls) == 128
+    assert {call[0][2] for call in runner.calls} == {"pull", "inspect"}
+
+
 def test_attested_composite_observer_fails_closed_if_any_image_is_missing():
     value = library_command(("documents", "voice"))
     runner = Runner(
@@ -501,6 +521,50 @@ def test_attested_composite_observer_fails_closed_if_any_image_is_missing():
     assert observed.state == "missing"
     assert observed.evidence_hash is None
     assert [call[0][2] for call in runner.calls] == ["inspect", "inspect"]
+
+
+def test_attested_services_reuse_one_identical_immutable_image():
+    shared = library_definition().images
+    value = library_command(
+        ("documents", "voice"),
+        definitions=(
+            library_definition("documents", images=shared),
+            library_definition("voice", images=shared),
+        ),
+    )
+    dispatch_runner = Runner([completed(), completed(stdout=IMAGE_ID)])
+    expected = image_runtime.ImageArtifactDispatcher(dispatch_runner)(value)
+    observe_runner = Runner([completed(stdout=IMAGE_ID)])
+    observer = image_runtime.ImageArtifactStartedObserver(
+        loader(value.plan_material), observe_runner
+    )
+
+    observed = observer(replace(value, plan_material=None))
+
+    assert observed.evidence_hash == expected
+    assert [call[0][2] for call in dispatch_runner.calls] == [
+        "pull", "inspect"
+    ]
+    assert [call[0][2] for call in observe_runner.calls] == ["inspect"]
+
+
+def test_attested_observer_timeout_is_value_free_and_never_pulls():
+    value = library_command()
+    runner = Runner(
+        [subprocess.TimeoutExpired(["docker", "image", "inspect"], timeout=30)]
+    )
+    observer = image_runtime.ImageArtifactStartedObserver(
+        loader(value.plan_material), runner
+    )
+
+    with pytest.raises(
+        image_runtime.ImageArtifactRuntimeError,
+        match="^lifecycle-work-image-command-timeout$",
+    ):
+        observer(replace(value, plan_material=None))
+
+    assert [call[0][2] for call in runner.calls] == ["inspect"]
+    assert runner.calls[0][1]["timeout"] <= 30.0
 
 
 @pytest.mark.parametrize(
@@ -542,6 +606,18 @@ def test_library_pull_failure_is_value_free_and_does_not_touch_compose():
     with pytest.raises(
         image_runtime.ImageArtifactRuntimeError,
         match="^lifecycle-work-image-command-failed$",
+    ):
+        image_runtime.ImageArtifactDispatcher(runner)(library_command())
+    assert [call[0][2] for call in runner.calls] == ["pull"]
+
+
+def test_library_pull_timeout_is_value_free_and_terminalizable():
+    runner = Runner(
+        [subprocess.TimeoutExpired(["docker", "image", "pull"], timeout=120)]
+    )
+    with pytest.raises(
+        image_runtime.ImageArtifactRuntimeError,
+        match="^lifecycle-work-image-command-timeout$",
     ):
         image_runtime.ImageArtifactDispatcher(runner)(library_command())
     assert [call[0][2] for call in runner.calls] == ["pull"]

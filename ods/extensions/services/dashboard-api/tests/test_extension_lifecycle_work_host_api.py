@@ -1597,6 +1597,52 @@ def test_download_selects_image_dispatcher_and_started_observer(
     assert seen == ["observe", ("dispatch", True)]
 
 
+def test_attested_image_observer_timeout_terminalizes_without_docker_effect(
+    host_server, host_request
+):
+    agent, _listener = host_server
+    seen = []
+
+    def timeout(_command):
+        seen.append("inspect")
+        raise agent._extension_lifecycle_work.LifecycleWorkExecutionError(
+            "lifecycle-work-image-command-timeout"
+        )
+
+    agent._image_artifact_runtime = SimpleNamespace(
+        dispatcher=lambda _command: (_ for _ in ()).throw(
+            AssertionError("dispatcher reached after observer timeout")
+        ),
+        started_observer=timeout,
+    )
+    agent._image_artifact_runtime_plan_loader = (
+        agent._extension_lifecycle_plan_loader
+    )
+    grant = acquire_lease(agent, host_request)
+    request = work_request(
+        agent._extension_lifecycle_work.REQUEST_SCHEMA,
+        lease_evidence(agent, grant),
+        operation_key="download-and-verify",
+        service_ids=["documents"],
+        payload={"operations": [{"serviceId": "documents", "action": "install"}]},
+    )
+    begin_receipt(agent, host_request, request)
+
+    status, result = host_request("/v1/extension/lifecycle-work", request)
+
+    assert status == 503
+    assert result == {"error": {"code": "lifecycle-work-operation-failed"}}
+    snapshot_status, snapshot = receipt_snapshot(agent, host_request, request)
+    assert snapshot_status == 200
+    assert snapshot["state"] == "failed"
+    assert seen == ["inspect"]
+
+    replay_status, replay = host_request("/v1/extension/lifecycle-work", request)
+    assert replay_status == 503
+    assert replay == result
+    assert seen == ["inspect"]
+
+
 def test_real_image_runtime_recovers_then_dispatches_once(host_server, host_request):
     agent, _listener = host_server
     image_module = agent._image_artifact_runtime_module

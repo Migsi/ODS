@@ -422,18 +422,23 @@ class ImageArtifactDispatcher:
 
         deadline = time.monotonic() + timeout
         inspected: list[tuple[_ImageTarget, str]] = []
+        observed_ids: dict[str, str] = {}
         for target in targets:
-            _run(
-                self._runner,
-                ["docker", "image", "pull", "--quiet", target.immutable_reference],
-                timeout=_remaining(deadline),
-            )
-            image_id = _inspect_image(
-                self._runner,
-                target,
-                timeout=min(_remaining(deadline), 30.0),
-                missing_ok=False,
-            )
+            image_id = observed_ids.get(target.immutable_reference)
+            if image_id is None:
+                _run(
+                    self._runner,
+                    ["docker", "image", "pull", "--quiet", target.immutable_reference],
+                    timeout=_remaining(deadline),
+                )
+                image_id = _inspect_image(
+                    self._runner,
+                    target,
+                    timeout=min(_remaining(deadline), 30.0),
+                    missing_ok=False,
+                )
+                assert isinstance(image_id, str)
+                observed_ids[target.immutable_reference] = image_id
             assert isinstance(image_id, str)
             inspected.append((target, image_id))
         return _attested_evidence_hash(command, tuple(inspected))
@@ -480,17 +485,24 @@ class ImageArtifactStartedObserver:
                 evidence_hash=_evidence_hash(bound, target, image_id),
             )
 
-        deadline = time.monotonic() + float(bound.timeout_seconds)
+        # Local replay inspection is bounded independently of the longer
+        # network download budget; an observer error terminalizes this exact
+        # attested request at the host, instead of restarting endless replays.
+        deadline = time.monotonic() + min(float(bound.timeout_seconds), 30.0)
         inspected: list[tuple[_ImageTarget, str]] = []
+        observed_ids: dict[str, str] = {}
         for target in targets:
-            image_id = _inspect_image(
-                self._runner,
-                target,
-                timeout=min(_remaining(deadline), 30.0),
-                missing_ok=True,
-            )
+            image_id = observed_ids.get(target.immutable_reference)
+            if image_id is None:
+                image_id = _inspect_image(
+                    self._runner,
+                    target,
+                    timeout=min(_remaining(deadline), 30.0),
+                    missing_ok=True,
+                )
             if image_id is None:
                 return LifecycleWorkStartedObservation(state="missing")
+            observed_ids[target.immutable_reference] = image_id
             inspected.append((target, image_id))
         return LifecycleWorkStartedObservation(
             state="completed",

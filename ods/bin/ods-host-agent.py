@@ -7880,6 +7880,10 @@ class AgentHandler(BaseHTTPRequestHandler):
                             receipt_store,
                             _extension_lifecycle_plan_loader,
                             started_observer,
+                            terminalize_observer_failure=(
+                                command.operation_key == "download-and-verify"
+                                and command.service_ids != ("searxng",)
+                            ),
                         )
                     )
         except _ExtensionMutationAdmissionRejected:
