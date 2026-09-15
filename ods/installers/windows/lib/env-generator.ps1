@@ -1233,6 +1233,9 @@ engines:
     disabled: false
   - name: brave
     disabled: false
+  - name: seznam
+    # Independent general-web fallback when major engines block this household IP.
+    disabled: false
   - name: wikipedia
     disabled: false
   - name: github
