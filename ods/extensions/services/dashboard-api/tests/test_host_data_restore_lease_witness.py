@@ -113,4 +113,10 @@ def test_host_witness_uses_the_original_manager_not_a_replaced_global(
         observer = admission.docker_restore_observer(command, fake)
         assert observer() is True
         assert agent._extension_lease_manager is None
+    assert manager.describe(grant["leaseId"])["active"] is False
+    assert all(agent._service_locks[item].locked() for item in command.service_ids)
+    manager.release(
+        grant["leaseId"], grant["leaseToken"], command.transaction_id,
+        command.plan_hash,
+    )
     assert all(not agent._service_locks[item].locked() for item in command.service_ids)
