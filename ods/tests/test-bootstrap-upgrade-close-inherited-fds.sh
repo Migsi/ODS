@@ -91,8 +91,15 @@ assert_fd_close_spawn "$ROOT_DIR/installers/macos/install-macos.sh" "macos insta
 
 linux_phase="$ROOT_DIR/installers/phases/11-services.sh"
 uninstaller="$ROOT_DIR/ods-uninstall.sh"
-grep -q 'systemd-run --user --unit="${_upgrade_unit%.service}" --collect --no-block' "$linux_phase" \
+grep -q 'systemd-run --user --unit="${_upgrade_unit%.service}" --no-block' "$linux_phase" \
     || fail "linux phase 11: remote installs must prefer a user service outside the SSH session cgroup"
+grep -q -- '--property=Restart=on-abnormal' "$linux_phase" \
+    || fail "linux phase 11: model upgrade service must recover from abnormal bridge/session termination"
+grep -q -- '--property=RestartSec=2s' "$linux_phase" \
+    || fail "linux phase 11: abnormal model upgrade restart must use a bounded delay"
+if grep -q -- '--collect' "$linux_phase"; then
+    fail "linux phase 11: model upgrade service must retain terminal metadata for diagnosis"
+fi
 grep -q 'StandardOutput=append:$_upgrade_log' "$linux_phase" \
     || fail "linux phase 11: transient model upgrade must retain its durable log"
 grep -q 'systemctl --user stop ods-model-upgrade.service' "$uninstaller" \

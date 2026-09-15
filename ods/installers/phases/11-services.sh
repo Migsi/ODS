@@ -1409,8 +1409,10 @@ MODELS_INI_EOF
             && systemctl --user show-environment >/dev/null 2>&1; then
             systemctl --user stop "$_upgrade_unit" >/dev/null 2>&1 || true
             systemctl --user reset-failed "$_upgrade_unit" >/dev/null 2>&1 || true
-            if systemd-run --user --unit="${_upgrade_unit%.service}" --collect --no-block \
+            if systemd-run --user --unit="${_upgrade_unit%.service}" --no-block \
                 --property=Type=exec \
+                --property=Restart=on-abnormal \
+                --property=RestartSec=2s \
                 --property="StandardOutput=append:$_upgrade_log" \
                 --property="StandardError=append:$_upgrade_log" \
                 bash "$SCRIPT_DIR/scripts/bootstrap-upgrade.sh" \
