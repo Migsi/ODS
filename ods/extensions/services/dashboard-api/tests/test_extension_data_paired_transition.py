@@ -256,3 +256,38 @@ def test_no_replace_unavailable_refuses_with_prepared_receipt_and_no_live_move(t
     assert caught.value.code == "lifecycle-work-data-transition-no-replace-unsupported"
     assert alpha.exists() and not (install / "data" / intent["quarantineName"]).exists()
     assert list(root.glob("p-*-prepared.json"))
+
+
+@linux_effect
+def test_missing_renameat2_symbol_never_falls_back_to_plain_rename(tmp_path: Path, monkeypatch):
+    install, alpha, _store, command, _root, _journal, intent, transition = _fixture(tmp_path)
+    with monkeypatch.context() as patcher:
+        patcher.setattr(paired.ctypes, "CDLL", lambda *_args, **_kwargs: object())
+        with pytest.raises(LifecycleWorkExecutionError) as caught:
+            transition.apply(command, "alpha", 0, quiesced=lambda: True)
+    assert caught.value.code == "lifecycle-work-data-transition-no-replace-unsupported"
+    assert _read(alpha / "note") == b"current live data"
+    assert _read(install / "data" / intent["stageName"] / "note") == b"private source"
+
+
+@linux_effect
+def test_quarantine_appearing_at_rename_boundary_is_never_overwritten(tmp_path: Path, monkeypatch):
+    install, alpha, _store, command, _root, _journal, intent, transition = _fixture(tmp_path)
+    rename = paired._no_replace
+    collided = False
+
+    def race(parent, source, destination):
+        nonlocal collided
+        if destination == intent["quarantineName"] and not collided:
+            collided = True
+            os.mkdir(destination, 0o700, dir_fd=parent)
+        rename(parent, source, destination)
+
+    with monkeypatch.context() as patcher:
+        patcher.setattr(paired, "_no_replace", race)
+        with pytest.raises(LifecycleWorkExecutionError) as caught:
+            transition.apply(command, "alpha", 0, quiesced=lambda: True)
+    assert collided and caught.value.code == "lifecycle-work-data-transition-collision"
+    assert _read(alpha / "note") == b"current live data"
+    assert _read(install / "data" / intent["stageName"] / "note") == b"private source"
+    assert (install / "data" / intent["quarantineName"]).is_dir()
