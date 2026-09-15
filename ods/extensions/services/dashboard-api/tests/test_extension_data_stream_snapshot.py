@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import json
 import sys
 import tarfile
 from pathlib import Path
@@ -81,6 +82,92 @@ def test_large_file_streams_without_base64_and_absent_path_is_explicit(tmp_path:
     assert archive.stat().st_size < 10 * 1024 * 1024
     assert b"private value" not in snapshots._canonical({"receipt": receipt.archive_sha256})
     assert len(list(backup.iterdir())) == 1
+
+
+@linux_effect
+def test_snapshot_index_preserves_exact_source_times_without_touching_atime(tmp_path: Path):
+    install, data, backup, alpha = _roots(tmp_path)
+    nested = alpha / "nested"
+    nested.mkdir(mode=0o700)
+    source = nested / "note"
+    _write(source, b"timestamped")
+    file_times = (946684800123456789, 946684801987654321)
+    nested_times = (946684802123456789, 946684803987654321)
+    root_times = (946684804123456789, 946684805987654321)
+    os.utime(source, ns=file_times)
+    os.utime(nested, ns=nested_times)
+    os.utime(alpha, ns=root_times)
+    expected = {item: (item.stat().st_atime_ns, item.stat().st_mtime_ns)
+                for item in (source, nested, alpha)}
+    value = _command()
+    store = snapshots.StreamSnapshotStore(install, data, backup)
+    receipt = store.backup(value)
+    assert store.verify(value) == receipt
+    for item, pair in expected.items():
+        assert (item.stat().st_atime_ns, item.stat().st_mtime_ns) == pair
+    archive_path = backup / f"{value.transaction_id}.{value.plan_hash}.tar"
+    with tarfile.open(archive_path, "r:") as archive:
+        document = json.load(archive.extractfile(snapshots.INDEX_MEMBER))
+        assert all(member.mtime == 0 for member in archive.getmembers())
+    paths = {service["serviceId"]: service["paths"] for service in document["services"]}
+    captured = paths["alpha"][0]
+    assert captured["rootAtimeNs"] == str(expected[alpha][0])
+    assert captured["rootMtimeNs"] == str(expected[alpha][1])
+    entries = {entry["path"]: entry for entry in captured["entries"]}
+    for relative, item in (("nested", nested), ("nested/note", source)):
+        assert entries[relative]["atimeNs"] == str(expected[item][0])
+        assert entries[relative]["mtimeNs"] == str(expected[item][1])
+    assert paths["beta"][0]["present"] is False
+    assert paths["beta"][0]["rootAtimeNs"] is None
+    assert paths["beta"][0]["rootMtimeNs"] is None
+
+
+@linux_effect
+def test_file_and_directory_xattrs_refuse_publication(tmp_path: Path):
+    install, data, backup, alpha = _roots(tmp_path)
+    source = alpha / "note"
+    _write(source, b"private")
+    try:
+        os.setxattr(source, "user.ods-test", b"v")
+    except OSError as exc:
+        pytest.skip(f"test filesystem does not support user xattrs: {exc.errno}")
+    value = _command()
+    store = snapshots.StreamSnapshotStore(install, data, backup)
+    with pytest.raises(LifecycleWorkExecutionError) as caught:
+        store.backup(value)
+    assert caught.value.code == "lifecycle-work-data-snapshot-metadata-unsupported"
+    archive = backup / f"{value.transaction_id}.{value.plan_hash}.tar"
+    assert not archive.exists()
+    os.removexattr(source, "user.ods-test")
+    os.setxattr(alpha, "user.ods-test", b"v")
+    with pytest.raises(LifecycleWorkExecutionError) as caught:
+        store.backup(value)
+    assert caught.value.code == "lifecycle-work-data-snapshot-metadata-unsupported"
+    assert not archive.exists()
+
+
+@linux_effect
+def test_sparse_file_refuses_publication(tmp_path: Path):
+    install, data, backup, alpha = _roots(tmp_path)
+    source = alpha / "hole"
+    with source.open("wb") as stream:
+        stream.write(b"start")
+        stream.seek(1024 * 1024)
+        stream.write(b"end")
+    source.chmod(0o600)
+    value = _command()
+    store = snapshots.StreamSnapshotStore(install, data, backup)
+    with pytest.raises(LifecycleWorkExecutionError) as caught:
+        store.backup(value)
+    assert caught.value.code == "lifecycle-work-data-snapshot-sparse-unsupported"
+    assert not (backup / f"{value.transaction_id}.{value.plan_hash}.tar").exists()
+
+
+@pytest.mark.parametrize("value", [0, "-0", "01", "1.5", "9223372036854775808"])
+def test_index_rejects_noncanonical_or_out_of_range_time(value):
+    with pytest.raises(LifecycleWorkExecutionError) as caught:
+        snapshots._verified_time_ns(value)
+    assert caught.value.code == "lifecycle-work-data-snapshot-index-invalid"
 
 
 @linux_effect

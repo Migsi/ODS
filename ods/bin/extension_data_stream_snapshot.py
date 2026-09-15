@@ -11,6 +11,7 @@ until a reviewed paired backend and live qualification exist.
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import io
 import json
@@ -39,7 +40,7 @@ from extension_data_scope_contract import BoundDataScope, BoundServiceData, Boun
 from extension_lifecycle_work import LifecycleWorkCommand, LifecycleWorkExecutionError
 
 
-SNAPSHOT_SCHEMA = "ods.extension-data-stream-snapshot.v1"
+SNAPSHOT_SCHEMA = "ods.extension-data-stream-snapshot.v2"
 INDEX_MEMBER = "_ods_snapshot/index.json"
 _MAX_ENTRIES = 20000
 _MAX_PATHS = 2048
@@ -51,6 +52,7 @@ _MAX_INDEX_BYTES = 8 * 1024 * 1024
 _TEMP_MODE = 0o600
 _SEALED_MODE = 0o400
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_TIME_NS_RE = re.compile(r"^-?(?:0|[1-9][0-9]{0,18})$")
 
 
 class StreamSnapshotError(LifecycleWorkExecutionError):
@@ -117,7 +119,8 @@ def _scope_index(scope: BoundDataScope) -> list[dict[str, Any]]:
             paths.append({
                 "path": bound.path, "prior": _record(bound.prior),
                 "selected": _record(bound.selected),
-                "present": False, "rootMode": None, "entries": [],
+                "present": False, "rootMode": None,
+                "rootAtimeNs": None, "rootMtimeNs": None, "entries": [],
             })
         result.append({
             "serviceId": service.service_id, "action": service.action,
@@ -140,6 +143,73 @@ def _safe_name(name: str) -> str:
     if length > 255:
         _fail("lifecycle-work-data-snapshot-path-invalid")
     return name
+
+
+def _time_ns(value: int) -> str:
+    if type(value) is not int or not -(1 << 63) <= value < (1 << 63):
+        _fail("lifecycle-work-data-snapshot-time-invalid")
+    return str(value)
+
+
+def _verified_time_ns(value: Any) -> int:
+    if (
+        not isinstance(value, str) or _TIME_NS_RE.fullmatch(value) is None
+        or str(int(value)) != value
+    ):
+        _fail("lifecycle-work-data-snapshot-index-invalid")
+    parsed = int(value)
+    if not -(1 << 63) <= parsed < (1 << 63):
+        _fail("lifecycle-work-data-snapshot-index-invalid")
+    return parsed
+
+
+def _snapshot_identity(info: os.stat_result) -> tuple[int, ...]:
+    # O_NOATIME must prevent the backup itself changing user-visible access time.
+    return _identity(info) + (info.st_atime_ns,)
+
+
+def _source_directory_flags() -> int:
+    if not hasattr(os, "O_NOATIME"):
+        _fail("lifecycle-work-data-snapshot-platform-unsupported")
+    return _directory_flags() | os.O_NOATIME
+
+
+def _source_file_flags() -> int:
+    if not hasattr(os, "O_NOATIME"):
+        _fail("lifecycle-work-data-snapshot-platform-unsupported")
+    return _file_read_flags() | os.O_NOATIME
+
+
+def _check_extended_metadata(descriptor: int) -> None:
+    if not callable(getattr(os, "listxattr", None)):
+        _fail("lifecycle-work-data-snapshot-platform-unsupported")
+    try:
+        names = os.listxattr(descriptor)
+    except OSError as exc:
+        _fail("lifecycle-work-data-snapshot-metadata-unavailable", exc)
+    if names:
+        # Includes visible POSIX ACL, SELinux, capability, and user xattrs.
+        _fail("lifecycle-work-data-snapshot-metadata-unsupported")
+
+
+def _check_sparse_file(descriptor: int, info: os.stat_result) -> None:
+    if info.st_size == 0:
+        return
+    if not all(hasattr(os, name) for name in ("SEEK_DATA", "SEEK_HOLE")):
+        _fail("lifecycle-work-data-snapshot-platform-unsupported")
+    if not isinstance(getattr(info, "st_blocks", None), int):
+        _fail("lifecycle-work-data-snapshot-metadata-unavailable")
+    if info.st_blocks * 512 < info.st_size:
+        _fail("lifecycle-work-data-snapshot-sparse-unsupported")
+    try:
+        data = os.lseek(descriptor, 0, os.SEEK_DATA)
+        if data != 0 or os.lseek(descriptor, data, os.SEEK_HOLE) < info.st_size:
+            _fail("lifecycle-work-data-snapshot-sparse-unsupported")
+        os.lseek(descriptor, 0, os.SEEK_SET)
+    except OSError as exc:
+        if exc.errno == errno.ENXIO:
+            _fail("lifecycle-work-data-snapshot-sparse-unsupported", exc)
+        _fail("lifecycle-work-data-snapshot-metadata-unavailable", exc)
 
 
 class _DigestReader:
@@ -188,11 +258,12 @@ def _capture_directory(
         _fail("lifecycle-work-data-snapshot-depth-limit")
     before = os.fstat(descriptor)
     _validate_source_mode(before, directory=True)
+    _check_extended_metadata(descriptor)
     try:
         names = sorted(_safe_name(name) for name in os.listdir(descriptor))
     except (OSError, UnicodeError) as exc:
         _fail("lifecycle-work-data-snapshot-read-failed", exc)
-    if _identity(os.fstat(descriptor)) != _identity(before):
+    if _snapshot_identity(os.fstat(descriptor)) != _snapshot_identity(before):
         _fail("lifecycle-work-data-snapshot-source-changed")
     for name in names:
         budget.entries += 1
@@ -207,11 +278,13 @@ def _capture_directory(
                 mode = _validate_source_mode(observed, directory=True)
                 child: int | None = None
                 try:
-                    child = os.open(name, _directory_flags(), dir_fd=descriptor)
-                    if _identity(os.fstat(child)) != _identity(observed):
+                    child = os.open(name, _source_directory_flags(), dir_fd=descriptor)
+                    if _snapshot_identity(os.fstat(child)) != _snapshot_identity(observed):
                         _fail("lifecycle-work-data-snapshot-source-changed")
                     archive.addfile(_tar_info(archive_prefix + "/" + path, mode=mode, size=0, directory=True))
-                    entries.append({"path": path, "type": "directory", "mode": mode})
+                    entries.append({"path": path, "type": "directory", "mode": mode,
+                                    "atimeNs": _time_ns(observed.st_atime_ns),
+                                    "mtimeNs": _time_ns(observed.st_mtime_ns)})
                     _capture_directory(archive, child, prefix=path, archive_prefix=archive_prefix,
                                        entries=entries, budget=budget, depth=depth + 1)
                 finally:
@@ -226,26 +299,33 @@ def _capture_directory(
                     _fail("lifecycle-work-data-snapshot-size-limit")
                 child = None
                 try:
-                    child = os.open(name, _file_read_flags(), dir_fd=descriptor)
-                    if _identity(os.fstat(child)) != _identity(observed):
+                    child = os.open(name, _source_file_flags(), dir_fd=descriptor)
+                    if _snapshot_identity(os.fstat(child)) != _snapshot_identity(observed):
                         _fail("lifecycle-work-data-snapshot-source-changed")
+                    _check_extended_metadata(child)
+                    _check_sparse_file(child, observed)
                     reader = _DigestReader(child, observed.st_size)
                     archive.addfile(_tar_info(archive_prefix + "/" + path, mode=mode,
                                               size=observed.st_size, directory=False), reader)
                     if reader.remaining or os.read(child, 1):
                         _fail("lifecycle-work-data-snapshot-source-changed")
                     after = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
-                    if _identity(os.fstat(child)) != _identity(observed) or _identity(after) != _identity(observed):
+                    _check_extended_metadata(child)
+                    if (_snapshot_identity(os.fstat(child)) != _snapshot_identity(observed)
+                            or _snapshot_identity(after) != _snapshot_identity(observed)):
                         _fail("lifecycle-work-data-snapshot-source-changed")
                     entries.append({"path": path, "type": "file", "mode": mode,
-                                    "size": observed.st_size, "sha256": reader.digest.hexdigest()})
+                                    "size": observed.st_size, "sha256": reader.digest.hexdigest(),
+                                    "atimeNs": _time_ns(observed.st_atime_ns),
+                                    "mtimeNs": _time_ns(observed.st_mtime_ns)})
                 finally:
                     _close_quietly(child)
             else:
                 _fail("lifecycle-work-data-snapshot-special-file-denied")
         except (OSError, DataBackupRuntimeError, tarfile.TarError) as exc:
             _fail("lifecycle-work-data-snapshot-read-failed", exc)
-    if _identity(os.fstat(descriptor)) != _identity(before):
+    _check_extended_metadata(descriptor)
+    if _snapshot_identity(os.fstat(descriptor)) != _snapshot_identity(before):
         _fail("lifecycle-work-data-snapshot-source-changed")
 
 
@@ -272,13 +352,23 @@ def _capture_path(
     )
     if descriptor is None:
         return
+    guarded: int | None = None
     try:
+        guarded = os.open(".", _source_directory_flags(), dir_fd=descriptor)
+        if _snapshot_identity(os.fstat(guarded)) != _snapshot_identity(os.fstat(descriptor)):
+            _fail("lifecycle-work-data-snapshot-source-changed")
+        _close_quietly(descriptor)
+        descriptor = guarded
+        guarded = None
         info = os.fstat(descriptor)
         path["present"] = True
         path["rootMode"] = _validate_source_mode(info, directory=True)
+        path["rootAtimeNs"] = _time_ns(info.st_atime_ns)
+        path["rootMtimeNs"] = _time_ns(info.st_mtime_ns)
         _capture_directory(archive, descriptor, prefix="", archive_prefix=archive_prefix,
                            entries=path["entries"], budget=budget, depth=0)
     finally:
+        _close_quietly(guarded)
         _close_quietly(descriptor)
 
 
@@ -358,13 +448,17 @@ def _verify_archive(
                 _fail("lifecycle-work-data-snapshot-index-invalid")
             present = path["present"]
             mode = path["rootMode"]
+            root_atime = path["rootAtimeNs"]
+            root_mtime = path["rootMtimeNs"]
             entries = path["entries"]
             if type(present) is not bool or not isinstance(entries, list):
                 _fail("lifecycle-work-data-snapshot-index-invalid")
             if present:
                 if type(mode) is not int or mode & 0o700 != 0o700 or mode & 0o7022:
                     _fail("lifecycle-work-data-snapshot-index-invalid")
-            elif mode is not None or entries:
+                _verified_time_ns(root_atime)
+                _verified_time_ns(root_mtime)
+            elif mode is not None or root_atime is not None or root_mtime is not None or entries:
                 _fail("lifecycle-work-data-snapshot-index-invalid")
             for entry in entries:
                 entry_count += 1
@@ -383,12 +477,15 @@ def _verify_archive(
                 entry_mode = entry.get("mode")
                 if type(entry_mode) is not int or entry_mode & 0o7022:
                     _fail("lifecycle-work-data-snapshot-index-invalid")
+                _verified_time_ns(entry.get("atimeNs"))
+                _verified_time_ns(entry.get("mtimeNs"))
                 if kind == "directory":
-                    if frozenset(entry) != frozenset({"path", "type", "mode"}) or entry_mode & 0o700 != 0o700:
+                    if (frozenset(entry) != frozenset({"path", "type", "mode", "atimeNs", "mtimeNs"})
+                            or entry_mode & 0o700 != 0o700):
                         _fail("lifecycle-work-data-snapshot-index-invalid")
                 elif kind == "file":
                     if (
-                        frozenset(entry) != frozenset({"path", "type", "mode", "size", "sha256"})
+                        frozenset(entry) != frozenset({"path", "type", "mode", "size", "sha256", "atimeNs", "mtimeNs"})
                         or entry_mode & 0o400 != 0o400
                         or type(entry.get("size")) is not int
                         or not 0 <= entry["size"] <= _MAX_FILE_BYTES
