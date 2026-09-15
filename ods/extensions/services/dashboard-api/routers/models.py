@@ -510,10 +510,14 @@ def _configured_model_identity_matches(model: dict) -> bool:
 
 
 def _already_active_model(model_id: str, model: dict) -> tuple[bool, str | None]:
-    if not _configured_model_identity_matches(model):
-        return False, None
-
+    # Fetch the live backend identity even when the bind-mounted .env identity
+    # is stale. Model activation replaces .env atomically on the host, so a
+    # long-running container with a single-file bind mount can retain the old
+    # inode until it is recreated.
     loaded_model = _fetch_loaded_model_sync()
+    if not _configured_model_identity_matches(model):
+        return False, loaded_model
+
     if _model_name_tokens(loaded_model) & _catalog_model_tokens(model):
         # Lemonade's health endpoint is the authoritative loaded-model source.
         # A one-token chat probe against a large already-active model can take
@@ -2012,7 +2016,13 @@ def load_model(
     activation_context = requested_context
     if (
         activation_context is None
-        and _configured_model_identity_matches(model)
+        and (
+            _configured_model_identity_matches(model)
+            or (
+                loaded_model
+                and (_model_name_tokens(loaded_model) & _catalog_model_tokens(model))
+            )
+        )
     ):
         # A matching live backend may still require reconciliation when its
         # activation receipt is absent or stale (for example immediately after
