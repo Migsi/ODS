@@ -10,9 +10,9 @@ No Docker command here starts, stops, removes, or changes a container.
 from __future__ import annotations
 
 import json
-import os
 import re
 import subprocess
+import sys
 from pathlib import Path
 from typing import Callable
 
@@ -80,7 +80,7 @@ class DockerQuiescenceObserver:
         admission: dict[str, object],
         run: Callable[[list[str]], subprocess.CompletedProcess[bytes]],
     ) -> None:
-        if os.name != "posix" or not isinstance(command, LifecycleWorkCommand):
+        if sys.platform != "linux" or not isinstance(command, LifecycleWorkCommand):
             _fail("lifecycle-work-data-quiescence-platform-unsupported")
         if command.operation_key != "restore" or not callable(run):
             _fail("lifecycle-work-data-quiescence-scope-invalid")

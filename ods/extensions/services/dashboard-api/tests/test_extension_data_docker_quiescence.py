@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 import sys
 from pathlib import Path
@@ -19,7 +18,7 @@ from extension_operation_leases import LEASE_SCHEMA  # noqa: E402
 from test_extension_data_restore_journal import _ready  # noqa: E402
 
 
-linux_effect = pytest.mark.skipif(os.name != "posix", reason="Linux-only Docker restore observer")
+linux_effect = pytest.mark.skipif(sys.platform != "linux", reason="Linux-only Docker restore observer")
 _ID = "a" * 64
 
 
@@ -150,4 +149,16 @@ def test_lease_service_ids_must_be_exact_ordered_binding(
     with pytest.raises(quiescence.DockerQuiescenceError) as caught:
         quiescence.DockerQuiescenceObserver(command, install, admission, fake)
     assert caught.value.code == "lifecycle-work-data-quiescence-lease-required"
+    assert not fake.calls
+
+
+@linux_effect
+def test_non_linux_posix_host_cannot_select_linux_only_observer(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    install, _backup, _alpha, _store, command, _root, _journal = _ready(tmp_path)
+    fake = FakeDocker()
+    monkeypatch.setattr(quiescence.sys, "platform", "darwin")
+    with pytest.raises(quiescence.DockerQuiescenceError) as caught:
+        quiescence.DockerQuiescenceObserver(command, install, _admission(command), fake)
+    assert caught.value.code == "lifecycle-work-data-quiescence-platform-unsupported"
     assert not fake.calls
