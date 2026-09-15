@@ -1507,3 +1507,292 @@ def test_attested_v2_approval_detects_swapped_opaque_secret_reference(tmp_path):
     with pytest.raises(transactions.IntegrityError) as caught:
         store.read(transaction_id)
     assert caught.value.code == "approval-v2-custody-mismatch"
+
+
+def _reviewed_configuration_hash(store, transaction_id, envelope):
+    record = store.read(transaction_id)["configuration"]
+    schema_hash = configuration.configuration_schema(
+        envelope, expected_plan_hash=envelope["planHash"]
+    )["schemaHash"]
+    safe_hash = transactions.configuration_attestation_hash(
+        transaction_id,
+        envelope["planHash"],
+        schema_hash,
+        record is not None,
+        record["values"] if record else {},
+        record["presentConfigKeys"] if record else [],
+        record["presentSecretKeys"] if record else [],
+        record["appliedDefaultKeys"] if record else [],
+    )
+    return schema_hash, safe_hash
+
+
+def test_configured_exact_owner_approval_writes_durable_v2_record(tmp_path):
+    store = transactions.TransactionStore(tmp_path / "transactions")
+    envelope = build_envelope()
+    descriptor = create(store, envelope, actor="assistant-manager")
+    transaction_id = descriptor["transactionId"]
+    schema_hash, safe_hash = _reviewed_configuration_hash(
+        store, transaction_id, envelope
+    )
+    owner = "owner-" + "a" * 16
+
+    result = store.approve_configured_exact(
+        transaction_id, envelope["planHash"], safe_hash, schema_hash,
+        owner, APPROVED_AT, NOW,
+    )
+    assert result["state"] == "approved"
+    assert result["sequence"] == 3
+    assert result["noop"] is False
+    loaded = store.read(transaction_id)
+    approval = loaded["approval"]
+    assert set(approval) == transactions.APPROVAL_V2_KEYS
+    assert approval["actor"] == "assistant-manager"
+    assert approval["approvedBy"] == owner
+    assert approval["configurationHash"] == safe_hash
+    assert approval["configurationSchemaHash"] == schema_hash
+    assert approval["privateConfigurationDigest"] == (
+        transactions.configuration_record_digest(None, schema_hash)
+    )
+    path = store._tx_dir / transaction_id / "approval.json"
+    assert path.stat().st_mode & 0o777 == 0o600
+    assert b"secretReference" not in path.read_bytes()
+
+    replay = store.approve_configured_exact(
+        transaction_id, envelope["planHash"], safe_hash, schema_hash,
+        owner, "2026-09-11T13:00:00Z", "2026-09-11T13:00:00Z",
+    )
+    assert replay["noop"] is True
+    assert store.read(transaction_id)["approval"] == approval
+
+
+@pytest.mark.parametrize(
+    ("which", "replacement"),
+    [
+        ("plan", "0" * 64),
+        ("configuration", "0" * 64),
+        ("schema", "0" * 64),
+        ("owner", "assistant-manager"),
+    ],
+)
+def test_configured_exact_owner_approval_rejects_drift_before_write(
+    tmp_path, which, replacement
+):
+    store = transactions.TransactionStore(tmp_path / "transactions")
+    envelope = build_envelope()
+    transaction_id = create(store, envelope)["transactionId"]
+    schema_hash, safe_hash = _reviewed_configuration_hash(
+        store, transaction_id, envelope
+    )
+    supplied = {
+        "plan": envelope["planHash"],
+        "configuration": safe_hash,
+        "schema": schema_hash,
+        "owner": "owner-" + "a" * 16,
+    }
+    supplied[which] = replacement
+
+    with pytest.raises(transactions.ApprovalError):
+        store.approve_configured_exact(
+            transaction_id, supplied["plan"], supplied["configuration"],
+            supplied["schema"], supplied["owner"], APPROVED_AT, NOW,
+        )
+    assert store.read(transaction_id)["state"] == "awaiting_approval"
+    assert not (store._tx_dir / transaction_id / "approval.json").exists()
+
+
+def test_configured_exact_owner_approval_rejects_expiry_before_write(tmp_path):
+    store = transactions.TransactionStore(tmp_path / "transactions")
+    envelope = build_envelope()
+    transaction_id = create(store, envelope)["transactionId"]
+    schema_hash, safe_hash = _reviewed_configuration_hash(
+        store, transaction_id, envelope
+    )
+
+    with pytest.raises(transactions.ApprovalError) as caught:
+        store.approve_configured_exact(
+            transaction_id, envelope["planHash"], safe_hash, schema_hash,
+            "owner-" + "a" * 16, VALID_UNTIL, VALID_UNTIL,
+        )
+    assert caught.value.code == "approval-expired"
+    assert not (store._tx_dir / transaction_id / "approval.json").exists()
+
+
+def test_configured_exact_owner_approval_never_upgrades_legacy_v1(tmp_path):
+    store = transactions.TransactionStore(tmp_path / "transactions")
+    envelope = build_envelope()
+    transaction_id = create(store, envelope)["transactionId"]
+    schema_hash, safe_hash = _reviewed_configuration_hash(
+        store, transaction_id, envelope
+    )
+    owner = "owner-" + "a" * 16
+    store.approve_exact(transaction_id, envelope["planHash"], owner, APPROVED_AT, NOW)
+
+    with pytest.raises(transactions.ApprovalError):
+        store.approve_configured_exact(
+            transaction_id, envelope["planHash"], safe_hash, schema_hash,
+            owner, APPROVED_AT, NOW,
+        )
+    assert set(store.read(transaction_id)["approval"]) == transactions.APPROVAL_KEYS
+
+
+def test_configured_exact_owner_approval_requires_saved_configuration(tmp_path):
+    store = transactions.TransactionStore(tmp_path / "transactions")
+    envelope = build_configured_envelope()
+    transaction_id = create(store, envelope)["transactionId"]
+    schema_hash, safe_hash = _reviewed_configuration_hash(
+        store, transaction_id, envelope
+    )
+
+    with pytest.raises(transactions.ApprovalError) as caught:
+        store.approve_configured_exact(
+            transaction_id, envelope["planHash"], safe_hash, schema_hash,
+            "owner-" + "a" * 16, APPROVED_AT, NOW,
+        )
+    assert caught.value.code == "missing-configuration"
+    assert not (store._tx_dir / transaction_id / "approval.json").exists()
+
+
+def test_configured_exact_owner_approval_replays_unjournaled_v2(tmp_path, monkeypatch):
+    store = transactions.TransactionStore(tmp_path / "transactions")
+    envelope = build_envelope()
+    transaction_id = create(store, envelope)["transactionId"]
+    schema_hash, safe_hash = _reviewed_configuration_hash(
+        store, transaction_id, envelope
+    )
+    owner = "owner-" + "a" * 16
+    original_append = transactions._journal_append
+
+    def fail_append(*args, **kwargs):
+        raise transactions.TransactionError("injected-crash")
+
+    monkeypatch.setattr(transactions, "_journal_append", fail_append)
+    with pytest.raises(transactions.TransactionError, match="injected-crash"):
+        store.approve_configured_exact(
+            transaction_id, envelope["planHash"], safe_hash, schema_hash,
+            owner, APPROVED_AT, NOW,
+        )
+    monkeypatch.setattr(transactions, "_journal_append", original_append)
+
+    path = store._tx_dir / transaction_id / "approval.json"
+    assert path.exists()
+    with pytest.raises(transactions.IntegrityError, match="unexpected-approval"):
+        store.read(transaction_id)
+    with pytest.raises(transactions.ApprovalError) as caught:
+        store.approve_configured_exact(
+            transaction_id, envelope["planHash"], safe_hash, schema_hash,
+            "owner-" + "b" * 16,
+            "2026-09-11T13:00:00Z", "2026-09-11T13:00:00Z",
+        )
+    assert caught.value.code == "approval-conflict"
+    assert path.exists()
+    recovered = store.approve_configured_exact(
+        transaction_id, envelope["planHash"], safe_hash, schema_hash,
+        owner, "2026-09-11T13:00:00Z", "2026-09-11T13:00:00Z",
+    )
+    assert recovered["state"] == "approved"
+    assert store.read(transaction_id)["approval"]["approvedAt"] == APPROVED_AT
+
+
+def test_configured_exact_owner_approval_binds_opaque_custody(tmp_path):
+    store = transactions.TransactionStore(tmp_path / "transactions")
+    envelope = build_configured_envelope()
+    transaction_id = create(store, envelope)["transactionId"]
+    schema_hash = configuration.configuration_schema(
+        envelope, expected_plan_hash=envelope["planHash"]
+    )["schemaHash"]
+    store.begin_configuration_exact(
+        transaction_id, envelope["planHash"], schema_hash, "2" * 64,
+        {"ENDPOINT": "https://example.invalid/v1", "OFFSET": -1},
+        ["TOKEN"], [], CREATED_AT, NOW,
+    )
+    store.finish_configuration_exact(
+        transaction_id, envelope["planHash"], "2" * 64,
+        "secret-v1-" + "3" * 48,
+    )
+    schema_hash, safe_hash = _reviewed_configuration_hash(
+        store, transaction_id, envelope
+    )
+    owner = "owner-" + "a" * 16
+    store.approve_configured_exact(
+        transaction_id, envelope["planHash"], safe_hash, schema_hash,
+        owner, APPROVED_AT, NOW,
+    )
+    record = store.read(transaction_id)["configuration"]
+    approval = store.read(transaction_id)["approval"]
+    assert approval["privateConfigurationDigest"] == (
+        transactions.configuration_record_digest(record, schema_hash)
+    )
+    raw = (store._tx_dir / transaction_id / "approval.json").read_bytes()
+    assert b"secret-v1-" not in raw
+    assert b"https://example.invalid/v1" not in raw
+
+    path = store._tx_dir / transaction_id / "configuration.json"
+    altered = json.loads(path.read_text(encoding="utf-8"))
+    altered["secretReference"] = "secret-v1-" + "4" * 48
+    _write_private(path, altered)
+    with pytest.raises(transactions.IntegrityError) as caught:
+        store.read(transaction_id)
+    assert caught.value.code == "approval-v2-custody-mismatch"
+
+
+def test_owner_browser_route_uses_real_attested_store_and_redacts_status(
+    tmp_path, monkeypatch
+):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    import routers.extension_transactions as transaction_api
+    import security
+    import session_signer
+    from extension_transaction_configuration import TransactionConfigurationManager
+    from extension_transaction_runtime import TransactionRuntime
+
+    monkeypatch.setenv("ODS_ASSISTANT_TRANSACTIONS_ENABLED", "true")
+    monkeypatch.setattr(security, "DASHBOARD_API_KEY", "transaction-test-key")
+    session_signer._set_secret_for_tests("real-v2-approval-route-test-secret")
+    store = transactions.TransactionStore(tmp_path / "transactions")
+    envelope = build_envelope()
+    transaction_id = create(store, envelope)["transactionId"]
+    manager = TransactionConfigurationManager(store, None, lambda: NOW)
+    reviewed = manager.require_ready(transaction_id, envelope["planHash"])
+    cookie = session_signer.issue_scoped("owner", ttl_seconds=60)
+    owner_identity = session_signer.owner_approval_identity(cookie)
+    app = FastAPI()
+    app.include_router(transaction_api.router)
+    app.state.extension_transaction_runtime = TransactionRuntime(
+        store=store,
+        catalog=lambda: ([], CATALOG_REVISION),
+        observed_state=lambda: HOST_STATE,
+        policy=lambda: POLICY,
+        clock=lambda: NOW,
+        configuration=manager,
+    )
+
+    with TestClient(app) as client:
+        client.cookies.set("ods-session", cookie)
+        approved = client.post(
+            f"/api/extensions/transactions/{transaction_id}/approval",
+            json={
+                "planHash": envelope["planHash"],
+                "configurationHash": reviewed["configurationHash"],
+            },
+        )
+        assert approved.status_code == 200
+        assert approved.json()["state"] == "approved"
+        assert store.read(transaction_id)["approval"]["approvedBy"] == owner_identity
+        assert set(store.read(transaction_id)["approval"]) == (
+            transactions.APPROVAL_V2_KEYS
+        )
+
+        status = client.get(
+            f"/api/extensions/transactions/{transaction_id}",
+            headers={"Authorization": "Bearer transaction-test-key"},
+        )
+        assert status.status_code == 200
+        assert status.json()["approval"] == {
+            "approved": True,
+            "approvedAt": NOW,
+            "approvedBy": owner_identity,
+        }
+        assert "privateConfigurationDigest" not in status.text
+        assert "configurationHash" not in status.text

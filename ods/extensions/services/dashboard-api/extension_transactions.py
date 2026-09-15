@@ -2427,6 +2427,211 @@ class TransactionStore:
                 "noop": False,
             }
 
+    def approve_configured_exact(
+        self,
+        transaction_id,
+        expected_plan_hash,
+        expected_configuration_hash,
+        schema_hash,
+        approved_by,
+        approved_at,
+        current_time,
+    ):
+        """Approve one stored plan with an exact v2 configuration attestation.
+
+        v2 only: the current configuration schema is rederived from the
+        durable envelope, the safe owner-visible attestation hash is compared
+        against the configuration the owner reviewed (the current validated
+        record, or the empty attestation when none is stored), and the
+        immutable approval file carries the private configuration record
+        digest under owner-only custody.  Existing v1 approvals always
+        conflict; only an identical v2 owner/hash set may replay.
+        """
+        _validate_timestamp(approved_at)
+        _validate_timestamp(current_time)
+        if approved_at > current_time:
+            raise ApprovalError("future-approval")
+        if not isinstance(expected_plan_hash, str) or not HEX64_RE.fullmatch(
+            expected_plan_hash
+        ):
+            raise ApprovalError("invalid-plan-hash")
+        if not isinstance(expected_configuration_hash, str) or not HEX64_RE.fullmatch(
+            expected_configuration_hash
+        ):
+            raise ApprovalError("invalid-configuration-hash")
+        if not isinstance(schema_hash, str) or not HEX64_RE.fullmatch(schema_hash):
+            raise ApprovalError("invalid-schema-hash")
+        if (
+            not isinstance(approved_by, str)
+            or re.fullmatch(r"owner-[0-9a-f]{16}", approved_by) is None
+        ):
+            raise ApprovalError("invalid-owner-approval-identity")
+        try:
+            _validate_approver_id(approved_by)
+        except ValidationRejected as exc:
+            raise ApprovalError("invalid-approval-data", exc.code) from exc
+
+        with self._lock:
+            try:
+                loaded = self._read_transaction(
+                    transaction_id, allow_unjournaled_approval=True
+                )
+            except TransactionError as exc:
+                raise ApprovalError(exc.code, exc.detail) from exc
+            tx_dir = loaded["txDir"]
+            envelope = loaded["envelope"]
+            binding = loaded["binding"]
+            records = loaded["journal"]
+            configuration = loaded["configuration"]
+            if envelope["planHash"] != expected_plan_hash:
+                raise ApprovalError("plan-hash-mismatch")
+            if not current_time < envelope["plan"]["validUntil"]:
+                raise ApprovalError("approval-expired")
+            if _plan_requires_configuration(envelope) and configuration is None:
+                raise ApprovalError("missing-configuration")
+
+            # Rederive the current configuration schema (lazy) and compare the
+            # safe attestation hash for the current validated record, or the
+            # empty attestation when no validated record exists.
+            from extension_configuration import (
+                configuration_schema,
+                ExtensionConfigurationError,
+            )
+
+            try:
+                schema = configuration_schema(
+                    envelope, expected_plan_hash=envelope["planHash"]
+                )
+            except ExtensionConfigurationError:
+                raise IntegrityError("approval-v2-schema-invalid")
+            derived_schema_hash = schema["schemaHash"]
+            if derived_schema_hash != schema_hash:
+                raise ApprovalError("schema-hash-mismatch")
+            if configuration is not None and configuration["schemaHash"] != derived_schema_hash:
+                raise IntegrityError("approval-v2-schema-mismatch")
+            if configuration is not None:
+                attestation_hash = configuration_attestation_hash(
+                    transaction_id,
+                    envelope["planHash"],
+                    derived_schema_hash,
+                    True,
+                    configuration["values"],
+                    configuration["presentConfigKeys"],
+                    configuration["presentSecretKeys"],
+                    configuration["appliedDefaultKeys"],
+                )
+                private_digest = configuration_record_digest(
+                    configuration, derived_schema_hash
+                )
+            else:
+                attestation_hash = configuration_attestation_hash(
+                    transaction_id,
+                    envelope["planHash"],
+                    derived_schema_hash,
+                    False,
+                    {},
+                    [],
+                    [],
+                    [],
+                )
+                private_digest = configuration_record_digest(
+                    None, derived_schema_hash
+                )
+            if attestation_hash != expected_configuration_hash:
+                raise ApprovalError("configuration-hash-mismatch")
+
+            current_state = loaded["state"]
+            if current_state == "approved":
+                approval = loaded["approval"]
+                if (
+                    set(approval) == APPROVAL_V2_KEYS
+                    and approval["approvedBy"] == approved_by
+                    and approval["configurationHash"] == expected_configuration_hash
+                    and approval["configurationSchemaHash"] == schema_hash
+                    and approval["privateConfigurationDigest"] == private_digest
+                ):
+                    return {
+                        "transactionId": transaction_id,
+                        "state": "approved",
+                        "sequence": len(records),
+                        "noop": True,
+                    }
+                raise ApprovalError("approval-conflict")
+            if current_state != "awaiting_approval":
+                raise ApprovalError("wrong-state", current_state)
+
+            approval_path = tx_dir / "approval.json"
+            if loaded["approval"] is not None:
+                # Crash replay: the approval file exists but was not journaled.
+                # Only an identical v2 owner/hash set may replay it; a stored
+                # v1 record always conflicts.
+                existing = loaded["approval"]
+                if set(existing) != APPROVAL_V2_KEYS:
+                    raise ApprovalError("approval-conflict")
+                if (
+                    existing["approvedBy"] != approved_by
+                    or existing["configurationHash"] != expected_configuration_hash
+                    or existing["configurationSchemaHash"] != schema_hash
+                    or existing["privateConfigurationDigest"] != private_digest
+                ):
+                    raise ApprovalError("approval-conflict")
+                approval_record = existing
+            else:
+                approval_record = {
+                    "actor": binding["actor"],
+                    "approvedAt": approved_at,
+                    "approvedBy": approved_by,
+                    "catalogRevision": envelope["catalogRevision"],
+                    "configurationHash": attestation_hash,
+                    "configurationSchemaHash": derived_schema_hash,
+                    "idempotencyKey": binding["idempotencyKey"],
+                    "observedStateRevision": envelope["observedStateRevision"],
+                    "planHash": envelope["planHash"],
+                    "policyRevision": envelope["policyRevision"],
+                    "privateConfigurationDigest": private_digest,
+                    "transactionId": transaction_id,
+                    "validUntil": envelope["plan"]["validUntil"],
+                }
+                if not binding["createdAt"] <= approved_at:
+                    raise ApprovalError("approval-before-transaction")
+                if not approved_at < approval_record["validUntil"]:
+                    raise ApprovalError("approval-expired")
+                if not current_time < approval_record["validUntil"]:
+                    raise ApprovalError("approval-expired")
+                _write_immutable(
+                    approval_path,
+                    canonical_json_bytes(approval_record),
+                    0o600,
+                )
+                if (
+                    self._load_approval(
+                        tx_dir, transaction_id, envelope, binding, configuration
+                    )
+                    != approval_record
+                ):
+                    raise IntegrityError("approval-write-verify-failed")
+
+            next_seq = len(records) + 1
+            line = _journal_entry(
+                transaction_id,
+                next_seq,
+                "approved",
+                envelope["planHash"],
+                approval_record["approvedAt"],
+                binding["actor"],
+            )
+            _journal_append(
+                tx_dir / "journal.jsonl",
+                line,
+                expected_actor=binding["actor"],
+            )
+            return {
+                "transactionId": transaction_id,
+                "state": "approved",
+                "sequence": next_seq,
+                "noop": False,
+            }
+
     def read(self, transaction_id):
         with self._lock:
             loaded = self._read_transaction(transaction_id)
