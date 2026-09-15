@@ -1012,13 +1012,14 @@ def test_update_binds_installed_v2_prior_data_separately_from_new_definition() -
     assert result["planHash"] != changed_plan["planHash"]
 
 
-def test_prior_data_scope_rejects_unbound_or_unsafe_records() -> None:
+@pytest.mark.parametrize("unsafe_path", ["../private", "data//app", "data/./app", "data/app/"])
+def test_prior_data_scope_rejects_unbound_or_unsafe_records(unsafe_path: str) -> None:
     state = copy.deepcopy(HOST_STATE)
     state["installedServices"] = [{
         "id": "app", "version": "1.1.0", "definitionSha256": "sha256:" + "c" * 64,
         "status": "enabled", "manifestSchemaVersion": "ods.services.v2",
         "dataSchemaVersion": "1", "data": [{
-            "path": "../private", "backupClass": "required", "owner": "user",
+            "path": unsafe_path, "backupClass": "required", "owner": "user",
             "uninstall": "preserve", "purge": "separate-approval",
         }],
     }]

@@ -385,7 +385,11 @@ def _device(value: Any, field: str) -> str:
 
 def _relative_path(value: Any, field: str, maximum: int) -> str:
     result = _text(value, field, maximum=maximum)
-    if result.startswith("/") or ".." in result or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]*", result) is None:
+    if (
+        result.startswith("/") or ".." in result
+        or any(part in {"", ".", ".."} for part in result.split("/"))
+        or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]*", result) is None
+    ):
         _fail("invalid-relative-path", field=field)
     return result
 

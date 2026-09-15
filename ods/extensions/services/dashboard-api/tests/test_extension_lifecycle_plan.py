@@ -335,7 +335,7 @@ def test_host_binding_preserves_approved_prior_v2_data_scope_and_rejects_drift()
     assert prior.service_id == "documents"
     assert prior.definition_sha256 == "sha256:" + "a" * 64
     assert prior.paths[0].path == "data/documents-prior"
-    for changed_path in ("../private", "data/documents-prior/../private"):
+    for changed_path in ("../private", "data/documents-prior/../private", "data//documents", "data/./documents"):
         altered = transaction("downloading")
         altered["envelope"]["plan"] = json.loads(json.dumps(stored["envelope"]["plan"]))
         altered["envelope"]["plan"]["priorDataBindings"][0]["paths"][0]["path"] = changed_path

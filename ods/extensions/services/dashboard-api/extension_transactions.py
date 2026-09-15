@@ -633,6 +633,7 @@ def _validate_inner_plan(plan):
             if (
                 not isinstance(value, str) or not 0 < len(value) <= 256
                 or value.startswith("/") or ".." in value
+                or any(part in {"", ".", ".."} for part in value.split("/"))
                 or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]*", value) is None
                 or (previous is not None and value <= previous)
                 or not isinstance(path["backupClass"], str)

@@ -417,6 +417,7 @@ def _prior_data_bindings(
             path = _text(path_item["path"], maximum=256)
             if (
                 path.startswith("/") or ".." in path
+                or any(part in {"", ".", ".."} for part in path.split("/"))
                 or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]*", path) is None
                 or (previous_path is not None and path <= previous_path)
                 or not isinstance(path_item["backupClass"], str)
