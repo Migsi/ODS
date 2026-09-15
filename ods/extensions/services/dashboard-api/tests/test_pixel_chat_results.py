@@ -225,6 +225,42 @@ def test_terminal_upstream_error_is_replayable_but_never_complete(store, monkeyp
     asyncio.run(run())
 
 
+def test_edge_abort_ack_survives_empty_done_during_cancel_round_trip(store, monkeypatch):
+    """A real Edge abort can race its empty DONE through the retained producer."""
+    async def run():
+        started = asyncio.Event()
+        release_done = asyncio.Event()
+        cancel_entered = asyncio.Event()
+
+        class Upstream(FakeResponse):
+            async def aiter_bytes(self):
+                started.set()
+                await release_done.wait()
+                yield b"data: [DONE]\n\n"
+
+        monkeypatch.setattr(pixel.httpx, "AsyncClient", lambda **kw: FakeClient(
+            Upstream(content_type="text/event-stream")))
+
+        async def cancel(*args):
+            cancel_entered.set()
+            release_done.set()
+            await asyncio.gather(*list(pixel._result_tasks.values()))
+            return True
+
+        monkeypatch.setattr(pixel, "_cancel_edge_run", cancel)
+        await pixel.pixel_chat_stream(ConnectedRequest(), body(), OWNER)
+        await started.wait()
+        stop = asyncio.create_task(pixel.pixel_chat_cancel(
+            pixel.ChatCancelRequest(chat_id="chat-test", request_id="attempt-one"), OWNER))
+        await cancel_entered.wait()
+        assert await stop == {"aborted": True}
+        assert store.get(IDENTITY)["state"] == "interrupted"
+        assert b"Pixel returned no answer" in b"".join(
+            row["data"] for row in store.chunks(IDENTITY))
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("chunks", [
     [b"data: [DONE]\n\n"],
     [b'data: {"choices":[{"delta":{"role":"assistant"}}]}\n\n', b"data: [DONE]\n\n"],
