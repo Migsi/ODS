@@ -2394,7 +2394,7 @@ assert "pixel\" verify >>\"$pixel_log\"" in text
 assert "if ! _ods_pixel_install_ingress" in text
 assert "systemctl restart pixel-ingress.service" in text
 assert "RestartForceExitStatus --value" in text
-assert chr(34) + "$restart_force" + chr(34) + " == *SIGHUP*" in text
+assert chr(34) + "$restart_force" + chr(34) + " =~ (^|[[:space:]])HUP($|[[:space:]])" in text
 assert "if ! _ods_pixel_mark_verified_installing" in text
 assert text.index("_ods_pixel_mark_verified_installing \"$owner\"") < text.index("_ods_pixel_install_ingress \"$owner\"")
 assert "if ! _ods_pixel_mark_ready" in text

@@ -4351,7 +4351,8 @@ _ods_pixel_restart_ingress_and_verify() {
         owner_uid="$(id -u "$owner" 2>/dev/null || true)"
         process_uid="$(awk '/^Uid:/ { print $2; exit }' "/proc/${previous_pid}/status" 2>/dev/null || true)"
         [[ "$(id -un)" == "$owner" && "$unit_user" == "$owner" \
-            && "$restart_policy" == "on-failure" && "$restart_force" == *SIGHUP* \
+            && "$restart_policy" == "on-failure" \
+            && "$restart_force" =~ (^|[[:space:]])HUP($|[[:space:]]) \
             && "$owner_uid" =~ ^[0-9]+$ \
             && "$process_uid" == "$owner_uid" ]] || return 1
         current_pid="$(systemctl show pixel-ingress.service -p MainPID --value 2>/dev/null || true)"
