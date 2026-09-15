@@ -932,8 +932,8 @@ def test_host_plan_loader_reads_exact_transaction_and_passes_only_store_result(
             calls.append(("read", transaction_id))
             return stored
 
-    def bind(value, transaction):
-        calls.append(("bind", value, transaction))
+    def bind(value, transaction, *, require_attested_approval=False):
+        calls.append(("bind", value, transaction, require_attested_approval))
         return replace(value, plan_material={"approved": True})
 
     agent._get_extension_transaction_store = Store
@@ -945,8 +945,55 @@ def test_host_plan_loader_reads_exact_transaction_and_passes_only_store_result(
     assert bound.plan_material == {"approved": True}
     assert calls == [
         ("read", TRANSACTION_ID),
-        ("bind", command, stored),
+        ("bind", command, stored, False),
     ]
+
+
+@pytest.mark.parametrize(
+    "operation_key,service_id,payload,strict",
+    [
+        (
+            "download-and-verify",
+            "documents",
+            {"operations": [{"serviceId": "documents", "action": "install"}]},
+            True,
+        ),
+        (
+            "download-and-verify",
+            "searxng",
+            {"operations": [{"serviceId": "searxng", "action": "install"}]},
+            False,
+        ),
+        ("verify", "documents", {"serviceIds": ["documents"]}, False),
+    ],
+)
+def test_host_plan_loader_requires_v2_attestation_for_non_canary_images(
+    host_server, operation_key, service_id, payload, strict
+):
+    agent, _listener = host_server
+    request = work_request(
+        agent._extension_lifecycle_work.REQUEST_SCHEMA,
+        operation_key=operation_key,
+        service_ids=[service_id],
+        payload=payload,
+    )
+    command = agent._extension_lifecycle_work.parse_lifecycle_work_request(request)
+    seen = []
+    stored = {"transactionId": TRANSACTION_ID}
+    agent._get_extension_transaction_store = lambda: SimpleNamespace(
+        read=lambda _transaction_id: stored
+    )
+    agent._extension_lifecycle_plan = SimpleNamespace(
+        bind_lifecycle_plan=lambda value, transaction, *,
+        require_attested_approval: seen.append(
+            (value, transaction, require_attested_approval)
+        ) or replace(value, plan_material={"approved": True})
+    )
+
+    bound = agent._load_extension_lifecycle_plan(command)
+
+    assert bound.plan_material == {"approved": True}
+    assert seen == [(command, stored, strict)]
 
 
 def test_host_plan_loader_maps_store_integrity_failure_without_private_detail(
