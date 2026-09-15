@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from typing import Any
 
 from assistant_first_secret_client import SecretCustodyError
@@ -12,6 +13,7 @@ from extension_configuration import (
     validate_stored_configuration,
 )
 from extension_transactions import (
+    canonical_json_bytes,
     IntegrityError,
     TransitionError,
     ValidationRejected,
@@ -189,7 +191,48 @@ class TransactionConfigurationManager:
             "presentConfigKeys": [],
             "presentSecretKeys": [],
             "appliedDefaultKeys": [],
+            "configurationHash": TransactionConfigurationManager._configuration_hash(
+                transaction_id,
+                plan_hash,
+                schema["schemaHash"],
+                False,
+                {},
+                [],
+                [],
+                [],
+            ),
         }
+
+    @staticmethod
+    def _configuration_hash(
+        transaction_id: str,
+        plan_hash: str,
+        schema_hash: str,
+        configured: bool,
+        values: dict[str, Any],
+        present_config_keys: list[str],
+        present_secret_keys: list[str],
+        applied_default_keys: list[str],
+    ) -> str:
+        """Compute a SHA-256 digest over a domain-separated canonical JSON preimage.
+
+        Preimage contains ONLY the listed nonsecret fields; secretReference,
+        secretValues, idempotencyKey, timestamps, owner identity, and fields
+        are deliberately excluded.
+        """
+        preimage = {
+            "schema": "ods.assistant-first.configuration-attestation.v1",
+            "transactionId": transaction_id,
+            "planHash": plan_hash,
+            "schemaHash": schema_hash,
+            "configured": configured,
+            "values": values,
+            "presentConfigKeys": present_config_keys,
+            "presentSecretKeys": present_secret_keys,
+            "appliedDefaultKeys": applied_default_keys,
+        }
+        raw = canonical_json_bytes(preimage)
+        return hashlib.sha256(raw).hexdigest()
 
     @staticmethod
     def _schema(
@@ -249,6 +292,16 @@ class TransactionConfigurationManager:
             "presentConfigKeys": list(record["presentConfigKeys"]),
             "presentSecretKeys": list(record["presentSecretKeys"]),
             "appliedDefaultKeys": list(record["appliedDefaultKeys"]),
+            "configurationHash": TransactionConfigurationManager._configuration_hash(
+                record["transactionId"],
+                record["planHash"],
+                record["schemaHash"],
+                True,
+                dict(record["values"]),
+                list(record["presentConfigKeys"]),
+                list(record["presentSecretKeys"]),
+                list(record["appliedDefaultKeys"]),
+            ),
         }
         if duplicate is not None:
             result["duplicate"] = duplicate
