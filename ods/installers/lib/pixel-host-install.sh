@@ -2396,7 +2396,7 @@ _ods_pixel_install_access_service() {
     # This coordinator is privileged. Never run or import its implementation
     # from the owner's mutable checkout, even when the host agent is unprivileged.
     ods_sudo python3 - "${INSTALL_DIR:?}" "$owner" "$openclaw_bin" "$gateway_port" <<'PY'
-import fcntl, json, os, pathlib, pwd, socket, stat, subprocess, sys, tempfile, time
+import fcntl, json, os, pathlib, pwd, shlex, socket, stat, subprocess, sys, tempfile, time
 source = pathlib.Path(sys.argv[1])
 owner = pwd.getpwnam(sys.argv[2])
 if owner.pw_uid == 0:
@@ -2472,6 +2472,18 @@ except (TypeError, ValueError):
     raise SystemExit("The installed Pixel gateway port is invalid") from None
 if not 1 <= gateway_port <= 65535 or str(gateway_port) != sys.argv[4]:
     raise SystemExit("The installed Pixel gateway port is invalid")
+unit_owner = subprocess.check_output(['systemctl', 'show', 'openclaw-gateway.service',
+                                      '--property=User', '--value'], text=True).strip()
+unit_start = subprocess.check_output(['systemctl', 'show', 'openclaw-gateway.service',
+                                      '--property=ExecStart', '--value'], text=True).strip()
+if unit_owner != owner.pw_name or unit_start.count('argv[]=') != 1:
+    raise SystemExit("The installed Pixel gateway unit does not match its owner")
+command = unit_start.split('argv[]=', 1)[1].split(' ; ignore_errors=', 1)[0]
+arguments = shlex.split(command)
+if (len(arguments) < 2 or arguments[0] != str(binary) or arguments[1] != 'gateway'
+        or arguments.count('--port') != 1
+        or arguments[arguments.index('--port') + 1:arguments.index('--port') + 2] != [str(gateway_port)]):
+    raise SystemExit("The installed Pixel gateway unit port differs from onboarding")
 sys.path.insert(0, str(target))  # Import only the freshly root-protected bundle.
 from pixel_settings.runtime import settings_data_directory
 settings_data_dir = settings_data_directory(source.resolve(), (source / '.env').read_text(encoding='utf-8'))

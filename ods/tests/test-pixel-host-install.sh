@@ -2420,6 +2420,7 @@ assert "(( preview_port != gateway_port )) || return 1" in text
 assert "\"http://127.0.0.1:${pixel_gateway_port}/health\"" in text
 assert installer.index("_ods_pixel_existing_gateway_port_matches") < installer.index("_ods_pixel_prepare_attempt_log")
 assert "_ods_pixel_installed_gateway_port" in text[text.index("_ods_pixel_install_access_service() {"):]
+assert "The installed Pixel gateway unit port differs from onboarding" in text
 assert "PIXEL_ODS_VERSION=$ods_version" in text
 assert "PIXEL_ODS_N8N_PORT=${N8N_PORT:-5678}" in text
 assert "PIXEL_ODS_WHISPER_PORT=${WHISPER_PORT:-9000}" in text
