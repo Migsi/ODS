@@ -210,3 +210,32 @@ def test_missing_generic_backup_runtime_cannot_fall_back_to_injected_dispatcher(
     assert result == {"error": {"code": "lifecycle-work-dispatcher-unavailable"}}
     assert calls == []
     assert list((agent.DATA_DIR / "assistant-first" / "data-backups").iterdir()) == []
+
+
+@linux_effect
+@pytest.mark.parametrize("case", ["unapproved", "caller-path"])
+def test_host_generic_backup_refuses_missing_approval_or_caller_path_scope(
+    host_server, host_request, case,
+):
+    agent, _listener = host_server
+    _host_ready(agent)
+    if case == "unapproved":
+        _fixture_plan(agent, generic_command(
+            actions=("install", "install"),
+            selected_paths=(["data/alpha"], ["data/beta"]),
+            prior_paths=[], attested=False,
+        ))
+    grant = acquire_lease(agent, host_request, ["alpha", "beta"])
+    payload = {"serviceIds": ["alpha", "beta"]}
+    if case == "caller-path":
+        payload["paths"] = ["data/someone-else"]
+    request = work_request(
+        agent._extension_lifecycle_work.REQUEST_SCHEMA,
+        lease_evidence(agent, grant), operation_key="backup",
+        service_ids=["alpha", "beta"], payload=payload,
+    )
+    begin_receipt(agent, host_request, request)
+    status, result = host_request("/v1/extension/lifecycle-work", request)
+    assert status == 409
+    assert result == {"error": {"code": "lifecycle-work-receipt-mismatch"}}
+    assert list((agent.DATA_DIR / "assistant-first" / "data-backups").iterdir()) == []

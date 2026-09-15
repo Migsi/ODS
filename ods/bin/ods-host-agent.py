@@ -249,10 +249,10 @@ _resource_reservation_runtime_lock = threading.Lock()
 
 # General production lifecycle dispatch remains deliberately unwired.  The
 # exact ``download-and-verify`` canary, paired ``backup``/``restore`` canary,
-# ``configure`` canary, ``stage``, ``reserve:<serviceId>``, and ``release``
-# operations select fixed host-owned runtimes after lease admission; every
-# other operation remains unavailable. Tests may inject a callable for the
-# still-dormant operation contracts.
+# receipted generic ``backup`` only, ``configure`` canary, ``stage``,
+# ``reserve:<serviceId>``, and ``release`` select fixed host-owned runtimes
+# after lease admission. Generic restore/apply/verify remain unavailable.
+# Tests may inject a callable for the still-dormant operation contracts.
 _extension_lifecycle_work_dispatcher = None
 
 _MODEL_MEMORY_PATH = (
