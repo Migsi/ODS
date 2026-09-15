@@ -285,6 +285,11 @@ fi
 # 2. Stop and remove host service definitions
 log_info "Removing systemd user services..."
 SYSTEMD_USER_DIR="$HOME/.config/systemd/user"
+# Phase 11 may use a transient user service so a large model download survives
+# a non-interactive SSH installer.  It has no unit file in SYSTEMD_USER_DIR,
+# therefore stop it explicitly before deleting its install tree.
+systemctl --user stop ods-model-upgrade.service 2>/dev/null || true
+systemctl --user reset-failed ods-model-upgrade.service 2>/dev/null || true
 for unit in opencode-web.service openclaw-session-cleanup.timer \
             memory-shepherd-workspace.timer memory-shepherd-memory.timer \
             openclaw-session-cleanup.service \

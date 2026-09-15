@@ -1395,18 +1395,54 @@ MODELS_INI_EOF
             warn "Could not persist bootstrap-upgrade retry metadata"
         chmod 600 "$_bootstrap_upgrade_args" 2>/dev/null || true
 
-        # Start the long-lived downloader from a child shell that closes inherited
-        # non-stdio FDs first. Otherwise caller-owned advisory locks (FD 9, FD
-        # 200, etc.) can stay held until the model download exits.
-        (
-            _phase11_close_inherited_fds_for_daemon
-            exec nohup bash "$SCRIPT_DIR/scripts/bootstrap-upgrade.sh" \
-                "$INSTALL_DIR" "$FULL_GGUF_FILE" "$FULL_GGUF_URL" \
-                "$FULL_GGUF_SHA256" "$FULL_LLM_MODEL" "$FULL_MAX_CONTEXT" \
-                "$BOOTSTRAP_GGUF_FILE" \
-                > "$INSTALL_DIR/logs/model-upgrade.log" 2>&1
-        ) &
-        _upgrade_pid=$!
+        # An SSH or other service-scoped installer can have its whole login
+        # cgroup reaped as soon as the foreground install exits.  nohup only
+        # ignores SIGHUP; it does not move the downloader out of that cgroup.
+        # Prefer a transient user service so the promised background upgrade
+        # survives non-interactive installs.  Keep the portable nohup fallback
+        # for hosts without a reachable systemd user manager.
+        _upgrade_unit=ods-model-upgrade.service
+        _upgrade_log="$INSTALL_DIR/logs/model-upgrade.log"
+        _upgrade_pid=""
+        _upgrade_systemd_started=false
+        if command -v systemd-run >/dev/null 2>&1 \
+            && systemctl --user show-environment >/dev/null 2>&1; then
+            systemctl --user stop "$_upgrade_unit" >/dev/null 2>&1 || true
+            systemctl --user reset-failed "$_upgrade_unit" >/dev/null 2>&1 || true
+            if systemd-run --user --unit="${_upgrade_unit%.service}" --collect --no-block \
+                --property=Type=exec \
+                --property="StandardOutput=append:$_upgrade_log" \
+                --property="StandardError=append:$_upgrade_log" \
+                bash "$SCRIPT_DIR/scripts/bootstrap-upgrade.sh" \
+                    "$INSTALL_DIR" "$FULL_GGUF_FILE" "$FULL_GGUF_URL" \
+                    "$FULL_GGUF_SHA256" "$FULL_LLM_MODEL" "$FULL_MAX_CONTEXT" \
+                    "$BOOTSTRAP_GGUF_FILE" >/dev/null; then
+                _upgrade_systemd_started=true
+                for _ in {1..50}; do
+                    _upgrade_pid="$(systemctl --user show "$_upgrade_unit" \
+                        --property=MainPID --value 2>/dev/null || true)"
+                    [[ "$_upgrade_pid" =~ ^[1-9][0-9]*$ ]] && break
+                    sleep 0.1
+                done
+            fi
+        fi
+        if [[ ! "$_upgrade_pid" =~ ^[1-9][0-9]*$ ]]; then
+            if [[ "$_upgrade_systemd_started" == true ]]; then
+                systemctl --user stop "$_upgrade_unit" >/dev/null 2>&1 || true
+            fi
+            # Start the portable daemon from a child shell that closes inherited
+            # non-stdio FDs first. Otherwise caller-owned advisory locks (FD 9,
+            # FD 200, etc.) can stay held until the model download exits.
+            (
+                _phase11_close_inherited_fds_for_daemon
+                exec nohup bash "$SCRIPT_DIR/scripts/bootstrap-upgrade.sh" \
+                    "$INSTALL_DIR" "$FULL_GGUF_FILE" "$FULL_GGUF_URL" \
+                    "$FULL_GGUF_SHA256" "$FULL_LLM_MODEL" "$FULL_MAX_CONTEXT" \
+                    "$BOOTSTRAP_GGUF_FILE" \
+                    > "$_upgrade_log" 2>&1
+            ) &
+            _upgrade_pid=$!
+        fi
 
         if command -v bg_task_start &>/dev/null; then
             bg_task_start "full-model-download" "$_upgrade_pid" \
