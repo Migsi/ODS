@@ -53,6 +53,8 @@ def _roots(tmp_path: Path) -> tuple[Path, Path, Path]:
     builtin = install / "extensions" / "services" / "beta"
     builtin.mkdir(parents=True)
     data.mkdir()
+    for directory in (install, install / "extensions", install / "extensions" / "services", builtin, data):
+        directory.chmod(0o700)
     return install, data, builtin
 
 
@@ -60,6 +62,11 @@ def _rejected(bound, install: Path, data: Path) -> None:
     with pytest.raises(LifecycleWorkValidationError) as caught:
         effect.verify_installed_prior_data(bound, install_dir=install, data_dir=data)
     assert caught.value.code == "lifecycle-work-prior-data-drift"
+
+
+def _write_manifest(path: Path, raw: bytes) -> None:
+    path.write_bytes(raw)
+    path.chmod(0o600)
 
 
 def test_prior_document_digest_and_old_records_match_exact_binding():
@@ -73,7 +80,7 @@ def test_prior_document_digest_and_old_records_match_exact_binding():
 @linux_effect
 def test_actual_installed_prior_manifest_matches_approved_old_scope(tmp_path: Path):
     install, data, builtin = _roots(tmp_path)
-    (builtin / "manifest.yaml").write_bytes(PRIOR_MANIFEST)
+    _write_manifest(builtin / "manifest.yaml", PRIOR_MANIFEST)
     assert effect.verify_installed_prior_data(
         _bound(), install_dir=install, data_dir=data
     ) == (("beta", canonical_document_sha256(PRIOR_MANIFEST)),)
@@ -82,17 +89,19 @@ def test_actual_installed_prior_manifest_matches_approved_old_scope(tmp_path: Pa
 @linux_effect
 def test_manifest_changes_after_approval_are_not_catalog_substituted(tmp_path: Path):
     install, data, builtin = _roots(tmp_path)
-    (builtin / "manifest.yaml").write_bytes(PRIOR_MANIFEST.replace(b"data/old", b"data/new"))
+    _write_manifest(builtin / "manifest.yaml", PRIOR_MANIFEST.replace(b"data/old", b"data/new"))
     _rejected(_bound(), install, data)
 
 
 @linux_effect
 def test_ambiguous_user_and_builtin_roots_are_rejected(tmp_path: Path):
     install, data, builtin = _roots(tmp_path)
-    (builtin / "manifest.yaml").write_bytes(PRIOR_MANIFEST)
+    _write_manifest(builtin / "manifest.yaml", PRIOR_MANIFEST)
     user = data / "user-extensions" / "beta"
     user.mkdir(parents=True)
-    (user / "manifest.yaml").write_bytes(PRIOR_MANIFEST)
+    (data / "user-extensions").chmod(0o700)
+    user.chmod(0o700)
+    _write_manifest(user / "manifest.yaml", PRIOR_MANIFEST)
     _rejected(_bound(), install, data)
 
 
@@ -108,6 +117,6 @@ def test_manifest_symlink_and_special_file_are_rejected(tmp_path: Path):
 @linux_effect
 def test_restore_does_not_recheck_manifest_already_replaced_by_update(tmp_path: Path):
     install, data, builtin = _roots(tmp_path)
-    (builtin / "manifest.yaml").write_bytes(PRIOR_MANIFEST)
+    _write_manifest(builtin / "manifest.yaml", PRIOR_MANIFEST)
     rejected = replace(_bound(), operation_key="restore")
     _rejected(rejected, install, data)
