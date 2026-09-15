@@ -507,6 +507,9 @@ class ExtensionManagerTests(unittest.TestCase):
         mutate.assert_called_once()
         wait.assert_called_once()
         progress.assert_called_once()
+        self.assertEqual(
+            wait.call_args.kwargs["deadline"], progress.call_args.kwargs["deadline"]
+        )
         self.assertEqual(result["outcome"], "succeeded")
         self.assertTrue(result["changed"])
         self.assertTrue(result["externalEffectOccurred"])
@@ -641,6 +644,52 @@ class ExtensionManagerTests(unittest.TestCase):
         self.assertEqual(phase, "pulling")
         self.assertEqual(progress.call_count, 2)
         self.assertEqual(sleep.call_count, 2)
+
+    def test_one_click_progress_wait_tolerates_only_transient_read_failures(self) -> None:
+        with (
+            mock.patch.object(
+                manager, "_install_progress_status",
+                side_effect=[manager.ManagerError("temporary"), "starting", "started"],
+            ) as progress,
+            mock.patch.object(manager.time, "sleep") as sleep,
+        ):
+            phase = manager._wait_for_install_progress(
+                port=3002, credential="a" * 64, extension_id="crewai",
+                deadline=manager.time.monotonic() + 30,
+            )
+        self.assertEqual(phase, "started")
+        self.assertEqual(progress.call_count, 3)
+        self.assertEqual(sleep.call_count, 2)
+
+        with (
+            mock.patch.object(
+                manager, "_install_progress_status",
+                side_effect=manager.ManagerError("persistent"),
+            ) as progress,
+            mock.patch.object(manager.time, "sleep"),
+        ):
+            with self.assertRaises(manager.ManagerError):
+                manager._wait_for_install_progress(
+                    port=3002, credential="a" * 64, extension_id="crewai",
+                    deadline=manager.time.monotonic() + 30,
+                )
+        self.assertEqual(progress.call_count, 3)
+
+    def test_one_click_rechecks_the_library_receipt_after_host_completion(self) -> None:
+        untracked = {**detail("enabled"), "update_status": "untracked"}
+        with (
+            mock.patch.object(
+                manager, "_detail",
+                side_effect=[detail("not_installed"), detail("enabled"), untracked, untracked],
+            ),
+            mock.patch.object(manager, "_mutate"),
+            mock.patch.object(manager, "_wait_for_status", return_value="enabled"),
+            mock.patch.object(manager, "_wait_for_install_progress", return_value="started"),
+        ):
+            result = self.execute("install")
+        self.assertEqual(result["outcome"], "failed")
+        self.assertEqual(result["currentStatus"], "enabled")
+        self.assertFalse(result["rollback"]["attempted"])
 
     def test_unhealthy_one_click_install_is_not_claimed_or_removed(self) -> None:
         with (

@@ -697,7 +697,7 @@ def _install_progress_status(port: int, credential: str, extension_id: str) -> s
         credential=credential,
         method="GET",
         path=f"/api/extensions/{encoded}/progress",
-        timeout=20,
+        timeout=5,
     )
     phase = value.get("status")
     if (
@@ -723,8 +723,17 @@ def _wait_for_install_progress(
     """Never turn a copied library definition into a claimed completed job."""
 
     last_phase = "idle"
+    unavailable_reads = 0
     while time.monotonic() < deadline:
-        last_phase = _install_progress_status(port, credential, extension_id)
+        try:
+            last_phase = _install_progress_status(port, credential, extension_id)
+        except ManagerError:
+            unavailable_reads += 1
+            if unavailable_reads >= 3:
+                raise
+            time.sleep(1.0)
+            continue
+        unavailable_reads = 0
         if last_phase in TERMINAL_PROGRESS:
             return last_phase
         time.sleep(1.0)
@@ -846,6 +855,7 @@ def _execute(
 
     current_status = previous_status
     install_accepted = False
+    install_deadline: float | None = None
     try:
         if action == "remove" and previous_status in {"enabled", "cli_installed"}:
             _mutate(
@@ -875,12 +885,13 @@ def _execute(
             # A failed or ambiguous POST may have copied owner files without
             # starting the host job; old per-service progress is not proof.
             install_accepted = True
+            install_deadline = time.monotonic() + 600
         current_status = _wait_for_status(
             port=port,
             credential=credential,
             extension_id=extension_id,
             expected=SUCCESS_STATUS[action],
-            deadline=time.monotonic() + (600 if action == "install" else 120),
+            deadline=install_deadline if install_deadline is not None else time.monotonic() + 120,
         )
     except ManagerError:
         # A timeout or unavailable response can happen after the internal API
@@ -915,11 +926,15 @@ def _execute(
                     port=port,
                     credential=credential,
                     extension_id=extension_id,
-                    deadline=time.monotonic() + 30,
+                    deadline=install_deadline if install_deadline is not None else time.monotonic(),
                 ) == "started"
                 if landed_receipt:
-                    current_status = _bounded_status(
-                        _detail(port, credential, extension_id).get("status")
+                    landed = _detail(port, credential, extension_id)
+                    current_status = _bounded_status(landed.get("status"))
+                    landed_receipt = (
+                        landed.get("source") == "user"
+                        and landed.get("update_status")
+                        in {"current", "modified", "available"}
                     )
             except ManagerError:
                 landed_receipt = False
