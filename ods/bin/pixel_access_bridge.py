@@ -473,7 +473,8 @@ class SystemdAccessBridge:
                             failure = protocol.decode_frame(raw.decode("utf-8") + "\n", 65537).get("error")
                         except (AttributeError, ValueError, UnicodeError):
                             failure = None
-                        if failure in RUNTIME_TRANSITION_FAILURES: raise AccessError(failure)
+                        if isinstance(failure, str) and failure in RUNTIME_TRANSITION_FAILURES:
+                            raise AccessError(failure)
                     raise AccessError("runtime-unavailable-or-busy")
             if expired.is_set() or time.monotonic() >= deadline:
                 raise AccessError("runtime-operation-timeout")

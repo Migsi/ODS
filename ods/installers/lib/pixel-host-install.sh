@@ -25,15 +25,13 @@ _ods_pixel_gateway_port() {
 # Its same-release reconciliation transaction can update model/runtime JSON,
 # but it cannot safely replace that unit. Refuse a port change before the ODS
 # installer writes a new onboarding contract or marks the deployment installing.
-_ods_pixel_existing_gateway_port_matches() {
-    local owner="$1" home="$2" requested="$3" installed_answers existing
-    [[ "$requested" =~ ^[1-9][0-9]{0,4}$ ]] || return 1
-    (( 10#$requested <= 65535 )) || return 1
+_ods_pixel_installed_gateway_port() {
+    local owner="$1" home="$2" installed_answers
     installed_answers="$home/.config/pixel-deployment/onboarding.json"
     if [[ ! -e "$installed_answers" && ! -L "$installed_answers" ]]; then
-        return 0
+        return 1
     fi
-    existing="$(ods_pixel_run_as_owner "$owner" "$home" python3 - \
+    ods_pixel_run_as_owner "$owner" "$home" python3 - \
         "$installed_answers" <<'PY'
 import json, os, pathlib, stat, sys
 
@@ -52,7 +50,17 @@ if type(port) is not int or not 1 <= port <= 65535:
     raise SystemExit("invalid installed Pixel gateway port")
 print(port)
 PY
-)" || return 1
+}
+
+_ods_pixel_existing_gateway_port_matches() {
+    local owner="$1" home="$2" requested="$3" installed_answers existing
+    [[ "$requested" =~ ^[1-9][0-9]{0,4}$ ]] || return 1
+    (( 10#$requested <= 65535 )) || return 1
+    installed_answers="$home/.config/pixel-deployment/onboarding.json"
+    if [[ ! -e "$installed_answers" && ! -L "$installed_answers" ]]; then
+        return 0
+    fi
+    existing="$(_ods_pixel_installed_gateway_port "$owner" "$home")" || return 1
     [[ "$existing" == "$requested" ]] || return 2
 }
 
@@ -2379,8 +2387,12 @@ ods_pixel_reconcile_promoted_model() {
 }
 
 _ods_pixel_install_access_service() {
-    local owner="$1" openclaw_bin="$2" gateway_port
-    gateway_port="$(_ods_pixel_gateway_port)" || return 1
+    local owner="$1" openclaw_bin="$2" home gateway_port
+    home="$(ods_pixel_owner_home "$owner")" || return 1
+    # Phase 06 exports PIXEL_GATEWAY_PORT only in its own installer process.
+    # Model promotion may run later without that environment. The installed
+    # owner's verified onboarding contract is the gateway unit's actual port.
+    gateway_port="$(_ods_pixel_installed_gateway_port "$owner" "$home")" || return 1
     # This coordinator is privileged. Never run or import its implementation
     # from the owner's mutable checkout, even when the host agent is unprivileged.
     ods_sudo python3 - "${INSTALL_DIR:?}" "$owner" "$openclaw_bin" "$gateway_port" <<'PY'

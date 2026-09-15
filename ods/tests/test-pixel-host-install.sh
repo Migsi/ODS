@@ -1066,6 +1066,10 @@ chmod 0700 "$gateway_port_home/.config" "$gateway_port_home/.config/pixel-deploy
 cp "$answers" "$gateway_port_home/.config/pixel-deployment/onboarding.json"
 chmod 0600 "$gateway_port_home/.config/pixel-deployment/onboarding.json"
 check _ods_pixel_existing_gateway_port_matches "$owner" "$gateway_port_home" 18789
+check test "$(_ods_pixel_installed_gateway_port "$owner" "$gateway_port_home")" = 18789
+cp "$alternate_gateway_answers" "$gateway_port_home/.config/pixel-deployment/onboarding.json"
+check test "$(_ods_pixel_installed_gateway_port "$owner" "$gateway_port_home")" = 18790
+cp "$answers" "$gateway_port_home/.config/pixel-deployment/onboarding.json"
 if _ods_pixel_existing_gateway_port_matches "$owner" "$gateway_port_home" 18790 \
     >/dev/null 2>&1; then
     fail "installed Pixel gateway port change rejected before reconciliation"
@@ -2415,6 +2419,7 @@ assert "PIXEL_GATEWAY_PORT=$gateway_port" in text
 assert "(( preview_port != gateway_port )) || return 1" in text
 assert "\"http://127.0.0.1:${pixel_gateway_port}/health\"" in text
 assert installer.index("_ods_pixel_existing_gateway_port_matches") < installer.index("_ods_pixel_prepare_attempt_log")
+assert "_ods_pixel_installed_gateway_port" in text[text.index("_ods_pixel_install_access_service() {"):]
 assert "PIXEL_ODS_VERSION=$ods_version" in text
 assert "PIXEL_ODS_N8N_PORT=${N8N_PORT:-5678}" in text
 assert "PIXEL_ODS_WHISPER_PORT=${WHISPER_PORT:-9000}" in text
