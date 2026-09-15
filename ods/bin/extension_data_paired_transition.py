@@ -10,6 +10,7 @@ adversaries and hidden filesystem metadata still require live qualification.
 from __future__ import annotations
 
 import ctypes
+import errno
 import hashlib
 import json
 import os
@@ -95,9 +96,9 @@ def _no_replace(parent: int, source: str, destination: str) -> None:
     if function(parent, os.fsencode(source), parent, os.fsencode(destination),
                 _RENAME_NOREPLACE) != 0:
         error = ctypes.get_errno()
-        if error in {38, 22, 95}:  # ENOSYS, EINVAL, EOPNOTSUPP
+        if error in {errno.ENOSYS, errno.EINVAL, errno.EOPNOTSUPP}:
             _fail("lifecycle-work-data-transition-no-replace-unsupported")
-        if error == 17:  # EEXIST
+        if error == errno.EEXIST:
             _fail("lifecycle-work-data-transition-collision")
         _fail("lifecycle-work-data-transition-rename-failed", OSError(error, os.strerror(error)))
 
@@ -243,8 +244,9 @@ def _stage_ref(parent: int, name: str, info: os.stat_result,
 def _ref_valid(value: Any, *, tree: bool) -> bool:
     keys = {"dev", "ino", "sha256"} if tree else {"dev", "ino"}
     return isinstance(value, dict) and set(value) == keys and all(
-        isinstance(value[field], str) and value[field].isdecimal()
-        and str(int(value[field])) == value[field] for field in ("dev", "ino")
+        isinstance(value[field], str) and 1 <= len(value[field]) <= 20
+        and value[field].isdecimal() and str(int(value[field])) == value[field]
+        and 0 <= int(value[field]) < (1 << 64) for field in ("dev", "ino")
     ) and (not tree or isinstance(value["sha256"], str)
            and _SHA_RE.fullmatch(value["sha256"]) is not None)
 
@@ -352,6 +354,8 @@ class PairedDataTransition:
                 installed_name = _phase_name(intent["key"], "installed")
                 has_quarantined = _read_exact(root, quarantined_name, quarantined_record)
                 has_installed = _read_exact(root, installed_name, installed_record)
+                if prepared["originalTree"] is None and has_quarantined:
+                    _fail("lifecycle-work-data-transition-marker-state-conflict")
 
                 def classify() -> str:
                     current_target = _observed(parent, target_name)

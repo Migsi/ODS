@@ -180,6 +180,7 @@ def test_source_absent_quarantines_present_target_without_creating_stage(tmp_pat
     beta = install / "data" / "beta"
     beta.mkdir(mode=0o700)
     (beta / "note").write_bytes(b"new beta data")
+    (beta / "note").chmod(0o600)
     assert staging.StreamRestoreStager(install, store, journal).stage(command, "beta", 0) is None
     with store.open_verified(command) as (_archive, document, receipt):
         intent = journal.begin(command, receipt, "beta", 0, document["services"][1]["paths"][0])
@@ -190,6 +191,58 @@ def test_source_absent_quarantines_present_target_without_creating_stage(tmp_pat
     assert _read(quarantine / "note") == b"new beta data"
     assert transition.apply(command, "beta", 0, quiesced=lambda: True) == first
     assert _read(quarantine / "note") == b"new beta data"
+
+
+@linux_effect
+def test_source_and_target_both_absent_publish_only_noop_marker(tmp_path: Path):
+    install, _backup, _alpha, store, command, root, journal = _ready(tmp_path)
+    assert staging.StreamRestoreStager(install, store, journal).stage(command, "beta", 0) is None
+    transition = paired.PairedDataTransition(install, store, journal)
+    first = transition.apply(command, "beta", 0, quiesced=lambda: True)
+    assert transition.apply(command, "beta", 0, quiesced=lambda: True) == first
+    assert not (install / "data" / "beta").exists()
+    assert not list((install / "data").glob(".ods-restore-*"))
+    assert len(list(root.glob("p-*"))) == 2
+
+
+@linux_effect
+def test_lost_quiescence_after_first_rename_retains_both_proven_trees(tmp_path: Path):
+    install, alpha, _store, command, _root, _journal, intent, transition = _fixture(tmp_path)
+    quarantine = install / "data" / intent["quarantineName"]
+
+    def gate():
+        return not quarantine.exists()
+
+    with pytest.raises(LifecycleWorkExecutionError) as caught:
+        transition.apply(command, "alpha", 0, quiesced=gate)
+    assert caught.value.code == "lifecycle-work-data-transition-not-quiesced"
+    assert not alpha.exists() and _read(quarantine / "note") == b"current live data"
+    assert _read(install / "data" / intent["stageName"] / "note") == b"private source"
+    transition.apply(command, "alpha", 0, quiesced=lambda: True)
+    assert _read(alpha / "note") == b"private source"
+
+
+@linux_effect
+def test_foreign_target_after_quarantine_blocks_second_no_replace(tmp_path: Path, monkeypatch):
+    install, alpha, _store, command, _root, _journal, intent, transition = _fixture(tmp_path)
+    publish = paired._publish_exact
+    injected = False
+
+    def inject(descriptor, name, record):
+        nonlocal injected
+        publish(descriptor, name, record)
+        if name.endswith("-quarantined.json") and not injected:
+            injected = True
+            alpha.mkdir(mode=0o700)
+
+    with monkeypatch.context() as patcher:
+        patcher.setattr(paired, "_publish_exact", inject)
+        with pytest.raises(LifecycleWorkExecutionError) as caught:
+            transition.apply(command, "alpha", 0, quiesced=lambda: True)
+    assert injected and caught.value.code == "lifecycle-work-data-transition-ambiguous-state"
+    assert alpha.is_dir() and not list(alpha.iterdir())
+    assert _read(install / "data" / intent["quarantineName"] / "note") == b"current live data"
+    assert _read(install / "data" / intent["stageName"] / "note") == b"private source"
 
 
 @linux_effect
