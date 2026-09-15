@@ -36,6 +36,30 @@ def _read_noatime(path: Path) -> bytes:
         os.close(descriptor)
 
 
+def _interrupted_stage(tmp_path: Path, monkeypatch):
+    install, _backup, alpha, store, command, _root, journal = _ready(tmp_path)
+    with store.open_verified(command) as (_archive, document, receipt):
+        intent = journal.begin(command, receipt, "alpha", 0, document["services"][0]["paths"][0])
+    original = os.write
+    writes = 0
+
+    def interrupt(descriptor, content):
+        nonlocal writes
+        writes += 1
+        if writes == 1:
+            return original(descriptor, content[:max(1, len(content) // 2)])
+        raise OSError("simulated interrupted stage copy")
+
+    stager = restores.StreamRestoreStager(install, store, journal)
+    with monkeypatch.context() as patcher:
+        patcher.setattr(restores.os, "write", interrupt)
+        with pytest.raises(LifecycleWorkExecutionError):
+            stager.stage(command, "alpha", 0)
+    stage = install / "data" / intent["stageName"]
+    assert stage.is_dir() and (stage / "note").exists()
+    return install, alpha, store, command, journal, stage, stager
+
+
 @linux_effect
 def test_staged_verified_bytes_leave_live_target_untouched_and_complete_replay(tmp_path: Path):
     install, _backup, alpha, store, command, _root, journal = _ready(tmp_path)
@@ -68,30 +92,10 @@ def test_absent_source_publishes_intent_but_does_not_create_stage(tmp_path: Path
 
 @linux_effect
 def test_partial_stage_resumes_only_a_verified_archive_prefix(tmp_path: Path, monkeypatch):
-    install, _backup, alpha, store, command, _root, journal = _ready(tmp_path)
-    with store.open_verified(command) as (_archive, document, receipt):
-        path = document["services"][0]["paths"][0]
-        intent = journal.begin(command, receipt, "alpha", 0, path)
-    original = os.write
-    writes = 0
-
-    def interrupt(fd, content):
-        nonlocal writes
-        writes += 1
-        if writes == 1:
-            return original(fd, content[:max(1, len(content) // 2)])
-        raise OSError("simulated interrupted stage copy")
-
-    stager = restores.StreamRestoreStager(install, store, journal)
-    with monkeypatch.context() as patcher:
-        patcher.setattr(restores.os, "write", interrupt)
-        with pytest.raises(LifecycleWorkExecutionError):
-            stager.stage(command, "alpha", 0)
-    stage = install / "data" / intent["stageName"]
-    assert stage.is_dir() and (stage / "note").exists()
+    _install, alpha, _store, command, _journal, stage, stager = _interrupted_stage(tmp_path, monkeypatch)
     partial_inode = (stage / "note").stat().st_ino
     assert _read_noatime(stage / "note") != _read_noatime(alpha / "note")
-    assert stager.stage(command, "alpha", 0) == intent["stageName"]
+    assert stager.stage(command, "alpha", 0) == stage.name
     staged, source = (stage / "note").stat(), (alpha / "note").stat()
     assert staged.st_ino == partial_inode
     assert _read_noatime(stage / "note") == _read_noatime(alpha / "note") == b"private source"
@@ -101,8 +105,52 @@ def test_partial_stage_resumes_only_a_verified_archive_prefix(tmp_path: Path, mo
 
 
 @linux_effect
+def test_corrupted_partial_prefix_refuses_without_appending(tmp_path: Path, monkeypatch):
+    _install, alpha, _store, command, _journal, stage, stager = _interrupted_stage(tmp_path, monkeypatch)
+    partial = stage / "note"
+    descriptor = os.open(partial, os.O_RDWR | os.O_NOFOLLOW)
+    try:
+        os.write(descriptor, b"X")
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    before = _read_noatime(partial)
+    with pytest.raises(LifecycleWorkExecutionError) as caught:
+        stager.stage(command, "alpha", 0)
+    assert caught.value.code == "lifecycle-work-data-restore-stage-prefix-invalid"
+    assert _read_noatime(partial) == before
+    assert _read_noatime(alpha / "note") == b"private source"
+
+
+@linux_effect
+def test_second_interrupted_append_replays_same_inode_again(tmp_path: Path, monkeypatch):
+    _install, alpha, _store, command, _journal, stage, stager = _interrupted_stage(tmp_path, monkeypatch)
+    partial = stage / "note"
+    original_inode, initial_size = partial.stat().st_ino, partial.stat().st_size
+    original = os.write
+    writes = 0
+
+    def interrupt_append(descriptor, content):
+        nonlocal writes
+        writes += 1
+        if writes == 1:
+            return original(descriptor, content[:2])
+        raise OSError("simulated second interrupted append")
+
+    with monkeypatch.context() as patcher:
+        patcher.setattr(restores.os, "write", interrupt_append)
+        with pytest.raises(LifecycleWorkExecutionError):
+            stager.stage(command, "alpha", 0)
+    assert initial_size < partial.stat().st_size < len(b"private source")
+    assert partial.stat().st_ino == original_inode
+    assert stager.stage(command, "alpha", 0) == stage.name
+    assert partial.stat().st_ino == original_inode
+    assert _read_noatime(partial) == _read_noatime(alpha / "note") == b"private source"
+
+
+@linux_effect
 def test_full_content_before_metadata_fault_replays_without_writing_bytes(tmp_path: Path, monkeypatch):
-    install, _backup, alpha, store, command, _root, journal = _ready(tmp_path)
+    install, _backup, alpha, store, command, _root, journal = _ready(tmp_path, source_mode=0o440)
     with store.open_verified(command) as (_archive, document, receipt):
         intent = journal.begin(command, receipt, "alpha", 0, document["services"][0]["paths"][0])
     original = restores._stamp
@@ -202,7 +250,7 @@ def test_complete_stage_replay_refuses_tampered_or_foreign_tree(tmp_path: Path, 
     assert stage_name is not None
     stage = install / "data" / stage_name
     if tamper == "content":
-        (stage / "note").write_bytes(b"unapproved bytes")
+        (stage / "note").write_bytes(b"foreign source")
     else:
         (stage / "unexpected").write_bytes(b"foreign")
     with pytest.raises(LifecycleWorkExecutionError) as caught:

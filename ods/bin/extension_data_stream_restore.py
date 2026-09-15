@@ -159,6 +159,30 @@ def _candidate_file(info: os.stat_result, parent: int, entry: dict[str, Any]) ->
         _fail("lifecycle-work-data-restore-stage-foreign")
 
 
+def _exact_source_bytes(source: Any, size: int) -> bytes:
+    chunks: list[bytes] = []
+    remaining = size
+    while remaining:
+        chunk = source.read(remaining)
+        if not chunk:
+            _fail("lifecycle-work-data-restore-stage-content-invalid")
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
+def _exact_fd_bytes(descriptor: int, size: int) -> bytes:
+    chunks: list[bytes] = []
+    remaining = size
+    while remaining:
+        chunk = os.read(descriptor, remaining)
+        if not chunk:
+            _fail("lifecycle-work-data-restore-stage-drift")
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
 def _check_prefix(parent: int, name: str, archive: tarfile.TarFile,
                   member: tarfile.TarInfo, entry: dict[str, Any]) -> None:
     observed = _observed(parent, name)
@@ -184,9 +208,9 @@ def _check_prefix(parent: int, name: str, archive: tarfile.TarFile,
         remaining = opened.st_size
         while remaining:
             size = min(remaining, 64 * 1024)
-            staged_bytes = os.read(descriptor, size)
-            archive_bytes = source.read(size)
-            if len(staged_bytes) != size or len(archive_bytes) != size or staged_bytes != archive_bytes:
+            staged_bytes = _exact_fd_bytes(descriptor, size)
+            archive_bytes = _exact_source_bytes(source, size)
+            if staged_bytes != archive_bytes:
                 _fail("lifecycle-work-data-restore-stage-prefix-invalid")
             digest.update(archive_bytes)
             remaining -= size
@@ -227,9 +251,9 @@ def _resume_file(parent: int, name: str, archive: tarfile.TarFile,
         remaining_prefix = opened.st_size
         while remaining_prefix:
             size = min(remaining_prefix, 64 * 1024)
-            staged_bytes = os.read(descriptor, size)
-            archive_bytes = source.read(size)
-            if len(staged_bytes) != size or len(archive_bytes) != size or staged_bytes != archive_bytes:
+            staged_bytes = _exact_fd_bytes(descriptor, size)
+            archive_bytes = _exact_source_bytes(source, size)
+            if staged_bytes != archive_bytes:
                 _fail("lifecycle-work-data-restore-stage-prefix-invalid")
             digest.update(archive_bytes)
             remaining_prefix -= size
