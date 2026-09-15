@@ -42,6 +42,7 @@ from extension_lifecycle_work import LifecycleWorkCommand, LifecycleWorkExecutio
 SNAPSHOT_SCHEMA = "ods.extension-data-stream-snapshot.v1"
 INDEX_MEMBER = "_ods_snapshot/index.json"
 _MAX_ENTRIES = 20000
+_MAX_PATHS = 2048
 _MAX_DEPTH = 32
 _MAX_FILE_BYTES = 512 * 1024 * 1024
 _MAX_TOTAL_BYTES = 2 * 1024 * 1024 * 1024
@@ -102,11 +103,15 @@ def _scope_index(scope: BoundDataScope) -> list[dict[str, Any]]:
     if type(scope) is not BoundDataScope or scope.operation_key != "backup":
         _fail("lifecycle-work-data-snapshot-scope-invalid")
     result: list[dict[str, Any]] = []
+    path_count = 0
     for service in scope.services:
         if type(service) is not BoundServiceData:
             _fail("lifecycle-work-data-snapshot-scope-invalid")
         paths: list[dict[str, Any]] = []
         for bound in service.paths:
+            path_count += 1
+            if path_count > _MAX_PATHS:
+                _fail("lifecycle-work-data-snapshot-path-limit")
             if type(bound) is not BoundDataPath:
                 _fail("lifecycle-work-data-snapshot-scope-invalid")
             paths.append({
@@ -126,11 +131,13 @@ def _scope_index(scope: BoundDataScope) -> list[dict[str, Any]]:
 
 
 def _safe_name(name: str) -> str:
-    if (
-        not isinstance(name, str) or name in {"", ".", ".."}
-        or "/" in name or "\\" in name or "\x00" in name
-        or len(name.encode("utf-8", errors="strict")) > 255
-    ):
+    if not isinstance(name, str) or name in {"", ".", ".."} or "/" in name or "\\" in name or "\x00" in name:
+        _fail("lifecycle-work-data-snapshot-path-invalid")
+    try:
+        length = len(name.encode("utf-8", errors="strict"))
+    except UnicodeError as exc:
+        _fail("lifecycle-work-data-snapshot-path-invalid", exc)
+    if length > 255:
         _fail("lifecycle-work-data-snapshot-path-invalid")
     return name
 
@@ -185,6 +192,8 @@ def _capture_directory(
         names = sorted(_safe_name(name) for name in os.listdir(descriptor))
     except (OSError, UnicodeError) as exc:
         _fail("lifecycle-work-data-snapshot-read-failed", exc)
+    if _identity(os.fstat(descriptor)) != _identity(before):
+        _fail("lifecycle-work-data-snapshot-source-changed")
     for name in names:
         budget.entries += 1
         if budget.entries > _MAX_ENTRIES:
@@ -271,18 +280,6 @@ def _capture_path(
                            entries=path["entries"], budget=budget, depth=0)
     finally:
         _close_quietly(descriptor)
-
-
-def _write_all(descriptor: int, payload: bytes) -> None:
-    offset = 0
-    while offset < len(payload):
-        try:
-            count = os.write(descriptor, payload[offset:offset + 64 * 1024])
-        except OSError as exc:
-            _fail("lifecycle-work-data-snapshot-write-failed", exc)
-        if count <= 0:
-            _fail("lifecycle-work-data-snapshot-write-failed")
-        offset += count
 
 
 def _unique_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:

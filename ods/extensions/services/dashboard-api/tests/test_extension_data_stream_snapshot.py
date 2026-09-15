@@ -54,6 +54,13 @@ def test_stream_scope_is_only_the_attested_old_new_union():
             for service in index] == [("alpha", ["data/alpha"]), ("beta", ["data/beta"])]
 
 
+def test_aggregate_path_cap_is_checked_before_any_capture(monkeypatch):
+    monkeypatch.setattr(snapshots, "_MAX_PATHS", 1)
+    with pytest.raises(LifecycleWorkExecutionError) as caught:
+        snapshots._scope_index(bind_data_scope(_command()))
+    assert caught.value.code == "lifecycle-work-data-snapshot-path-limit"
+
+
 @linux_effect
 def test_large_file_streams_without_base64_and_absent_path_is_explicit(tmp_path: Path):
     install, data, backup, alpha = _roots(tmp_path)
@@ -182,3 +189,28 @@ def test_crash_after_hardlink_recovers_only_matching_temp_link(tmp_path: Path, m
     assert receipt.file_count == 1
     assert archive.stat().st_nlink == 1
     assert len(list(backup.iterdir())) == 1
+
+
+@linux_effect
+def test_directory_mutation_during_listing_fails_before_capture(tmp_path: Path, monkeypatch):
+    install, data, backup, alpha = _roots(tmp_path)
+    _write(alpha / "before", b"before")
+    value = _command()
+    store = snapshots.StreamSnapshotStore(install, data, backup)
+    original = snapshots.os.listdir
+    alpha_inode = alpha.stat().st_ino
+    mutated = False
+
+    def change_after_listing(descriptor):
+        nonlocal mutated
+        names = original(descriptor)
+        if not mutated and isinstance(descriptor, int) and os.fstat(descriptor).st_ino == alpha_inode:
+            mutated = True
+            _write(alpha / "after", b"after")
+        return names
+
+    monkeypatch.setattr(snapshots.os, "listdir", change_after_listing)
+    with pytest.raises(LifecycleWorkExecutionError) as caught:
+        store.backup(value)
+    assert mutated and caught.value.code == "lifecycle-work-data-snapshot-source-changed"
+    assert not (backup / f"{value.transaction_id}.{value.plan_hash}.tar").exists()

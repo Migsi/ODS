@@ -120,3 +120,10 @@ def test_restore_does_not_recheck_manifest_already_replaced_by_update(tmp_path: 
     _write_manifest(builtin / "manifest.yaml", PRIOR_MANIFEST)
     rejected = replace(_bound(), operation_key="restore")
     _rejected(rejected, install, data)
+
+
+@linux_effect
+def test_absolute_root_with_parent_traversal_is_rejected():
+    with pytest.raises(LifecycleWorkValidationError) as caught:
+        effect._open_directory(Path("/tmp/../../etc"))
+    assert caught.value.code == "lifecycle-work-prior-data-drift"
