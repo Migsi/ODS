@@ -213,13 +213,6 @@ class DockerQuiescenceObserver:
             _CONTAINER_ID_RE.fullmatch(item) is None for item in ids
         ):
             _fail("lifecycle-work-data-quiescence-docker-unverifiable")
-        if not ids:
-            return self._require_active_lease()
-        raw = _result(self._run, ["inspect", "--type", "container", "--format",
-                                  "{{json .Mounts}}", *ids], _MAX_MOUNT_BYTES)
-        lines = raw.splitlines()
-        if len(lines) != len(ids):
-            _fail("lifecycle-work-data-quiescence-mount-unverifiable")
         budget = [_MAX_IDENTITY_PROBES]
         target_prefixes = set()
         target_finals = set()
@@ -228,6 +221,13 @@ class DockerQuiescenceObserver:
             target_prefixes.update(prefixes)
             if len(prefixes) == len(target):
                 target_finals.add(prefixes[-1])
+        if not ids:
+            return self._require_active_lease()
+        raw = _result(self._run, ["inspect", "--type", "container", "--format",
+                                  "{{json .Mounts}}", *ids], _MAX_MOUNT_BYTES)
+        lines = raw.splitlines()
+        if len(lines) != len(ids):
+            _fail("lifecycle-work-data-quiescence-mount-unverifiable")
         for line in lines:
             try:
                 mounts = json.loads(line.decode("utf-8", "strict"))

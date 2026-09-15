@@ -180,16 +180,12 @@ def test_missing_or_hardlinked_mount_source_refuses_as_unverifiable(tmp_path: Pa
 
 
 @linux_effect
-def test_target_symlink_drift_refuses_before_mount_identity_claim(tmp_path: Path):
+def test_target_symlink_drift_refuses_even_without_running_containers(tmp_path: Path):
     install, _backup, alpha, _store, command, _root, _journal = _ready(tmp_path)
     saved = tmp_path / "preserved-alpha"
     alpha.rename(saved)
     alpha.symlink_to(saved, target_is_directory=True)
-    foreign = tmp_path / "foreign-mount"
-    foreign.mkdir()
-    fake = FakeDocker(ids=(_ID + "\n").encode(), mounts=[[
-        {"Type": "bind", "Source": str(foreign)},
-    ]])
+    fake = FakeDocker()
     observer = quiescence.DockerQuiescenceObserver(
         command, install, _admission(command), fake,
         lambda: _status(command),
