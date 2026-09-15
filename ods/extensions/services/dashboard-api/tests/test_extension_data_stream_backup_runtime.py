@@ -236,6 +236,12 @@ def test_host_generic_backup_refuses_missing_approval_or_caller_path_scope(
     )
     begin_receipt(agent, host_request, request)
     status, result = host_request("/v1/extension/lifecycle-work", request)
-    assert status == 409
-    assert result == {"error": {"code": "lifecycle-work-receipt-mismatch"}}
+    if case == "caller-path":
+        # The immutable request grammar rejects caller paths before a plan is
+        # even loaded; missing approval is rejected by the generic scope.
+        assert status == 422
+        assert result == {"error": {"code": "invalid-lifecycle-work-request"}}
+    else:
+        assert status == 409
+        assert result == {"error": {"code": "lifecycle-work-receipt-mismatch"}}
     assert list((agent.DATA_DIR / "assistant-first" / "data-backups").iterdir()) == []
