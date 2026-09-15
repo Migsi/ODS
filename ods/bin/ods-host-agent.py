@@ -7273,6 +7273,8 @@ class _ExtensionMutationAdmission:
                 self._legacy_locks.append(lock)
             return None
 
+        context = None
+        entered = False
         try:
             manager = _get_extension_lease_manager()
             if manager is None:
@@ -7285,7 +7287,32 @@ class _ExtensionMutationAdmission:
                 self._service_ids,
             )
             result = context.__enter__()
+            entered = True
+            if (
+                not isinstance(result, dict)
+                or frozenset(result) != frozenset({
+                    "schema", "leaseId", "transactionId", "planHash",
+                    "serviceIds",
+                })
+                or result.get("schema") != _extension_leases.LEASE_SCHEMA
+                or result.get("leaseId") != self._evidence.lease_id
+                or result.get("transactionId") != self._evidence.transaction_id
+                or result.get("planHash") != self._evidence.plan_hash
+                or not isinstance(result.get("serviceIds"), list)
+                or result["serviceIds"] != sorted(set(self._service_ids))
+            ):
+                raise _extension_leases.LeaseAuthorizationError(
+                    "lease-binding-mismatch"
+                )
         except Exception as exc:
+            if entered:
+                try:
+                    context.__exit__(type(exc), exc, exc.__traceback__)
+                except Exception as close_exc:
+                    logger.error(
+                        "Extension mutation lease cleanup failed (%s)",
+                        type(close_exc).__name__,
+                    )
             _extension_mutation_lease_error(self._handler, exc)
             raise _ExtensionMutationAdmissionRejected from None
         self._lease_context = context
