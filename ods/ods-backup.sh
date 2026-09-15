@@ -94,7 +94,7 @@ estimate_backup_bytes() {
             b=$(du -sk "$ODS_DIR/models" 2>/dev/null | awk '{printf "%.0f\n", $1 * 1024}')
             total=$(( total + ${b:-0} ))
         fi
-        local -a cache_paths=("data/whisper/cache" "data/kokoro/cache")
+        local -a cache_paths=("${ODS_BACKUP_CACHE_PATHS[@]}")
         for p in "${cache_paths[@]}"; do
             if [[ -d "$ODS_DIR/$p" ]]; then
                 local b
@@ -419,11 +419,9 @@ backup_cache() {
         log_success "Backed up: models/"
     fi
 
-    # Docker volumes that contain cache data
-    local cache_paths=(
-        "data/whisper/cache"
-        "data/kokoro/cache"
-    )
+    # Bind-mounted cache directories (lib/backup-paths.sh): the GGUF weights
+    # and the STT/embeddings model caches the user-data type deliberately skips.
+    local cache_paths=("${ODS_BACKUP_CACHE_PATHS[@]}")
 
     for path in "${cache_paths[@]}"; do
         if [[ -d "$ODS_DIR/$path" ]]; then
@@ -488,7 +486,10 @@ do_backup() {
 
     # Generate backup ID
     local backup_id
-    backup_id=$(date +%Y%m%d-%H%M%S)
+    # Include the process ID so concurrent invocations cannot share one
+    # second-granularity directory. A merged directory would make either
+    # snapshot incomplete and could make a later restore select mixed data.
+    backup_id="backup-$$-$(date +%Y%m%d-%H%M%S)"
     local backup_dir="$BACKUP_ROOT/$backup_id"
 
     log_info "Starting $backup_type backup: $backup_id"

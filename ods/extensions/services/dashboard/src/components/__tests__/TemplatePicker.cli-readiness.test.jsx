@@ -23,7 +23,11 @@ describe('template cards with installed CLI tools', () => {
   test.each([['error', 'Has errors'], ['installing', /^Installing/]])('preserves %s precedence', (status, label) => {
     const extensions = [{ id: 'aider', status: 'cli_installed' }, { id: 'gitea', status }]
     render(<TemplatePicker templates={[{ ...template, _status: getTemplateStatus(template, extensions) }]} />)
-    expect(screen.getByRole('button', { name: /coding/i })).toBeDisabled()
+    const card = screen.getByRole('button', { name: /coding/i })
+    // Failed companions retain their error label but can open retry review;
+    // an installation still in progress must not accept another action.
+    if (status === 'error') expect(card).toBeEnabled()
+    else expect(card).toBeDisabled()
     expect(screen.getByText(label)).toBeInTheDocument()
   })
 

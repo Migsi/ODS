@@ -53,6 +53,8 @@ printf '%s\n' "$*" >>"$SYSTEMCTL_LOG"
 if [[ "${SYSTEMCTL_FAIL_DISABLE:-false}" == "true" && "${1:-}" == "disable" ]]; then
     exit 1
 fi
+if [[ "${ACCESS_STOP_FAIL:-false}" == true && "$*" == 'disable --now ods-pixel-access.service' ]]; then exit 1; fi
+if [[ "${ACCESS_STILL_ACTIVE:-false}" == true && "$*" == 'is-active --quiet ods-pixel-access.service' ]]; then exit 0; fi
 case " $* " in
     *" is-active --quiet "*) exit 1 ;;
 esac
@@ -196,6 +198,30 @@ else
     fail "Pixel uninstall fallback logging is unavailable"
 fi
 
+# Contract regression for the root-owned access coordinator. This service is
+# outside the checkout and uses Restart=on-failure, so uninstall must retire it.
+if python3 - "$ROOT_DIR/lib/pixel-uninstall.sh" <<'PY'
+import pathlib
+import sys
+
+text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+required = (
+    'access_unit="$systemd_dir/ods-pixel-access.service"',
+    'systemctl disable --now ods-pixel-access.service',
+    'systemctl is-active --quiet ods-pixel-access.service',
+    '_ods_pixel_access_validate_or_remove verify',
+    '_ods_pixel_access_validate_or_remove remove',
+)
+missing = [item for item in required if item not in text]
+if missing:
+    raise SystemExit("missing access-service uninstall contract: " + ", ".join(missing))
+PY
+then
+    pass "uninstall contract retires the root-owned Pixel access service"
+else
+    fail "uninstall contract omits the root-owned Pixel access service"
+fi
+
 write_fixture() {
     rm -rf "$SYSTEMD_DIR" "$ETC_DIR" "$LIBEXEC_DIR" "$HOME_DIR" "$INSTALL_DIR" \
         "$OPS_POLICY_DIR" "$OPS_INSTALL" "$OPS_STATE" "$PREVIEW_STATE" \
@@ -317,7 +343,6 @@ write_access_fixture() {
 JSON
     : > "$ACCESS_STATE/lock"
     printf '%s\n' '{"boundary":"fixture"}' > "$ACCESS_STATE/service-baseline.json"
-    printf '%s\n' '{"phase":"error"}' > "$ACCESS_STATE/transition.json"
     printf '%s\n' '[Service]' 'ProtectSystem=false' 'ProtectHome=false' \
         > "$access_dropin_dir/90-ods-full-access.conf"
     printf '%s\n' fixture > "$ACCESS_PROBE_BASE/$owner_uid/sentinel-123e4567-e89b-12d3-a456-426614174000"
@@ -330,7 +355,7 @@ JSON
         "$access_program/pixel_provider"/*.py "$SYSTEMD_DIR/ods-pixel-access.service" \
         "$access_dropin_dir/90-ods-full-access.conf"
     chmod 0600 "$ETC_DIR/pixel-access.json" "$ACCESS_STATE/lock" \
-        "$ACCESS_STATE/service-baseline.json" "$ACCESS_STATE/transition.json"
+        "$ACCESS_STATE/service-baseline.json"
     chmod 0700 "$ACCESS_STATE" "$ACCESS_PROBE_BASE/$owner_uid"
     chmod 0711 "$ACCESS_PROBE_BASE"
     chmod 0600 "$ACCESS_PROBE_BASE/$owner_uid/sentinel-123e4567-e89b-12d3-a456-426614174000"
@@ -1734,6 +1759,40 @@ if ods_pixel_uninstall_managed "$INSTALL_DIR" "$HOME_DIR"; then
 else
     fail "ambient Pixel no-op returned failure"
 fi
+
+write_access_fixture
+if ods_pixel_uninstall_managed "$INSTALL_DIR" "$HOME_DIR"; then
+    [[ ! -e "$ACCESS_STATE" && ! -e "$LIBEXEC_DIR/ods-pixel-access" \
+        && ! -e "$ETC_DIR/pixel-access.json" && ! -e "$SYSTEMD_DIR/ods-pixel-access.service" ]] \
+        && [[ "$(head -n 1 "$SYSTEMCTL_LOG")" == 'disable --now ods-pixel-access.service' ]] \
+        && pass "access coordinator stops first and its verified artifacts are removed" \
+        || fail "access coordinator cleanup was incomplete or out of order"
+else
+    fail "verified access coordinator could not be removed"
+fi
+
+for scenario in foreign modified_unit modified_program state_symlink pending_transition stop_failure still_active; do
+    write_access_fixture
+    case "$scenario" in
+        foreign) printf '{"install_dir":"/another-install","owner":"nobody"}\n' > "$ETC_DIR/pixel-access.json" ;;
+        modified_unit) printf '\n# custom unit\n' >> "$SYSTEMD_DIR/ods-pixel-access.service" ;;
+        modified_program) printf 'operator changes\n' > "$LIBEXEC_DIR/ods-pixel-access/access_mode_server.py" ;;
+        state_symlink) mv "$ACCESS_STATE" "$ACCESS_STATE-outside"; ln -s "$ACCESS_STATE-outside" "$ACCESS_STATE" ;;
+        pending_transition) printf '{}\n' > "$ACCESS_STATE/transition.json"; chmod 0600 "$ACCESS_STATE/transition.json" ;;
+        stop_failure) export ACCESS_STOP_FAIL=true ;;
+        still_active) export ACCESS_STILL_ACTIVE=true ;;
+    esac
+    if ods_pixel_uninstall_managed "$INSTALL_DIR" "$HOME_DIR"; then
+        fail "unsafe access cleanup was accepted: $scenario"
+    else
+        [[ -e "$ETC_DIR/pixel-access.json" && -e "$LIBEXEC_DIR/ods-pixel-access/access_mode_server.py" \
+            && -e "$ACCESS_STATE/service-baseline.json" && -e "$SYSTEMD_DIR/openclaw-gateway.service" \
+            && -e "$HOME_DIR/.config/ods/pixel-managed.json" ]] \
+            && pass "access cleanup preserves artifacts on $scenario" \
+            || fail "access cleanup lost recovery artifacts on $scenario"
+    fi
+    unset ACCESS_STOP_FAIL ACCESS_STILL_ACTIVE
+done
 
 printf 'Results: %d passed, %d failed\n' "$PASS" "$FAIL"
 (( FAIL == 0 ))

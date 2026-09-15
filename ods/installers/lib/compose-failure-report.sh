@@ -152,7 +152,9 @@ write_compose_failure_report() {
         fi
         echo ""
         echo "Port checks"
-        _ods_report_port_line "llama-server" "$(_ods_report_env_value "$env_file" OLLAMA_PORT "11434")"
+        local llama_port
+        llama_port="$(_ods_report_env_value "$env_file" LLAMA_SERVER_PORT "$(_ods_report_env_value "$env_file" LLM_PORT "$(_ods_report_env_value "$env_file" OLLAMA_PORT "11434")")")"
+        _ods_report_port_line "llama-server" "$llama_port"
         _ods_report_port_line "open-webui" "$(_ods_report_env_value "$env_file" WEBUI_PORT "3000")"
         _ods_report_port_line "dashboard" "$(_ods_report_env_value "$env_file" DASHBOARD_PORT "3001")"
         _ods_report_port_line "dashboard-api" "$(_ods_report_env_value "$env_file" DASHBOARD_API_PORT "3002")"

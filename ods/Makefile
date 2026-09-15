@@ -43,6 +43,7 @@ test: ## Run unit and contract tests
 	@echo ""
 	@echo "=== Linux install preflight ==="
 	@bash tests/test-linux-install-preflight.sh
+	@bash tests/test-phase05-podman-shim.sh
 	@bash tests/test-linux-host-agent-stop.sh
 	@bash tests/test-preflight-dashboard-port.sh
 	@bash tests/test-wsl-broken-docker-shim.sh
@@ -63,6 +64,7 @@ test: ## Run unit and contract tests
 	@echo "=== Docker rootless bind-mount ownership ==="
 	@bash tests/test-rootless-docker-ownership.sh
 	@bash tests/test-cli-status-docker-error.sh
+	@python3 tests/test-cli-stt-env.py
 	@echo ""
 	@echo "=== AMD/Lemonade contracts ==="
 	@bash tests/contracts/test-amd-lemonade-contracts.sh
@@ -128,6 +130,7 @@ test: ## Run unit and contract tests
 	@echo ""
 	@echo "=== Bash 3.2 guard contracts ==="
 	@bash tests/test-bash32-guards.sh
+	@bash tests/test-ods-doctor-bash32-guard.sh
 	@echo ""
 	@echo "=== CLI update post-verification ==="
 	@bash tests/test-cli-update-verification.sh
@@ -155,6 +158,8 @@ test: ## Run unit and contract tests
 	@bash tests/test-update-backup-retention-labels.sh
 	@bash tests/test-update-script-backup.sh
 	@bash tests/test-update-backup-retention-spaces.sh
+	@bash tests/test-update-current-version.sh
+	@bash tests/test-update-rollback-restore-failure.sh
 	@bash tests/test-backup-data-coverage.sh
 	@echo ""
 	@echo "=== backup integrity and restore round-trip ==="
@@ -184,9 +189,13 @@ test: ## Run unit and contract tests
 	@bash tests/test-macos-env-quote-strip.sh
 	@echo "=== macOS generated .env validates against the schema ==="
 	@bash tests/test-macos-env-schema.sh
+	@echo "=== macOS native llama port is relocatable ==="
+	@bash tests/test-macos-native-llama-port.sh
 	@echo ""
 	@echo "=== macOS uninstall LaunchAgent cleanup ==="
 	@bash tests/test-macos-uninstall-launchagents.sh
+	@echo "=== uninstall removes the ods-mdns systemd unit ==="
+	@bash tests/test-uninstall-mdns-unit.sh
 	@echo ""
 	@echo "=== token-spy session manager active-id extraction ==="
 	@bash tests/test-token-spy-session-manager.sh

@@ -123,6 +123,35 @@ ODS_DIR="$FAKE_ODS" RETENTION_COUNT=5 "$ODS_BACKUP" --output "$LIFECYCLE_DIR" --
 [[ -d "$LIFECYCLE_DIR/my-notes" ]] || fail "retention deleted an unrelated directory"
 pass "retention prunes oldest own-format backups and leaves other directories"
 
+info "Creating concurrent backups in the same second"
+CONCURRENT_DIR="$TMP_ROOT/concurrent-backups"
+mkdir -p "$CONCURRENT_DIR"
+CONCURRENT_BIN="$TMP_ROOT/concurrent-bin"
+mkdir -p "$CONCURRENT_BIN"
+cat > "$CONCURRENT_BIN/date" <<'SH'
+#!/usr/bin/env bash
+if [[ "$*" == '+%Y%m%d-%H%M%S' ]]; then
+  echo 20260101-120000
+else
+  exec /bin/date "$@"
+fi
+SH
+chmod +x "$CONCURRENT_BIN/date"
+PATH="$CONCURRENT_BIN:$PATH" ODS_DIR="$FAKE_ODS" "$ODS_BACKUP" --output "$CONCURRENT_DIR" --type config >/dev/null &
+backup_one=$!
+PATH="$CONCURRENT_BIN:$PATH" ODS_DIR="$FAKE_ODS" "$ODS_BACKUP" --output "$CONCURRENT_DIR" --type config >/dev/null &
+backup_two=$!
+wait "$backup_one"
+wait "$backup_two"
+
+concurrent_count=$(find "$CONCURRENT_DIR" -mindepth 1 -maxdepth 1 -type d -name 'backup-*' | wc -l | tr -d ' ')
+[[ "$concurrent_count" == "2" ]] || fail "concurrent backups collided (found $concurrent_count directories)"
+for snapshot in "$CONCURRENT_DIR"/backup-*; do
+  [[ "$snapshot" == *-20260101-120000 ]] || fail "concurrent fixture did not use the fixed clock"
+  ODS_DIR="$FAKE_ODS" "$ODS_BACKUP" --output "$CONCURRENT_DIR" verify "$(basename "$snapshot")" >/dev/null
+done
+pass "concurrent same-second backups receive distinct IDs"
+
 info "Deleting a compressed backup by bare ID"
 (cd "$LIFECYCLE_DIR" && mkdir -p 20260601-120000 && echo x > 20260601-120000/f \
   && tar czf 20260601-120000.tar.gz 20260601-120000 && rm -rf 20260601-120000)
@@ -161,7 +190,7 @@ for compressed in false true; do
   [[ "$compressed" == false ]] || backup_args+=(--compress)
   backup_out=$(ODS_DIR="$FAKE_ODS" RETENTION_COUNT=3 "$ODS_BACKUP" \
     --output "$CHRONOLOGY_DIR" "${backup_args[@]}")
-  created_id=$(printf '%s\n' "$backup_out" | sed -n 's/.*Backup complete: \([0-9]\{8\}-[0-9]\{6\}\).*/\1/p')
+  created_id=$(printf '%s\n' "$backup_out" | sed -n 's/.*Backup complete: \([A-Za-z0-9_-]*\).*/\1/p')
   [[ -n "$created_id" ]] || fail "backup did not report its new ID"
   created_path="$CHRONOLOGY_DIR/$created_id"
   [[ "$compressed" == false ]] || created_path+=.tar.gz

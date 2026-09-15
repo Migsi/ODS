@@ -118,6 +118,29 @@ MIN_BASELINE_SIZE=$(cfg general min_baseline_size 500)
 
 # ── Reset Functions ────────────────────────────────────────────────────
 
+# Reserve a fresh Markdown archive without replacing an earlier reset.
+# Minute timestamps can collide during manual retries or shared archive dirs.
+reserve_archive_path() {
+    local stem="$1" suffix="" attempt=0 candidate
+    while :; do
+        candidate="${stem}${suffix}.md"
+        if [[ ! -e "$candidate" && ! -L "$candidate" ]]; then
+            if (set -o noclobber; : > "$candidate") 2>/dev/null; then
+                printf '%s\n' "$candidate"
+                return 0
+            fi
+            # A competing reset may have claimed this name. Other failures
+            # must stop the reset rather than retry forever or discard memory.
+            if [[ ! -e "$candidate" && ! -L "$candidate" ]]; then
+                printf 'Cannot create memory archive: %s\n' "$candidate" >&2
+                return 1
+            fi
+        fi
+        attempt=$((attempt + 1))
+        suffix="-$attempt"
+    done
+}
+
 reset_agent() {
     local agent="$1"
     local memory_file="$2"
@@ -158,7 +181,8 @@ reset_agent() {
         scratch=$(tail -n +"$((separator_line + 1))" "$memory_file" | sed '/^## Scratch Notes/d' | sed '/^[[:space:]]*$/d')
         if [ -n "$scratch" ]; then
             mkdir -p "$archive_dir"
-            local archive_file="$archive_dir/${TIMESTAMP}.md"
+            local archive_file
+            archive_file=$(reserve_archive_path "$archive_dir/$TIMESTAMP")
             printf "# %s scratch notes — archived %s\n\n%s\n" "$agent" "$TIMESTAMP" "$scratch" > "$archive_file"
             log "Archived scratch notes for $agent ($(echo "$scratch" | wc -l) lines)"
         else
@@ -166,7 +190,9 @@ reset_agent() {
         fi
     else
         mkdir -p "$archive_dir"
-        cp "$memory_file" "$archive_dir/${TIMESTAMP}-full-backup.md"
+        local archive_file
+        archive_file=$(reserve_archive_path "$archive_dir/$TIMESTAMP-full-backup")
+        cp "$memory_file" "$archive_file"
         log "WARN: No separator in $agent memory — backed up entire file before reset"
     fi
 
@@ -223,7 +249,8 @@ reset_remote_agent() {
         scratch=$(tail -n +"$((separator_line + 1))" "$tmpfile" | sed '/^## Scratch Notes/d' | sed '/^[[:space:]]*$/d')
         if [ -n "$scratch" ]; then
             mkdir -p "$archive_dir"
-            local archive_file="$archive_dir/${TIMESTAMP}.md"
+            local archive_file
+            archive_file=$(reserve_archive_path "$archive_dir/$TIMESTAMP")
             printf "# %s scratch notes — archived %s\n\n%s\n" "$agent" "$TIMESTAMP" "$scratch" > "$archive_file"
             log "Archived scratch notes for $agent ($(echo "$scratch" | wc -l) lines)"
         else
@@ -231,7 +258,9 @@ reset_remote_agent() {
         fi
     else
         mkdir -p "$archive_dir"
-        cp "$tmpfile" "$archive_dir/${TIMESTAMP}-full-backup.md"
+        local archive_file
+        archive_file=$(reserve_archive_path "$archive_dir/$TIMESTAMP-full-backup")
+        cp "$tmpfile" "$archive_file"
         log "WARN: No separator in $agent memory — backed up entire file before reset"
     fi
 

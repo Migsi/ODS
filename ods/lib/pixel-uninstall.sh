@@ -20,6 +20,7 @@ _ods_pixel_access_validate_or_remove() {
     shift
     sudo python3 - "$action" "$@" <<'PY'
 import errno
+import fcntl
 import json
 import os
 import pathlib
@@ -167,7 +168,7 @@ if present(program):
                 raise SystemExit(f"unexpected Pixel access program file: {relative}")
             regular(child, root_uid, root_gid, 16 * 1024 * 1024)
     if marker_state == "ready" and seen != set(sources):
-        raise SystemExit("ready Pixel access program bundle is partial")
+        raise SystemExit("ready Pixel access program bundle is partial: " + ", ".join(sorted(set(sources) - seen)))
 
 config_present = present(config)
 if config_present:
@@ -220,6 +221,14 @@ if present(state_root):
             parsed = json.loads(child.read_text(encoding="utf-8"))
             if not isinstance(parsed, dict):
                 raise SystemExit(f"invalid Pixel access state: {child.name}")
+    if present(state_root / "transition.json"):
+        raise SystemExit("recover the pending Pixel access/settings/provider transition before uninstall")
+    if present(state_root / "lock"):
+        with (state_root / "lock").open("rb") as lock_file:
+            try:
+                fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError as error:
+                raise SystemExit("Pixel access transition lock is busy") from error
 
 if present(probe_owner):
     directory(probe_base, root_uid, root_gid, exact_mode=0o711)
@@ -298,7 +307,10 @@ ods_pixel_uninstall_managed() {
     local workspace_preview_state="${ODS_PIXEL_UNINSTALL_PREVIEW_STATE_DIR:-/var/lib/ods-pixel-preview}"
     local system_observer_program="$libexec_dir/ods-pixel-system-observe.py"
     local system_observer_source="$install_dir/extensions/services/pixel-agent/host/system_observe.py"
+    # This root-owned coordinator must be retired with the other Pixel units;
+    # otherwise systemd can restart it after the ODS installation is gone.
     local access_unit="$systemd_dir/ods-pixel-access.service"
+    local access_source="$install_dir/extensions/services/pixel-agent/host/ods-pixel-access.service"
     local access_program="$libexec_dir/ods-pixel-access"
     local access_config="$etc_dir/pixel-access.json"
     local access_state="${ODS_PIXEL_UNINSTALL_ACCESS_STATE_DIR:-/var/lib/ods-pixel-access}"
@@ -361,7 +373,8 @@ ods_pixel_uninstall_managed() {
         "$artifact_promoter_unit" "$artifact_promoter_program" \
         "$workspace_preview_unit" "$workspace_preview_program" "$workspace_preview_state" \
         "$system_observer_program" "$access_unit" "$access_program" "$access_config" \
-        "$access_state" "$access_probe_base" "$access_dropin_dir" "$access_dropin"; do
+        "$access_source" "$access_state" "$access_probe_base" \
+        "$access_dropin_dir" "$access_dropin"; do
         [[ "$path" == /* && "$path" != / ]] || {
             log_error "Refusing Pixel Operations cleanup for an invalid absolute target"
             return 1
@@ -1968,7 +1981,8 @@ PY
             || systemctl is-active --quiet pixel-extension-manager.service \
             || systemctl is-active --quiet pixel-artifact-promoter.service \
             || systemctl is-active --quiet pixel-workspace-preview.service \
-            || systemctl is-active --quiet pixel-ops-broker.service; then
+            || systemctl is-active --quiet pixel-ops-broker.service \
+            || systemctl is-active --quiet ods-pixel-access.service; then
             log_error "ODS-managed Pixel system services are still active; no Pixel files were removed"
             return 1
         fi

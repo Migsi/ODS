@@ -5650,9 +5650,10 @@ def _docker_service_health_snapshot() -> dict:
         )
         if names_result.returncode != 0:
             raise RuntimeError((names_result.stderr or names_result.stdout).strip())
+        declared_containers = _declared_docker_containers()
         names = [
             name.strip() for name in names_result.stdout.splitlines()
-            if name.strip().startswith("ods-")
+            if name.strip().startswith("ods-") or name.strip() in declared_containers
         ]
         containers: list[dict] = []
         if names:
@@ -5672,6 +5673,7 @@ def _docker_service_health_snapshot() -> dict:
                 labels = (item.get("Config") or {}).get("Labels") or {}
                 service_id = labels.get("com.docker.compose.service")
                 container_name = str(item.get("Name") or "").lstrip("/")
+                service_id = declared_containers.get(container_name, service_id)
                 if not service_id and container_name.startswith("ods-"):
                     service_id = container_name.removeprefix("ods-")
                 containers.append({
@@ -6328,6 +6330,30 @@ def _service_has_docker_container(service_id: str) -> tuple[bool, str]:
     return True, ""
 
 
+def _declared_docker_containers() -> dict[str, str]:
+    """Map effective extension container names to their dashboard service IDs."""
+    service_ids = {
+        path.name
+        for root in (EXTENSIONS_DIR, USER_EXTENSIONS_DIR)
+        if root.is_dir()
+        for path in root.iterdir()
+        if path.is_dir() and SERVICE_ID_RE.fullmatch(path.name)
+    }
+    containers = {}
+    for service_id in sorted(service_ids):
+        ext_dir = _find_ext_dir(service_id)
+        if ext_dir is None:
+            continue
+        manifest = _read_manifest(ext_dir)
+        service = manifest.get("service", {}) if manifest else {}
+        if not isinstance(service, dict) or (service.get("type") or "docker") != "docker":
+            continue
+        name = service.get("container_name", f"ods-{service_id}")
+        if isinstance(name, str) and name.strip():
+            containers[name.strip()] = service_id
+    return containers
+
+
 def _is_other_ext_compose(fpath: str, service_id: str, ext_roots: tuple) -> bool:
     """True if fpath points to an extension compose file owned by an
     extension other than service_id. Used to filter `-f` args from the
@@ -6932,6 +6958,7 @@ class AgentHandler(BaseHTTPRequestHandler):
             if result.returncode != 0:
                 logger.warning("docker stats returned non-zero: %s", result.stderr[:200] if result.stderr else "")
 
+            declared_containers = _declared_docker_containers()
             containers = []
             for line in result.stdout.strip().splitlines():
                 if not line.strip():
@@ -6942,7 +6969,7 @@ class AgentHandler(BaseHTTPRequestHandler):
                     continue
 
                 name = raw.get("name", "")
-                if not name.startswith("ods-"):
+                if not name.startswith("ods-") and name not in declared_containers:
                     continue
 
                 cpu_str = raw.get("cpu", "0%").rstrip("%")
@@ -6961,7 +6988,7 @@ class AgentHandler(BaseHTTPRequestHandler):
                 except ValueError:
                     mem_percent = 0.0
 
-                service_id = name.removeprefix("ods-")
+                service_id = declared_containers.get(name, name.removeprefix("ods-"))
 
                 try:
                     pids = int(raw.get("pids", "0") or "0")
@@ -8743,18 +8770,18 @@ class AgentHandler(BaseHTTPRequestHandler):
             container_name = f"ods-{service_id}"
             cmd = ["docker", "logs", "--tail", str(tail), container_name]
             result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=5,
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=5,
             )
+            output = result.stdout or ""
             # Handle container not yet created (e.g. during image pull)
-            if result.returncode != 0 and "no such container" in (result.stderr or "").lower():
+            if result.returncode != 0 and "no such container" in output.lower():
                 json_response(self, 200, {
                     "service_id": service_id,
                     "logs": "Container is starting up — logs will appear once it is running.",
                     "lines": 0,
                 })
                 return
-            # docker logs writes to stderr for some containers
-            output = result.stdout or result.stderr or ""
+            # Both container streams share one pipe, preserving their emitted order.
             json_response(self, 200, {
                 "service_id": service_id,
                 "logs": output[-50000:],
@@ -8793,9 +8820,10 @@ class AgentHandler(BaseHTTPRequestHandler):
         try:
             result = subprocess.run(
                 ["docker", "logs", "--tail", str(tail), container_name],
-                capture_output=True, text=True, timeout=5,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=5,
             )
-            if result.returncode != 0 and "no such container" in (result.stderr or "").lower():
+            output = result.stdout or ""
+            if result.returncode != 0 and "no such container" in output.lower():
                 json_response(self, 200, {
                     "service_id": sid,
                     "container_name": container_name,
@@ -8804,9 +8832,8 @@ class AgentHandler(BaseHTTPRequestHandler):
                 })
                 return
             if result.returncode != 0:
-                json_response(self, 500, {"error": f"docker logs failed: {(result.stderr or '')[:500]}"})
+                json_response(self, 500, {"error": f"docker logs failed: {output[:500]}"})
                 return
-            output = result.stdout or result.stderr or ""
             json_response(self, 200, {
                 "service_id": sid,
                 "container_name": container_name,

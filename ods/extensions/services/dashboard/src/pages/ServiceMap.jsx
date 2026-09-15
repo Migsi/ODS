@@ -142,7 +142,7 @@ export function buildTopology(statusData) {
         id,
         name: service.name || id,
         status: normalizeStatus(service.status),
-        port: service.external_port || service.port || '',
+        port: service.external_port ?? service.port ?? '',
         public_url: service.public_url || '',
         ui_path: service.ui_path || '/',
         category: CATEGORY_MAP[id] || 'other',

@@ -64,8 +64,8 @@ fi
 
     def test_each_large_backup_source_checks_space_before_copying(self):
         paths = [('user-data', 'data/open-webui'), ('config', 'config'),
-                 ('full', 'models'), ('full', 'data/whisper/cache'),
-                 ('full', 'data/kokoro/cache')]
+                 ('full', 'models'), ('full', 'data/models'),
+                 ('full', 'data/whisper'), ('full', 'data/embeddings')]
         for index, (kind, relative) in enumerate(paths):
             source = self.ods / relative
             source.mkdir(parents=True, exist_ok=True)

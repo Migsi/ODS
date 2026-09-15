@@ -49,6 +49,9 @@ import os, pathlib, sys
 if sys.argv[1:] == ['--help']:
     print('info=progress2' if os.environ['ODS_TEST_MODERN'] == '1' else '--progress')
     raise SystemExit(0)
+# Checksum verification is a read-only dry run, not a retried transfer.
+if '--dry-run' in sys.argv[1:]:
+    os.execv(os.environ['ODS_TEST_REAL_RSYNC'], ['rsync', *sys.argv[1:]])
 calls = pathlib.Path(os.environ['ODS_TEST_TRANSFERS'])
 first = not calls.exists()
 with calls.open('a') as stream:

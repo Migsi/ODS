@@ -4837,10 +4837,14 @@ cmd_stt() {
 
     # Resolve model and port from .env (with fallback for older installs).
     local model port model_encoded url
-    model=$(_env_get_raw AUDIO_STT_MODEL)
-    [[ -z "$model" ]] && model="Systran/faster-whisper-base"
-    port=$(_env_get_raw WHISPER_PORT)
-    [[ -z "$port" ]] && port="9000"
+    # These settings are dotenv values, including quotes and inline comments.
+    # Keep missing-file/key defaults independent of the caller's environment.
+    local AUDIO_STT_MODEL="" WHISPER_PORT=""
+    if [[ -f "$INSTALL_DIR/.env" ]]; then
+        load_env
+    fi
+    model="${AUDIO_STT_MODEL:-Systran/faster-whisper-base}"
+    port="${WHISPER_PORT:-9000}"
     model_encoded="${model//\//%2F}"
     url="http://127.0.0.1:${port}"
 

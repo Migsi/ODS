@@ -473,6 +473,25 @@ describe('Dashboard system overview', () => {
     expect(within(row).getAllByText('—')).toHaveLength(2)
   })
 
+  it('shows measured auxiliary containers without granting service restart actions', async () => {
+    mockResources = {
+      services: [{
+        id: 'librechat-mongodb', name: 'librechat-mongodb', type: 'docker',
+        restartable: false,
+        restart_unavailable_reason: 'Service is not declared in the active manifest set',
+        container: { container_name: 'ods-librechat-mongodb', cpu_percent: 4, memory_used_mb: 256 },
+        disk: null,
+      }],
+    }
+    await renderDashboard({ ...baseStatus, services: [] })
+    const row = await screen.findByTestId('service-row-librechat-mongodb')
+    expect(within(row).getByText('4.0%')).toBeInTheDocument()
+    expect(within(row).getByText('256 MB')).toBeInTheDocument()
+    expect(within(row).queryByRole('button', { name: /actions/ })).not.toBeInTheDocument()
+    expect(within(row).getByTitle('Service is not declared in the active manifest set')).toBeInTheDocument()
+    expect(restartCalls).toHaveLength(0)
+  })
+
   it('restarts a service from the row actions menu', async () => {
     restartDeferred = createDeferred()
     mockResources = {

@@ -27,6 +27,8 @@ jobs:
         env:
           ODS_TEST_AWK: mawk
         run: python3 tests/test-backup-space-arithmetic.py -v
+      - name: Restore transaction failure recovery
+        run: python3 tests/test_restore_transaction.py -v
       - name: Backup integrity and restore round trip
         run: |
           bash tests/test-backup-integrity.sh
@@ -61,14 +63,22 @@ jobs:
           python-version: ${{ matrix.python }}
       - name: Install isolated inference test dependencies
         run: python -m pip install -r extensions/services/pixel-inference/requirements.txt 'pytest>=8,<9'
+      - name: mDNS publication recovery contracts
+        run: python -m pytest tests/test_mdns_refresh_recovery.py tests/test_mdns_subdomains.py -q
+      - name: Compressed backup extraction safety and recovery
+        run: python -m pytest tests/test_restore_archive.py -q
       - name: GPU assignment capacity contracts
         run: python -m pytest tests/test-assign-gpus.py tests/test_gpu_spare_capacity.py -q
+      - name: macOS TCP bridge lifecycle contracts
+        run: python -m pytest tests/test_macos_llm_bridge.py -q
       - name: Sharing credential and owner control tests
         run: python -m pytest tests/pixel_inference -q
       - name: Inference perimeter and cancellation tests
         run: python -m pytest extensions/services/pixel-inference/tests -q
       - name: Model router compatibility and route pins
         run: python -m pytest extensions/services/model-router/tests -q
+      - name: LiteLLM metadata-only telemetry contracts
+        run: python -m pytest extensions/services/litellm/tests -q
       - name: Test verified preview source and diff contracts
         run: |
           python -m pytest -q extensions/services/pixel-agent/tests/test_workspace_preview.py \
@@ -76,6 +86,8 @@ jobs:
             extensions/services/pixel-agent/tests/test_workspace_preview_git.py \
             extensions/services/pixel-agent/tests/test_preview_empty_assets.py
 
+      - name: Token Spy proxy persistence and disconnect contracts
+        run: python -m pytest extensions/services/token-spy/tests/test_proxy_persistence_io.py extensions/services/token-spy/tests/test_anthropic_cumulative_usage.py -q
       - name: Lemonade context cache persistence
         run: sudo env LEMONADE_REQUIRE_NAMESPACE=1 "$(command -v python)" -m pytest tests/test_lemonade_context_persistence.py -q
 
@@ -94,6 +106,21 @@ jobs:
 
       - name: Test preview publication directory failures
         run: python -m pytest -q extensions/services/pixel-agent/tests/test_preview_directory_errors.py
+
+  token-spy-pricing:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ods/extensions/services/token-spy
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+        with:
+          python-version: "3.12"
+      - name: Install test dependencies
+        run: python -m pip install -r requirements.txt "pytest>=8,<9"
+      - name: Test proxy pricing receipts
+        run: python -m pytest -q tests/test_local_upstream_pricing.py tests/test_anthropic_cumulative_usage.py tests/test_usage_report.py
 
   token-spy-postgres:
     runs-on: ubuntu-latest
@@ -177,6 +204,11 @@ jobs:
       - name: Extension Runtime Check Tests
         run: bash tests/test-extension-runtime-check.sh
 
+      - name: AP network identity preflight
+        run: |
+          bash tests/test-ap-mode.sh
+          python3 tests/test-ap-identity-preflight.py
+
       - name: Phase C P1 Static Checks
         run: bash tests/test-phase-c-p1.sh
 
@@ -243,6 +275,8 @@ jobs:
 
       - name: Uninstall Compose Flags Tests
         run: bash tests/test-uninstall-compose-flags.sh
+      - name: System service ownership and shutdown recovery
+        run: bash tests/test-uninstall-mdns-unit.sh
 
       - name: Windows Compose Failure Report Tests
         run: bash tests/test-windows-compose-failure-report.sh
@@ -398,6 +432,9 @@ jobs:
 
       - name: Rollback Picks the Newest Backup
         run: bash tests/test-update-rollback-latest-backup.sh
+
+      - name: Rollback Preserves Originals on I/O Failure
+        run: bash tests/test-update-rollback-restore-failure.sh
 
       - name: Update Rollback Contract
         run: bash tests/test-update-rollback-contract.sh

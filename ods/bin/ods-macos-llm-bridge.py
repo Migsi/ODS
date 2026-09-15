@@ -44,8 +44,14 @@ def _pump(source: socket.socket, destination: socket.socket) -> None:
             if not data:
                 break
             destination.sendall(data)
-    except (ConnectionError, OSError):
-        pass
+    except OSError:
+        # An I/O failure ends the tunnel, including the other pump's blocked
+        # recv/send. A normal EOF still permits a response after a half-close.
+        for connection in (source, destination):
+            try:
+                connection.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
     finally:
         try:
             destination.shutdown(socket.SHUT_WR)

@@ -840,6 +840,22 @@ def validate_remote_inputs(inputs: RenderInputs) -> None:
         )
 
 
+def validate_render_inputs(inputs: RenderInputs) -> None:
+    if inputs.context_length <= 0:
+        raise ValueError(f"context length must be positive: {inputs.context_length}")
+    if not (1 <= inputs.opencode_port <= 65535):
+        raise ValueError(f"opencode port must be between 1 and 65535: {inputs.opencode_port}")
+    for label, value in {
+        "model": inputs.model,
+        "gguf_file": inputs.gguf_file,
+        "llm_base_url": inputs.llm_base_url,
+        "litellm_key": inputs.litellm_key,
+    }.items():
+        if any(ord(char) < 32 or ord(char) == 127 for char in value):
+            raise ValueError(f"{label} cannot contain control characters or newlines")
+    validate_remote_inputs(inputs)
+
+
 def render(args: argparse.Namespace) -> dict[str, object]:
     inputs = RenderInputs(
         switchboard_mode=getattr(args, 'switchboard_mode', 'enabled'),
@@ -858,7 +874,7 @@ def render(args: argparse.Namespace) -> dict[str, object]:
         remote_llm_base_url=args.remote_llm_base_url,
         remote_llm_model=args.remote_llm_model,
     )
-    validate_remote_inputs(inputs)
+    validate_render_inputs(inputs)
     if args.surface == "litellm-switchboard" and inputs.ods_mode == "cloud":
         raise ValueError(
             "litellm-switchboard is local-runtime-only and cannot be rendered "
