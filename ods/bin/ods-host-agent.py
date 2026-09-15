@@ -133,6 +133,11 @@ except Exception:  # pragma: no cover - import environment dependent
     _data_backup_runtime_module = None
 
 try:
+    import extension_data_stream_backup_runtime as _data_stream_backup_runtime_module
+except Exception:  # pragma: no cover - import environment dependent
+    _data_stream_backup_runtime_module = None
+
+try:
     import extension_configuration_effect_runtime as _configuration_effect_runtime_module
 except Exception:  # pragma: no cover - import environment dependent
     _configuration_effect_runtime_module = None
@@ -221,6 +226,12 @@ _image_artifact_runtime_lock = threading.Lock()
 _data_backup_runtime = None
 _data_backup_runtime_binding: tuple[Path, Path, object] | None = None
 _data_backup_runtime_lock = threading.Lock()
+
+# Generic immutable multi-path backup uses the same owner-private backup root,
+# but its restore effect is deliberately not selected by the host yet.
+_data_stream_backup_runtime = None
+_data_stream_backup_runtime_binding: tuple[Path, Path, object] | None = None
+_data_stream_backup_runtime_lock = threading.Lock()
 
 # Exact SearXNG configuration publication is composed lazily from the fixed
 # install root, transaction store, and host secret custody. Only ``configure``
@@ -6686,6 +6697,34 @@ def _get_extension_data_backup_runtime():
         return _data_backup_runtime
 
 
+def _get_extension_data_stream_backup_runtime():
+    """Compose, but do not run, the attested generic snapshot effect."""
+    global _data_stream_backup_runtime, _data_stream_backup_runtime_binding
+    if _data_stream_backup_runtime_module is None or not callable(
+        _extension_lifecycle_plan_loader
+    ):
+        return None
+    binding = (INSTALL_DIR, DATA_DIR, _extension_lifecycle_plan_loader)
+    with _data_stream_backup_runtime_lock:
+        if (
+            _data_stream_backup_runtime is None
+            or _data_stream_backup_runtime_binding != binding
+        ):
+            try:
+                _data_stream_backup_runtime = (
+                    _data_stream_backup_runtime_module.build_stream_backup_runtime(
+                        install_dir=INSTALL_DIR, data_dir=DATA_DIR,
+                        plan_loader=_extension_lifecycle_plan_loader,
+                    )
+                )
+            except Exception:
+                _data_stream_backup_runtime = None
+                _data_stream_backup_runtime_binding = None
+                return None
+            _data_stream_backup_runtime_binding = binding
+        return _data_stream_backup_runtime
+
+
 def _get_extension_configuration_effect_runtime():
     """Compose, but do not run, the exact SearXNG configuration effect."""
 
@@ -7935,16 +7974,21 @@ class AgentHandler(BaseHTTPRequestHandler):
                     else:
                         dispatcher = None
                 elif command.operation_key in {"backup", "restore"}:
-                    # These paired destructive-data boundaries can never fall
-                    # back to the generic dispatcher when their closed canary
-                    # runtime is missing or fails construction.
+                    # The generic backup captures an attested immutable path
+                    # union, but generic restore remains unavailable. Neither
+                    # data route may fall back to an injected dispatcher.
                     dispatcher = None
-                    runtime = _get_extension_data_backup_runtime()
-                    if runtime is not None:
-                        if command.operation_key == "backup":
+                    if command.operation_key == "backup" and command.service_ids != ("searxng",):
+                        runtime = _get_extension_data_stream_backup_runtime()
+                        if runtime is not None:
                             dispatcher = runtime.backup_dispatcher
                             started_observer = runtime.backup_started_observer
-                        else:
+                    elif command.service_ids == ("searxng",):
+                        runtime = _get_extension_data_backup_runtime()
+                        if runtime is not None and command.operation_key == "backup":
+                            dispatcher = runtime.backup_dispatcher
+                            started_observer = runtime.backup_started_observer
+                        elif runtime is not None:
                             dispatcher = runtime.restore_dispatcher
                             started_observer = runtime.restore_started_observer
                 elif command.operation_key == "configure":
