@@ -647,6 +647,7 @@ async def _retained_chat_stream(request, body, owner):
 async def _produce_retained_result(store, identity, body, config):
     edge_url, key = config
     done_seen = False
+    answer_seen = False
     terminal_error_seen = False
     cancelled = False
     failed = False
@@ -670,22 +671,43 @@ async def _produce_retained_result(store, identity, body, config):
                             del buffered[:newline + 1]
                             if len(line.rstrip(b"\r\n")) > _MAX_SSE_LINE_BYTES:
                                 raise ResultCapacity("SSE line limit")
-                            store.append(identity, line)
                             stripped = line.rstrip(b"\r\n")
                             if stripped.startswith(b"data: ") and stripped != b"data: [DONE]":
                                 try:
                                     event = json.loads(stripped[6:])
                                 except (json.JSONDecodeError, UnicodeDecodeError):
                                     event = None
-                                if isinstance(event, dict) and "error" in event:
-                                    # A syntactically terminal SSE stream can still be a
-                                    # failed attempt. Keep its sanitized error bytes for
-                                    # replay, but never publish it as a completed result.
+                                if isinstance(event, dict):
+                                    if "error" in event:
+                                        # A syntactically terminal SSE stream can still be
+                                        # a failed attempt. Keep its sanitized error bytes
+                                        # for replay, but never publish it as complete.
+                                        terminal_error_seen = True
+                                        failed = True
+                                    choices = event.get("choices")
+                                    for choice in choices if isinstance(choices, list) else []:
+                                        if not isinstance(choice, dict):
+                                            continue
+                                        for field in ("delta", "message"):
+                                            payload = choice.get(field)
+                                            if isinstance(payload, dict) and isinstance(payload.get("content"), str) \
+                                                    and payload["content"]:
+                                                answer_seen = True
+                            if stripped == b"data: [DONE]":
+                                if not answer_seen and not terminal_error_seen:
+                                    # Live Pixel Edge cancellations can end with only
+                                    # [DONE]. The host session reports zero output and
+                                    # aborted, so a syntactic DONE is not a user answer.
+                                    # Do not persist it as a successful receipt.
                                     terminal_error_seen = True
                                     failed = True
-                            if stripped == b"data: [DONE]":
+                                    store.append(identity, _error_event("Pixel returned no answer. Try again.")
+                                                 + b"data: [DONE]\n\n", terminal=True)
+                                else:
+                                    store.append(identity, line)
                                 done_seen = True
                                 break
+                            store.append(identity, line)
                         if done_seen:
                             break
                         if len(buffered) > _MAX_SSE_LINE_BYTES:

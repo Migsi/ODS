@@ -225,6 +225,36 @@ def test_terminal_upstream_error_is_replayable_but_never_complete(store, monkeyp
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("chunks", [
+    [b"data: [DONE]\n\n"],
+    [b'data: {"choices":[{"delta":{"role":"assistant"}}]}\n\n', b"data: [DONE]\n\n"],
+])
+def test_done_without_user_answer_is_never_a_complete_receipt(store, monkeypatch, chunks):
+    """Five live Tower1 cancel attempts had aborted, zero-token Pixel sessions.
+
+    Edge supplied only DONE while ODS previously published complete. A
+    terminal SSE marker alone must not become a successful saved answer.
+    """
+    async def run():
+        monkeypatch.setattr(pixel.httpx, "AsyncClient", lambda **kw: FakeClient(
+            FakeResponse(content_type="text/event-stream", chunks=chunks)))
+        cancels = []
+        async def cancel(*args):
+            cancels.append(args)
+            return False
+        monkeypatch.setattr(pixel, "_cancel_edge_run", cancel)
+        await pixel.pixel_chat_stream(ConnectedRequest(), body(), OWNER)
+        await asyncio.gather(*list(pixel._result_tasks.values()))
+        result = await pixel.pixel_chat_result(
+            pixel.ChatResultRequest(chat_id="chat-test", request_id="attempt-one"), OWNER)
+        assert result["state"] == "interrupted"
+        assert "Pixel returned no answer" in result["events"]
+        assert result["events"].count("[DONE]") == 1
+        assert not store.has_pending(IDENTITY[:2])
+        assert not cancels
+    asyncio.run(run())
+
+
 def test_terminal_write_failure_still_releases_known_stopped_attempt(store, monkeypatch):
     async def run():
         append = store.append
