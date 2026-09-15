@@ -115,7 +115,10 @@ def _validate_target_ref(value: Any) -> None:
         _decimal(value[field], signed=False)
     for field in ("mtimeNs", "ctimeNs"):
         _decimal(value[field], signed=True)
-    if type(value["mode"]) is not int or value["mode"] & 0o700 != 0o700 or value["mode"] & 0o7022:
+    if (
+        type(value["mode"]) is not int or not 0 <= value["mode"] <= 0o7777
+        or value["mode"] & 0o700 != 0o700 or value["mode"] & 0o7022
+    ):
         _fail("lifecycle-work-data-restore-journal-invalid")
 
 
@@ -268,7 +271,7 @@ class RestoreIntentJournal:
         _close_quietly(install)
         _close_quietly(root)
 
-    def _observe_target(self, path: str) -> dict[str, Any] | None:
+    def _observe_target(self, path: str, *, require_absent: tuple[str, ...] = ()) -> dict[str, Any] | None:
         install: int | None = None
         parent: int | None = None
         try:
@@ -277,6 +280,12 @@ class RestoreIntentJournal:
             parent = _open_relative_directory(install, parts[:-1], missing_ok=False)
             assert parent is not None
             parent_info = os.fstat(parent)
+            for name in require_absent:
+                try:
+                    os.stat(name, dir_fd=parent, follow_symlinks=False)
+                except FileNotFoundError:
+                    continue
+                _fail("lifecycle-work-data-restore-transient-collision")
             try:
                 target = os.stat(parts[-1], dir_fd=parent, follow_symlinks=False)
             except FileNotFoundError:
@@ -329,15 +338,19 @@ class RestoreIntentJournal:
                     _fail("lifecycle-work-data-restore-intent-mismatch")
                 _validate_target_ref(document.get("targetBefore"))
                 return document
-            baseline["targetBefore"] = self._observe_target(path)
+            baseline["targetBefore"] = self._observe_target(
+                path, require_absent=(stage_name, quarantine_name),
+            )
             return _publish(root, name, _canonical(baseline))[0]
         finally:
             _close_quietly(root)
 
-    def expect_original_target(self, intent: dict[str, Any]) -> None:
+    def expect_original_target(
+        self, command: LifecycleWorkCommand, receipt: StreamSnapshotReceipt,
+        service_id: str, index: int, path_state: dict[str, Any],
+    ) -> None:
         """Refuse drift after intent; later replay handles proven rename states."""
-        if not isinstance(intent, dict) or not isinstance(intent.get("path"), str):
-            _fail("lifecycle-work-data-restore-journal-invalid")
+        intent = self.begin(command, receipt, service_id, index, path_state)
         _validate_target_ref(intent.get("targetBefore"))
         if self._observe_target(intent["path"]) != intent["targetBefore"]:
             _fail("lifecycle-work-data-restore-target-drift")

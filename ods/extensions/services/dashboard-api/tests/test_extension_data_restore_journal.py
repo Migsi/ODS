@@ -94,12 +94,29 @@ def test_crash_after_journal_link_recovers_only_matching_temp(tmp_path: Path, mo
 def test_target_swap_after_intent_is_drift_not_implicit_approval(tmp_path: Path):
     install, _backup, alpha, store, command, _root, journal = _ready(tmp_path)
     with store.open_verified(command) as (_archive, document, receipt):
-        intent = journal.begin(command, receipt, "alpha", 0, document["services"][0]["paths"][0])
+        path_state = document["services"][0]["paths"][0]
+        journal.begin(command, receipt, "alpha", 0, path_state)
     alpha.rename(install / "data" / "held-alpha")
     alpha.mkdir(mode=0o700)
     with pytest.raises(LifecycleWorkExecutionError) as caught:
-        journal.expect_original_target(intent)
+        journal.expect_original_target(command, receipt, "alpha", 0, path_state)
     assert caught.value.code == "lifecycle-work-data-restore-target-drift"
+
+
+@linux_effect
+@pytest.mark.parametrize("which", ["stage", "quarantine"])
+def test_derived_transient_collision_refuses_new_intent(tmp_path: Path, which: str):
+    install, _backup, _alpha, store, command, root, journal = _ready(tmp_path)
+    with store.open_verified(command) as (_archive, document, receipt):
+        path_state = document["services"][0]["paths"][0]
+        _key, _record, stage, quarantine = journals._names(command, "alpha", 0, path_state["path"])
+        collision = install / "data" / (stage if which == "stage" else quarantine)
+        collision.mkdir(mode=0o700)
+        with pytest.raises(LifecycleWorkExecutionError) as caught:
+            journal.begin(command, receipt, "alpha", 0, path_state)
+    assert caught.value.code == "lifecycle-work-data-restore-transient-collision"
+    assert not list(root.iterdir())
+    assert collision.is_dir()
 
 
 @linux_effect
