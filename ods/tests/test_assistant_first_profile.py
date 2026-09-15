@@ -345,6 +345,7 @@ class AssistantFirstProfileTests(unittest.TestCase):
             **os.environ,
             "PIXEL_OPENWEBUI_KEY": "a" * 64,
             "DASHBOARD_API_KEY": "b" * 64,
+            "SEARXNG_SECRET": "c" * 64,
             "PIXEL_INGRESS_GID": "1234",
             "PIXEL_INGRESS_RUNTIME_DIR": "/tmp/ods-assistant-first-ingress",
             "PIXEL_PREVIEW_RUNTIME_DIR": "/tmp/ods-assistant-first-preview",
