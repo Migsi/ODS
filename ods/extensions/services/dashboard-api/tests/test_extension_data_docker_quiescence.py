@@ -238,12 +238,14 @@ def test_real_manager_status_proves_only_the_active_use_window(tmp_path: Path):
         observer = quiescence.DockerQuiescenceObserver(
             command, install, admission, fake, status,
         )
+        assert grant["leaseToken"] not in repr(observer)
         assert observer() is True
         assert all(locks[service_id].locked() for service_id in command.service_ids)
     prior_calls = len(fake.calls)
     with pytest.raises(quiescence.DockerQuiescenceError) as caught:
         observer()
     assert caught.value.code == "lifecycle-work-data-quiescence-lease-not-active"
+    assert grant["leaseToken"] not in str(caught.value)
     assert len(fake.calls) == prior_calls
 
 
