@@ -300,6 +300,9 @@ grep -q 'starting|verifying|swapping' ods-cli \
 echo "[contract] macOS host-agent LaunchAgent install-dir"
 bash tests/test-macos-host-agent-verification.sh
 
+echo "[contract] macOS CLI reports Compose start failures"
+bash tests/test-macos-cli-compose-failure.sh
+
 echo "[contract] macOS direct binds replace conflicting Colima bridges"
 bash tests/test-macos-direct-bind-bridge.sh
 

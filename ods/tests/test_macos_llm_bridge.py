@@ -84,15 +84,11 @@ def test_bridge_backlog_handles_dashboard_poll_bursts():
 
 
 def test_bridge_enables_tcp_keepalive():
-    left, right = socket.socketpair()
-    try:
-        bridge._enable_tcp_keepalive(left)
-        assert (
-            left.getsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE) == 1
-        )
-    finally:
-        left.close()
-        right.close()
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as connection:
+        assert connection.getsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE) == 0
+        bridge._enable_tcp_keepalive(connection)
+        # BSD may return the enabled option bit (8), rather than the integer 1.
+        assert connection.getsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE) != 0
 
 
 def test_bridge_reuses_real_host_agent_gets_and_safely_closes_posts(monkeypatch):

@@ -15,7 +15,7 @@ def running(pid):
     try:
         status = Path(f"/proc/{pid}/stat").read_text().split(") ", 1)[1]
         return not status.startswith("Z ")
-    except FileNotFoundError:
+    except (FileNotFoundError, ProcessLookupError):
         return False
 
 
@@ -61,7 +61,10 @@ def test_diagnostic_disconnect_stops_descendants(tmp_path, monkeypatch, parent_w
             # This PID came directly from the child started above; baseline
             # failures must not leave the 30-second fixture running.
             if running(child_pid):
-                os.kill(child_pid, signal.SIGKILL)
+                try:
+                    os.kill(child_pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
             await asyncio.wait_for(asyncio.gather(stopping, return_exceptions=True), timeout=3)
             await iterator.aclose()
 

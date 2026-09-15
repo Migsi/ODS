@@ -19,6 +19,12 @@ set -uo pipefail
 
 HF_CACHE="${HF_CACHE:-$HOME/.cache/huggingface/hub}"
 COLD_DIR="${COLD_DIR:-$HOME/llm-cold-storage}"
+# Relative archive locations are relative to the invocation directory, not
+# the Hugging Face cache directory where the replacement symlink is stored.
+case "$COLD_DIR" in
+    /*) ;;
+    *) COLD_DIR="$(pwd -P)/$COLD_DIR" ;;
+esac
 LOG_FILE="${LOG_FILE:-$HOME/.local/log/llm-cold-storage.log}"
 MAX_IDLE_DAYS=7
 

@@ -3373,7 +3373,18 @@ META
 
             # Create archive (relative to presets dir to avoid absolute paths)
             cd "$PRESETS_DIR"
-            if tar czf "$output" "$name" 2>/dev/null; then
+            if (
+                umask 077
+                staged_archive="$(mktemp "${output}.XXXXXX")" || exit 1
+                trap 'rm -f -- "$staged_archive"' EXIT
+                trap 'exit 130' INT
+                trap 'exit 143' TERM
+                # Finish privately before replacing an existing public file.
+                chmod 600 "$staged_archive" || exit 1
+                tar czf "$staged_archive" "$name" 2>/dev/null || exit 1
+                [[ ! -d "$output" ]] || exit 1
+                mv -f -- "$staged_archive" "$output"
+            ); then
                 local size
                 size=$(du -h "$output" 2>/dev/null | cut -f1 || true)
                 success "Preset exported to: $output ($size)"

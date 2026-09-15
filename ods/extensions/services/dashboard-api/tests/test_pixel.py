@@ -551,6 +551,19 @@ async def test_chat_forwards_exact_body_and_narrow_edge_key_only():
 
 
 @pytest.mark.asyncio
+async def test_chat_rejects_before_opening_edge_when_stream_capacity_is_full(monkeypatch):
+    body = pixel.ChatStreamRequest.model_validate(
+        {"chat_id": "capacity", "messages": [{"role": "user", "content": "hello"}]}
+    )
+    monkeypatch.setattr(pixel, "try_begin_pixel_stream", lambda: False)
+    with patch.object(pixel.httpx, "AsyncClient", side_effect=AssertionError("edge must not be opened")):
+        with pytest.raises(HTTPException) as exc_info:
+            await pixel.pixel_chat_stream(ConnectedRequest(), body)
+    assert exc_info.value.status_code == 429
+    assert "capacity" in exc_info.value.detail
+
+
+@pytest.mark.asyncio
 async def test_chat_preserves_the_host_authored_recovery_marker_verbatim():
     marker = (
         b'data: {"choices":[{"delta":{},"finish_reason":"stop"}],'

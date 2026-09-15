@@ -323,7 +323,8 @@ async def setup_network_status() -> dict:
     Always returns 200 even on non-Linux — the response carries
     `platform_supported: false` so the wizard can render a fallback.
     """
-    return await asyncio.to_thread(_call_agent, "/v1/network/status", "GET", None, 10)
+    # Host: one status query (5s) + one address query for all devices (5s).
+    return await asyncio.to_thread(_call_agent, "/v1/network/status", "GET", None, 15)
 
 
 class WifiForgetRequest(BaseModel):
@@ -345,5 +346,6 @@ async def setup_wifi_forget(payload: WifiForgetRequest) -> dict:
         "/v1/network/wifi-forget",
         "POST",
         {"connection": payload.connection},
-        15,
+        # Host verifies the profile type (10s), then deletes it (15s).
+        30,
     )

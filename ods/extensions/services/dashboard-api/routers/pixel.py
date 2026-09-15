@@ -22,7 +22,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from host_agent_client import AgentClientError, AgentHTTPError, async_request_json as request_agent_json
-from pixel_runtime_state import begin_pixel_stream, end_pixel_stream
+from pixel_runtime_state import begin_pixel_stream, end_pixel_stream, try_begin_pixel_stream
 from pixel_chat_results import ChatResultStore, ResultCapacity, ResultConflict, owner_namespace
 from security import verify_api_key
 from config import read_live_env_value
@@ -814,32 +814,62 @@ async def pixel_chat_stream(request: Request, body: ChatStreamRequest, owner: st
         write=30.0,
         pool=5.0,
     )
-    client = httpx.AsyncClient(timeout=timeout, trust_env=False, follow_redirects=False)
-    upstream_context = client.stream(
-        "POST",
-        f"{edge_url}/v1/chat/completions",
-        json=edge_body,
-        headers=_edge_headers(key, accept="text/event-stream"),
-    )
-    try:
-        upstream = await upstream_context.__aenter__()
-    except (httpx.HTTPError, asyncio.TimeoutError) as exc:
-        await client.aclose()
-        logger.warning("Pixel edge stream connection failed (%s)", type(exc).__name__)
-        raise HTTPException(status_code=503, detail="Pixel stream is unavailable") from exc
-    if upstream.status_code != 200:
-        await upstream_context.__aexit__(None, None, None)
-        await client.aclose()
-        raise HTTPException(status_code=502, detail="Pixel request was rejected")
-    if not upstream.headers.get("content-type", "").lower().startswith("text/event-stream"):
-        await upstream_context.__aexit__(None, None, None)
-        await client.aclose()
-        raise HTTPException(status_code=502, detail="Pixel returned an invalid stream")
+    client = None
+    upstream_context = None
+    entered = False
+    released = False
+    done_seen = False
 
-    begin_pixel_stream()
+    async def release_stream():
+        nonlocal released
+        if released:
+            return
+        released = True
+        try:
+            try:
+                if entered and not done_seen:
+                    cancel_task = asyncio.create_task(_cancel_edge_run(edge_url, key, body.chat_id))
+                    try:
+                        await asyncio.wait_for(asyncio.shield(cancel_task), timeout=_CLIENT_CANCEL_TIMEOUT_SECONDS)
+                    except (asyncio.CancelledError, asyncio.TimeoutError):
+                        pass
+            finally:
+                try:
+                    if entered:
+                        await upstream_context.__aexit__(None, None, None)
+                finally:
+                    if client is not None:
+                        await client.aclose()
+        finally:
+            end_pixel_stream()
+
+    if not try_begin_pixel_stream():
+        raise HTTPException(status_code=429, detail="Pixel stream capacity is busy; retry shortly")
+
+    try:
+        client = httpx.AsyncClient(timeout=timeout, trust_env=False, follow_redirects=False)
+        upstream_context = client.stream(
+            "POST",
+            f"{edge_url}/v1/chat/completions",
+            json=edge_body,
+            headers=_edge_headers(key, accept="text/event-stream"),
+        )
+        try:
+            upstream = await upstream_context.__aenter__()
+            entered = True
+        except (httpx.HTTPError, asyncio.TimeoutError) as exc:
+            logger.warning("Pixel edge stream connection failed (%s)", type(exc).__name__)
+            raise HTTPException(status_code=503, detail="Pixel stream is unavailable") from exc
+        if upstream.status_code != 200:
+            raise HTTPException(status_code=502, detail="Pixel request was rejected")
+        if not upstream.headers.get("content-type", "").lower().startswith("text/event-stream"):
+            raise HTTPException(status_code=502, detail="Pixel returned an invalid stream")
+    except BaseException:
+        await release_stream()
+        raise
 
     async def stream() -> AsyncIterator[bytes]:
-        done_seen = False
+        nonlocal done_seen
         try:
             async with async_timeout(_CHAT_STREAM_TIMEOUT_SECONDS):
                 buffered = bytearray()
@@ -873,22 +903,19 @@ async def pixel_chat_stream(request: Request, body: ChatStreamRequest, owner: st
         except Exception:
             yield _error_event("Pixel stream failed")
         finally:
-            if not done_seen:
-                cancel_task = asyncio.create_task(_cancel_edge_run(edge_url, key, body.chat_id))
-                try:
-                    await asyncio.wait_for(
-                        asyncio.shield(cancel_task),
-                        timeout=_CLIENT_CANCEL_TIMEOUT_SECONDS,
-                    )
-                except (asyncio.CancelledError, asyncio.TimeoutError):
-                    pass
-            await upstream_context.__aexit__(None, None, None)
-            await client.aclose()
-            end_pixel_stream()
+            await release_stream()
         if not done_seen:
             yield b"data: [DONE]\n\n"
 
-    return StreamingResponse(
+    class OwnedStreamResponse(StreamingResponse):
+        async def __call__(self, scope, receive, send):
+            try:
+                await super().__call__(scope, receive, send)
+            finally:
+                # Sending headers can fail before the iterator ever starts.
+                await release_stream()
+
+    return OwnedStreamResponse(
         stream(),
         media_type="text/event-stream",
         headers={
@@ -897,5 +924,4 @@ async def pixel_chat_stream(request: Request, body: ChatStreamRequest, owner: st
             "X-Accel-Buffering": "no",
         },
     )
-
 
