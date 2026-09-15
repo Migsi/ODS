@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -13,8 +14,11 @@ if str(BIN_DIR) not in sys.path:
     sys.path.insert(0, str(BIN_DIR))
 
 import extension_data_stream_restore as restores  # noqa: E402
+import extension_data_restore_journal as journals  # noqa: E402
+import extension_data_stream_snapshot as snapshots  # noqa: E402
 from extension_lifecycle_work import LifecycleWorkExecutionError  # noqa: E402
 from test_extension_data_restore_journal import _ready  # noqa: E402
+from test_extension_data_stream_snapshot import _command, _protocol_hash, _roots, _write  # noqa: E402
 
 
 linux_effect = pytest.mark.skipif(os.name != "posix", reason="descriptor-relative Linux restore stage")
@@ -104,3 +108,49 @@ def test_symlink_stage_collision_after_intent_refuses_without_following(tmp_path
         restores.StreamRestoreStager(install, store, journal).stage(command, "alpha", 0)
     assert caught.value.code == "lifecycle-work-data-restore-stage-collision"
     assert stage.is_symlink() and (alpha / "note").read_bytes() == b"private source"
+
+
+@linux_effect
+def test_nested_tree_modes_and_nanosecond_times_are_staged_exactly(tmp_path: Path):
+    install, data, backup, alpha = _roots(tmp_path)
+    journal_root = data / "assistant-first" / "restore-journals"
+    journal_root.mkdir(mode=0o700)
+    journal_root.chmod(0o700)
+    nested = alpha / "deep"
+    nested.mkdir(mode=0o750)
+    nested.chmod(0o750)
+    source = nested / "payload"
+    _write(source, b"nested private bytes")
+    source.chmod(0o640)
+    file_ns = (1_600_000_000_123_456_789, 1_600_000_001_987_654_321)
+    dir_ns = (1_600_000_002_222_222_222, 1_600_000_003_333_333_333)
+    root_ns = (1_600_000_004_444_444_444, 1_600_000_005_555_555_555)
+    os.utime(source, ns=file_ns)
+    os.utime(nested, ns=dir_ns)
+    alpha.chmod(0o750)
+    os.utime(alpha, ns=root_ns)
+    backup_command = _command()
+    backup_command = replace(backup_command, request_hash=_protocol_hash(backup_command, "backup"))
+    store = snapshots.StreamSnapshotStore(install, data, backup)
+    store.backup(backup_command)
+    restore_command = replace(
+        backup_command, operation_key="restore",
+        plan_material=replace(backup_command.plan_material, state="reconciling"),
+        request_hash=_protocol_hash(backup_command, "restore"),
+    )
+    journal = journals.RestoreIntentJournal(install, journal_root)
+    stager = restores.StreamRestoreStager(install, store, journal)
+    stage_name = stager.stage(restore_command, "alpha", 0)
+    assert stage_name is not None
+    stage = install / "data" / stage_name
+    staged_dir, staged_file = stage / "deep", stage / "deep" / "payload"
+    assert _read_noatime(staged_file) == b"nested private bytes"
+    for staged, original, mode, times in (
+        (stage, alpha, 0o750, root_ns),
+        (staged_dir, nested, 0o750, dir_ns),
+        (staged_file, source, 0o640, file_ns),
+    ):
+        observed, prior = staged.stat(), original.stat()
+        assert (observed.st_mode & 0o7777, observed.st_atime_ns, observed.st_mtime_ns) == (mode, *times)
+        assert (prior.st_mode & 0o7777, prior.st_atime_ns, prior.st_mtime_ns) == (mode, *times)
+    assert stager.stage(restore_command, "alpha", 0) == stage_name
