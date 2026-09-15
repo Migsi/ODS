@@ -37,7 +37,7 @@ from extension_data_backup_runtime import (
 )
 from extension_data_prior_effect import verify_installed_prior_data
 from extension_data_scope_contract import BoundDataScope, BoundServiceData, BoundDataPath, DataPathRecord, bind_data_scope
-from extension_lifecycle_work import LifecycleWorkCommand, LifecycleWorkExecutionError
+from extension_lifecycle_work import REQUEST_SCHEMA, LifecycleWorkCommand, LifecycleWorkExecutionError
 
 
 SNAPSHOT_SCHEMA = "ods.extension-data-stream-snapshot.v2"
@@ -102,7 +102,7 @@ def _record(value: DataPathRecord | None) -> dict[str, str] | None:
 
 
 def _scope_index(scope: BoundDataScope) -> list[dict[str, Any]]:
-    if type(scope) is not BoundDataScope or scope.operation_key != "backup":
+    if type(scope) is not BoundDataScope or scope.operation_key not in {"backup", "restore"}:
         _fail("lifecycle-work-data-snapshot-scope-invalid")
     result: list[dict[str, Any]] = []
     path_count = 0
@@ -333,12 +333,26 @@ def _archive_name(command: LifecycleWorkCommand) -> str:
     return f"{command.transaction_id}.{command.plan_hash}.tar"
 
 
+def _backup_request_hash(command: LifecycleWorkCommand) -> str:
+    """Derive the original backup hash from the fixed lifecycle request shape."""
+    unsigned = {
+        "schema": REQUEST_SCHEMA,
+        "transactionId": command.transaction_id,
+        "planHash": command.plan_hash,
+        "operationKey": "backup",
+        "serviceIds": list(command.service_ids),
+        "payload": {"serviceIds": list(command.service_ids)},
+    }
+    encoded = json.dumps(unsigned, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def _snapshot_document(command: LifecycleWorkCommand, scope: BoundDataScope) -> dict[str, Any]:
     return {
         "schema": SNAPSHOT_SCHEMA,
         "transactionId": command.transaction_id,
         "planHash": command.plan_hash,
-        "requestHash": command.request_hash,
+        "requestHash": command.request_hash if scope.operation_key == "backup" else _backup_request_hash(command),
         "services": _scope_index(scope),
     }
 
@@ -595,6 +609,8 @@ class StreamSnapshotStore:
 
     def backup(self, command: LifecycleWorkCommand) -> StreamSnapshotReceipt:
         scope = bind_data_scope(command)
+        if scope.operation_key != "backup":
+            _fail("lifecycle-work-data-snapshot-scope-invalid")
         root = _open_absolute_directory(self.backup_root, private=True)
         install: int | None = None
         temp: int | None = None
