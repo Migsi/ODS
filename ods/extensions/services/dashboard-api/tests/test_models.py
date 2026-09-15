@@ -2241,7 +2241,9 @@ def test_load_model_reconciles_matching_runtime_without_completion_receipt(
     monkeypatch.setattr(
         models_router,
         "_fetch_loaded_model_sync",
-        lambda: "extra.Qwen3.5-9B-Q4_K_M.gguf",
+        # Switchboard identity is intentionally opaque; the configured GGUF
+        # and active-model record remain the authoritative identity proof.
+        lambda: "ods/current",
     )
     monkeypatch.setattr(models_router, "_loaded_model_backend_ready_sync", lambda _loaded: True)
     calls = []

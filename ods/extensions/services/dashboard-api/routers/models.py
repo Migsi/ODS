@@ -492,19 +492,25 @@ def _verified_activation_context(loaded_model: str | None) -> int | None:
     return context if context > 0 else None
 
 
-def _already_active_model(model_id: str, model: dict) -> tuple[bool, str | None]:
+def _configured_model_identity_matches(model: dict) -> bool:
     gguf_file = model.get("gguf_file")
     if not gguf_file:
-        return False, None
+        return False
     if _read_active_model() != gguf_file:
-        return False, None
+        return False
     configured_llm = (
         read_env_file_value("LLM_MODEL", INSTALL_DIR)
         or read_env_value("LLM_MODEL", INSTALL_DIR)
     )
     if not (_model_name_tokens(configured_llm) & _catalog_model_tokens(model)):
-        return False, None
+        return False
     if not (Path(DATA_DIR) / "models" / gguf_file).exists():
+        return False
+    return True
+
+
+def _already_active_model(model_id: str, model: dict) -> tuple[bool, str | None]:
+    if not _configured_model_identity_matches(model):
         return False, None
 
     loaded_model = _fetch_loaded_model_sync()
@@ -2006,8 +2012,7 @@ def load_model(
     activation_context = requested_context
     if (
         activation_context is None
-        and loaded_model
-        and (_model_name_tokens(loaded_model) & _catalog_model_tokens(model))
+        and _configured_model_identity_matches(model)
     ):
         # A matching live backend may still require reconciliation when its
         # activation receipt is absent or stale (for example immediately after
