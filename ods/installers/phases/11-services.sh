@@ -1405,11 +1405,17 @@ MODELS_INI_EOF
         _upgrade_log="$INSTALL_DIR/logs/model-upgrade.log"
         _upgrade_pid=""
         _upgrade_systemd_started=false
+        _upgrade_uid="$(id -u)"
+        _upgrade_runtime_dir="/run/user/$_upgrade_uid"
+        _upgrade_systemd_env=(env \
+            "XDG_RUNTIME_DIR=$_upgrade_runtime_dir" \
+            "DBUS_SESSION_BUS_ADDRESS=unix:path=$_upgrade_runtime_dir/bus")
         if command -v systemd-run >/dev/null 2>&1 \
-            && systemctl --user show-environment >/dev/null 2>&1; then
-            systemctl --user stop "$_upgrade_unit" >/dev/null 2>&1 || true
-            systemctl --user reset-failed "$_upgrade_unit" >/dev/null 2>&1 || true
-            if systemd-run --user --unit="${_upgrade_unit%.service}" --no-block \
+            && [[ -d "$_upgrade_runtime_dir" && -S "$_upgrade_runtime_dir/bus" ]] \
+            && "${_upgrade_systemd_env[@]}" systemctl --user show-environment >/dev/null 2>&1; then
+            "${_upgrade_systemd_env[@]}" systemctl --user stop "$_upgrade_unit" >/dev/null 2>&1 || true
+            "${_upgrade_systemd_env[@]}" systemctl --user reset-failed "$_upgrade_unit" >/dev/null 2>&1 || true
+            if "${_upgrade_systemd_env[@]}" systemd-run --user --unit="${_upgrade_unit%.service}" --no-block \
                 --property=Type=exec \
                 --property=Restart=on-failure \
                 --property=RestartPreventExitStatus=1 \
@@ -1422,7 +1428,7 @@ MODELS_INI_EOF
                     "$BOOTSTRAP_GGUF_FILE" >/dev/null; then
                 _upgrade_systemd_started=true
                 for _ in {1..50}; do
-                    _upgrade_pid="$(systemctl --user show "$_upgrade_unit" \
+                    _upgrade_pid="$("${_upgrade_systemd_env[@]}" systemctl --user show "$_upgrade_unit" \
                         --property=MainPID --value 2>/dev/null || true)"
                     [[ "$_upgrade_pid" =~ ^[1-9][0-9]*$ ]] && break
                     sleep 0.1
@@ -1431,7 +1437,7 @@ MODELS_INI_EOF
         fi
         if [[ ! "$_upgrade_pid" =~ ^[1-9][0-9]*$ ]]; then
             if [[ "$_upgrade_systemd_started" == true ]]; then
-                systemctl --user stop "$_upgrade_unit" >/dev/null 2>&1 || true
+                "${_upgrade_systemd_env[@]}" systemctl --user stop "$_upgrade_unit" >/dev/null 2>&1 || true
             fi
             # Start the portable daemon from a child shell that closes inherited
             # non-stdio FDs first. Otherwise caller-owned advisory locks (FD 9,

@@ -288,8 +288,16 @@ SYSTEMD_USER_DIR="$HOME/.config/systemd/user"
 # Phase 11 may use a transient user service so a large model download survives
 # a non-interactive SSH installer.  It has no unit file in SYSTEMD_USER_DIR,
 # therefore stop it explicitly before deleting its install tree.
-systemctl --user stop ods-model-upgrade.service 2>/dev/null || true
-systemctl --user reset-failed ods-model-upgrade.service 2>/dev/null || true
+_ods_uninstall_uid="$(id -u)"
+_ods_uninstall_runtime_dir="/run/user/$_ods_uninstall_uid"
+if [[ -d "$_ods_uninstall_runtime_dir" && -S "$_ods_uninstall_runtime_dir/bus" ]]; then
+    env XDG_RUNTIME_DIR="$_ods_uninstall_runtime_dir" \
+        DBUS_SESSION_BUS_ADDRESS="unix:path=$_ods_uninstall_runtime_dir/bus" \
+        systemctl --user stop ods-model-upgrade.service 2>/dev/null || true
+    env XDG_RUNTIME_DIR="$_ods_uninstall_runtime_dir" \
+        DBUS_SESSION_BUS_ADDRESS="unix:path=$_ods_uninstall_runtime_dir/bus" \
+        systemctl --user reset-failed ods-model-upgrade.service 2>/dev/null || true
+fi
 for unit in opencode-web.service openclaw-session-cleanup.timer \
             memory-shepherd-workspace.timer memory-shepherd-memory.timer \
             openclaw-session-cleanup.service \
