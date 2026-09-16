@@ -4,6 +4,8 @@ if sys.platform == "win32":
     raise SkipTest("Requires POSIX host ownership, file locks, or Unix sockets; run under Linux/WSL")
 
 import contextlib
+import hashlib
+import json
 import os
 from pathlib import Path
 import sys
@@ -17,6 +19,45 @@ import pixel_access_bridge as bridge
 
 
 class OwnerLauncherTests(unittest.TestCase):
+    @unittest.skipUnless(os.geteuid() == 0, 'root custody fixture required')
+    def test_legacy_binding_pins_unit_owner_executable_and_rejects_unit_drift(self):
+        # /root avoids deliberately writable /tmp ancestors, just like the
+        # installed /etc unit custody requirement.
+        with tempfile.TemporaryDirectory(dir='/root') as directory:
+            root = Path(directory)
+            unit = root / 'gateway.service'
+            unit.write_text('[Service]\nUser=fixture\n# '+str(root)+'\n')
+            unit.chmod(0o644)
+            adapter = bridge.SystemdAccessBridge(root, 'k'*64, gateway_owner='fixture', installed_binary='/opt/openclaw')
+            fields = 'LoadState=loaded\nUser=fixture\nMainPID=123\nFragmentPath='+str(unit)+'\nDropInPaths=\nExecStart={ path=/opt/openclaw ; argv[]=/opt/openclaw gateway ; }'
+            with patch.object(adapter, 'command', return_value=fields):
+                original = adapter.gateway_installation_binding(require_running=True)
+                self.assertEqual(original['owner'], 'fixture')
+                adapter.gateway_binding = original
+                adapter.verify_gateway_installation_binding()
+                unit.write_text(unit.read_text()+'Environment=CHANGED=true\n')
+                with self.assertRaisesRegex(bridge.AccessError, 'gateway-installation-changed'):
+                    adapter.verify_gateway_installation_binding()
+            for changed in (fields.replace('User=fixture','User=other'), fields.replace('path=/opt/openclaw ;','path=/opt/other ;')):
+                with patch.object(adapter, 'command', return_value=changed), self.assertRaises(bridge.AccessError):
+                    adapter.gateway_installation_binding()
+            unit.chmod(0o666)
+            with patch.object(adapter, 'command', return_value=fields), self.assertRaisesRegex(bridge.AccessError,'gateway-unit-custody-required'):
+                adapter.gateway_installation_binding()
+
+    def test_absent_host_agent_in_hybrid_guest_requires_positive_absence(self):
+        adapter = bridge.SystemdAccessBridge(Path('/tmp/ods-access-test'), 'k' * 64)
+        with patch.object(adapter, 'command', return_value='LoadState=not-found\nMainPID=0\nUser='):
+            adapter.verify_host_agent_custody()
+        for fields in ('User=\nMainPID=0', 'LoadState=error\nMainPID=0', 'LoadState=not-found\nMainPID=123'):
+            with patch.object(adapter, 'command', return_value=fields), self.assertRaises(bridge.AccessError):
+                adapter.verify_host_agent_custody()
+
+    def test_existing_root_host_agent_still_requires_isolation(self):
+        adapter = bridge.SystemdAccessBridge(Path('/tmp/ods-access-test'), 'k' * 64)
+        with patch.object(adapter, 'command', return_value='LoadState=loaded\nActiveState=failed\nMainPID=0\nUser=root'), self.assertRaisesRegex(bridge.AccessError, 'host-agent-unavailable'):
+            adapter.verify_host_agent_custody()
+
     @unittest.skipUnless(Path("/usr/sbin/runuser").exists(), "Linux runuser required")
     def test_owner_path_cannot_select_privileged_launcher(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -80,10 +121,12 @@ class HostAgentDiscoveryTests(unittest.TestCase):
         self.assertFalse(status["runtime_verified"])
         self.assertEqual(status["reason"], "host-agent-unavailable")
 
-    def test_missing_host_agent_is_classified_before_proc_zero(self):
-        self.assert_unavailable_without_proc_read(
-            "MainPID=0\nUser=\nLoadState=not-found\nActiveState=failed"
-        )
+    def test_missing_host_agent_is_allowed_for_hybrid_install_without_proc_read(self):
+        properties = "MainPID=0\nUser=\nLoadState=not-found\nActiveState=failed"
+        with patch.object(self.adapter, "command", return_value=properties), \
+                patch.object(bridge.Path, "read_bytes", side_effect=AssertionError("unexpected /proc read")) as read:
+            self.adapter.verify_host_agent_custody()
+        read.assert_not_called()
 
     def test_inactive_root_host_agent_is_classified_before_proc_zero(self):
         self.assert_unavailable_without_proc_read(
@@ -121,6 +164,77 @@ class HostAgentDiscoveryTests(unittest.TestCase):
             status = self.adapter.status()
         self.assertFalse(status["available"])
         self.assertEqual(status["reason"], "root-host-agent-isolation-required")
+class NativeReacquireTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        root = Path(self.temporary.name)
+        self.adapter = bridge.SystemdAccessBridge(root, 'k' * 64, state=root / 'state')
+        self.adapter.home = root
+        self.adapter.owner = types.SimpleNamespace(pw_uid=os.getuid())
+        self.adapter.native_port, self.adapter.native_key = 18789, 'fixture'
+        self.adapter.command = lambda *_args, **_kwargs: '123'
+        self.token = 'd' * 64
+        self.snapshot = dict(available=True, phase='held', active=0, pid=123, revision='a' * 64)
+        self.record = root / '.openclaw/.ods-access-runtime/state.json'
+        self.record.parent.mkdir(parents=True, mode=0o700)
+        self.write_hold()
+
+    def write_hold(self, **changes):
+        self.record.write_text(json.dumps(dict(phase='held', revision=self.snapshot['revision'],
+            tokenHash=hashlib.sha256(self.token.encode()).hexdigest(), **changes)))
+        self.record.chmod(0o600)
+
+    def test_one_409_reacquire_reuses_exact_request_after_unchanged_owned_hold_readback(self):
+        rejected = bridge.AccessError('runtime-unavailable-or-busy', http_status=409)
+        with patch.object(self.adapter, 'http', side_effect=[self.snapshot, rejected, self.snapshot, self.snapshot]) as http:
+            result = self.adapter.native('acquire', self.token)
+        self.assertEqual(result, self.snapshot)
+        self.assertEqual(http.call_count, 4)
+        self.assertEqual(http.call_args_list[1].args[3], http.call_args_list[3].args[3])
+        self.assertIsNone(http.call_args_list[2].args[3])
+
+    def test_changed_pid_revision_activity_or_hold_never_retries_post(self):
+        for drift in ({'pid':124}, {'revision':'b'*64}, {'active':1}, {'phase':'idle'}, {'available':False}):
+            with self.subTest(drift=drift), patch.object(self.adapter, 'http', side_effect=[self.snapshot,
+                    bridge.AccessError('runtime-unavailable-or-busy', http_status=409), {**self.snapshot, **drift}]) as http:
+                with self.assertRaises(bridge.AccessError): self.adapter.native('acquire', self.token)
+                self.assertEqual(http.call_count, 3)
+
+    def test_no_retry_for_new_hold_foreign_token_missing_custody_or_ambiguous_transport(self):
+        cases = [('new', {**self.snapshot,'phase':'idle'}, self.token, 409),
+                 ('foreign', self.snapshot, 'e'*64, 409),
+                 ('timeout', self.snapshot, self.token, None),
+                 ('forbidden', self.snapshot, self.token, 403),
+                 ('missing', self.snapshot, self.token, 409)]
+        for label, snapshot, token, code in cases:
+            if label == 'missing': self.record.unlink()
+            with self.subTest(case=label), patch.object(self.adapter, 'http', side_effect=[snapshot,
+                    bridge.AccessError('runtime-unavailable-or-busy', http_status=code)]) as http:
+                with self.assertRaises(bridge.AccessError): self.adapter.native('acquire', token)
+                self.assertEqual(http.call_count, 2)
+
+    def test_a_second_refusal_and_probe_failures_are_never_replayed(self):
+        rejected = bridge.AccessError('runtime-unavailable-or-busy', http_status=409)
+        with patch.object(self.adapter, 'http', side_effect=[self.snapshot,rejected,self.snapshot,rejected]) as http:
+            with self.assertRaises(bridge.AccessError): self.adapter.native('acquire', self.token)
+            self.assertEqual(http.call_count, 4)
+        with patch.object(self.adapter, 'http', side_effect=[self.snapshot,rejected]) as http:
+            with self.assertRaises(bridge.AccessError): self.adapter.native('probe', self.token)
+            self.assertEqual(http.call_count, 2)
+
+    def test_custody_change_during_readback_cannot_reacquire(self):
+        def reply(_origin, _path, _key, payload=None, **_kwargs):
+            if payload: raise bridge.AccessError('runtime-unavailable-or-busy', http_status=409)
+            if self.calls:
+                state=json.loads(self.record.read_text()); state['tokenHash']='0'*64
+                self.record.write_text(json.dumps(state))
+            self.calls += 1
+            return self.snapshot
+        self.calls = 0
+        with patch.object(self.adapter, 'http', side_effect=reply) as http:
+            with self.assertRaises(bridge.AccessError): self.adapter.native('acquire', self.token)
+            self.assertEqual(http.call_count, 3)
 
 
 class FakeBridge(bridge.SystemdAccessBridge):

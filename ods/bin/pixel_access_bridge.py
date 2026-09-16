@@ -17,6 +17,7 @@ from pathlib import Path
 import platform
 import re
 import selectors
+import shlex
 import socket
 import stat
 import subprocess
@@ -39,8 +40,9 @@ _DEADLINE = contextvars.ContextVar("pixel_access_operation_deadline", default=No
 
 
 class AccessError(Exception):
-    def __init__(self, code):
+    def __init__(self, code, *, http_status=None):
         self.code = code
+        self.http_status = http_status
         super().__init__(code)
 
 
@@ -268,8 +270,9 @@ def _edge_container_request(container_id, path, key, payload, timeout=20):
 
 class SystemdAccessBridge:
     def __init__(self, install_dir, edge_key, *, state=STATE, dropin=DROPIN, installed_binary=None,
-                 gateway_owner=None, gateway_port=None, settings_data_dir=None):
+                 gateway_owner=None, gateway_port=None, settings_data_dir=None, gateway_binding=None):
         self.install = Path(install_dir).resolve()
+        self.gateway_binding = gateway_binding
         self.edge_key = edge_key
         self.state = Path(state)
         self.dropin = Path(dropin)
@@ -278,6 +281,8 @@ class SystemdAccessBridge:
             raise AccessError("gateway-port-unavailable")
         self.gateway_port = gateway_port
         self.settings_data_dir = settings_data_dir
+        self.native_port = self.native_key = self.native_origin = None
+        self._native_identity = None
 
     def configured_gateway_port(self, config):
         port = self.gateway_port if self.gateway_port is not None else config.get("gateway", {}).get("port", 18789)
@@ -340,6 +345,10 @@ class SystemdAccessBridge:
             if data_dir_id != self.settings_source(): raise AccessError("settings-data-directory-changed")
             return change(self, request)
 
+    def model_control(self, operation, request=None):
+        from pixel_model_coordinator import control
+        return control(self, operation, request)
+
     def command(self, args, timeout=20):
         timeout = remaining(timeout)
         try:
@@ -348,6 +357,91 @@ class SystemdAccessBridge:
             return result.stdout.strip()
         except (OSError, subprocess.SubprocessError):
             raise AccessError("host-command-failed") from None
+
+    def gateway_installation_binding(self, *, require_running=False):
+        """Explicit adoption of an existing root-owned unit, never a ready marker.
+
+        The selected owner/executable and every base unit/drop-in byte are
+        pinned. Only our exact reversible mode drop-in may change afterwards.
+        """
+        raw = self.command(['systemctl', 'show', UNIT,
+                            '--property=LoadState,FragmentPath,DropInPaths,User,ExecStart,MainPID'])
+        fields = dict(line.split('=', 1) for line in raw.splitlines() if '=' in line)
+        if (fields.get('LoadState') != 'loaded' or fields.get('User') != self.gateway_owner
+                or require_running and not fields.get('MainPID', '0').isdigit()
+                or require_running and int(fields.get('MainPID', '0')) <= 0):
+            raise AccessError('gateway-binding-unavailable')
+        executable = re.match(r'^\{ path=([^;]+?) ;', fields.get('ExecStart', ''))
+        if executable is None or executable.group(1) != self.installed_binary:
+            raise AccessError('gateway-executable-changed')
+        def protected_bytes(filename):
+            path = Path(filename)
+            if not path.is_absolute(): raise AccessError('gateway-unit-custody-required')
+            for entry in path.parents:
+                info = entry.lstat()
+                if stat.S_ISLNK(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
+                    raise AccessError('gateway-unit-custody-required')
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            with os.fdopen(fd, 'rb') as handle:
+                info = os.fstat(handle.fileno())
+                if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_nlink != 1 or info.st_mode & 0o022 or info.st_size > 1024 * 1024:
+                    raise AccessError('gateway-unit-custody-required')
+                return handle.read(1024 * 1024 + 1)
+        unit = fields.get('FragmentPath', '')
+        content = protected_bytes(unit)
+        if str(self.install).encode() not in content:
+            raise AccessError('gateway-installation-mismatch')
+        dropins = []
+        for filename in shlex.split(fields.get('DropInPaths', '')):
+            body = protected_bytes(filename)
+            if Path(filename) == DROPIN:
+                if body != b'[Service]\nProtectSystem=false\nProtectHome=false\n':
+                    raise AccessError('gateway-unit-custody-required')
+                continue
+            dropins.append({'path':filename, 'sha256':hashlib.sha256(body).hexdigest()})
+        return {'schemaVersion':1, 'unit':unit, 'sha256':hashlib.sha256(content).hexdigest(),
+                'dropins':dropins, 'owner':self.gateway_owner, 'executable':self.installed_binary}
+
+    def verify_gateway_installation_binding(self):
+        if self.gateway_installation_binding() != self.gateway_binding:
+            raise AccessError('gateway-installation-changed')
+
+    def verify_host_agent_custody(self):
+        # Hybrid installations can run the host agent outside this guest.
+        # Absence must be proven, not inferred from an empty User property.
+        values = self.command(['systemctl', 'show', 'ods-host-agent.service', '--property=LoadState,ActiveState,User,MainPID'])
+        fields = dict(line.split('=', 1) for line in values.splitlines() if '=' in line)
+        if fields.get('LoadState') == 'not-found' and fields.get('MainPID') == '0':
+            return
+        if fields.get('LoadState') != 'loaded':
+            raise AccessError('host-agent-state-unavailable')
+        if fields.get('User') not in ('', 'root', '0', None):
+            return
+        if fields.get('ActiveState') != 'active':
+            raise AccessError('host-agent-unavailable')
+        try:
+            pid = int(fields.get('MainPID', '0'))
+            if pid <= 0:
+                raise ValueError()
+            args = Path('/proc/%d/cmdline' % pid).read_bytes().split(b'\0')
+        except (OSError, ValueError):
+            raise AccessError('host-agent-unavailable') from None
+        if not any(args):
+            raise AccessError('host-agent-unavailable')
+        if b'-I' not in args:
+            raise AccessError('root-host-agent-isolation-required')
+        scripts = [Path(os.fsdecode(arg)) for arg in args if arg.endswith(b'ods-host-agent.py')]
+        if len(scripts) != 1 or not scripts[0].is_absolute():
+            raise AccessError('root-host-agent-custody-required')
+        for path in (scripts[0], *scripts[0].parents):
+            info = path.lstat()
+            if stat.S_ISLNK(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
+                raise AccessError('root-host-agent-custody-required')
+        for directory, folders, files in os.walk(scripts[0].parent, followlinks=False):
+            for name in folders + files:
+                info = (Path(directory) / name).lstat()
+                if stat.S_ISLNK(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
+                    raise AccessError('root-host-agent-custody-required')
 
     def discover(self, *, allow_installing=False):
         if platform.system() != "Linux":
@@ -359,48 +453,7 @@ class SystemdAccessBridge:
             info = path.lstat()
             if stat.S_ISLNK(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
                 raise AccessError("root-program-custody-required")
-        # A root host agent must also execute protected code. Normal installs
-        # run it as the owner; historical root overrides need an explicit repair.
-        agent_state = self.command([
-            "systemctl", "show", "ods-host-agent.service",
-            "--property=LoadState,ActiveState,MainPID,User",
-        ])
-        agent_fields = {}
-        for line in agent_state.splitlines():
-            key, separator, value = line.partition("=")
-            if separator:
-                agent_fields[key] = value
-        if agent_fields.get("LoadState") != "loaded":
-            raise AccessError("host-agent-unavailable")
-        agent_user = agent_fields.get("User", "")
-        if agent_user in ("", "root", "0"):
-            try:
-                pid = int(agent_fields.get("MainPID", ""))
-            except (TypeError, ValueError):
-                raise AccessError("host-agent-unavailable") from None
-            if agent_fields.get("ActiveState") != "active" or pid <= 0:
-                raise AccessError("host-agent-unavailable")
-            try:
-                args = Path("/proc/%d/cmdline" % pid).read_bytes().split(b"\0")
-            except OSError:
-                # The unit can stop between systemctl inspection and /proc.
-                # Treat that race as unavailable, never as an unclassified
-                # inspection crash and never continue with stale identity.
-                raise AccessError("host-agent-unavailable") from None
-            if not any(args):
-                raise AccessError("host-agent-unavailable")
-            if b"-I" not in args: raise AccessError("root-host-agent-isolation-required")
-            scripts = [Path(os.fsdecode(arg)) for arg in args if arg.endswith(b"ods-host-agent.py")]
-            if len(scripts) != 1 or not scripts[0].is_absolute(): raise AccessError("root-host-agent-custody-required")
-            for path in (scripts[0], *scripts[0].parents):
-                info = path.lstat()
-                if stat.S_ISLNK(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
-                    raise AccessError("root-host-agent-custody-required")
-            for directory, folders, files in os.walk(scripts[0].parent, followlinks=False):
-                for name in folders + files:
-                    info = (Path(directory) / name).lstat()
-                    if stat.S_ISLNK(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
-                        raise AccessError("root-host-agent-custody-required")
+        self.verify_host_agent_custody()
         import pwd
         user = self.command(["systemctl", "show", UNIT, "--property=User", "--value"])
         if not re.fullmatch(r"[a-z_][a-z0-9_-]*", user): raise AccessError("gateway-owner-unavailable")
@@ -409,12 +462,16 @@ class SystemdAccessBridge:
         home = Path(owner.pw_dir)
         if owner.pw_uid == 0 or not home.is_absolute() or home.resolve() != home:
             raise AccessError("unsafe-gateway-owner")
-        marker = private_json(home / ".config/ods/pixel-managed.json", owner.pw_uid, 65536)
         allowed_states = ("ready", "installing") if allow_installing else ("ready",)
-        if (marker.get("schema_version") != 2 or marker.get("manager") != "ods"
-                or marker.get("state") not in allowed_states
-                or Path(marker.get("install_dir", "")).resolve() != self.install):
-            raise AccessError("managed-owner-mismatch")
+        marker_path = home / '.config/ods/pixel-managed.json'
+        if self.gateway_binding is not None:
+            self.verify_gateway_installation_binding()
+        else:
+            marker = private_json(marker_path, owner.pw_uid, 65536)
+            if (marker.get("schema_version") != 2 or marker.get("manager") != "ods"
+                    or marker.get("state") not in allowed_states
+                    or Path(marker.get("install_dir", "")).resolve() != self.install):
+                raise AccessError("managed-owner-mismatch")
         config = private_json(home / ".openclaw/openclaw.json", owner.pw_uid)
         binary = self.installed_binary
         if not isinstance(binary, str) or not Path(binary).is_absolute() or not os.access(binary, os.X_OK):
@@ -428,7 +485,9 @@ class SystemdAccessBridge:
         if not isinstance(token, str) or not 16 <= len(token) <= 4096:
             raise AccessError("gateway-auth-unavailable")
         self.owner, self.home, self.binary = owner, home, binary
-        self.native_origin, self.native_key = "http://127.0.0.1:%d" % port, token
+        if (self.native_port, self.native_key) != (port, token):
+            self.native_origin = self._native_identity = None
+        self.native_port, self.native_key = port, token
         self.surface = "wsl-systemd" if "microsoft" in platform.release().lower() else "linux-systemd"
 
     def http(self, origin, path, key, payload=None, timeout=20):
@@ -446,66 +505,156 @@ class SystemdAccessBridge:
             raise AccessError("invalid-service-origin")
         budget = remaining(timeout)
         deadline = time.monotonic() + budget
-        connection = http.client.HTTPConnection(parts.hostname, parts.port, timeout=budget)
-        timer = None
-        expired = threading.Event()
-        try:
-            connection.connect()
-            transport = connection.sock
+        for attempt in range(3):
             budget = deadline - time.monotonic()
             if budget <= 0: raise AccessError("runtime-operation-timeout")
-            def interrupt():
-                expired.set()
-                try: transport.shutdown(socket.SHUT_RDWR)
-                except OSError:
-                    # Completion can close this exact per-call socket first.
-                    return
-            timer = threading.Timer(budget, interrupt)
-            timer.daemon = True
-            timer.start()
-            connection.request("POST" if body is not None else "GET", path, body=body,
-                               headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"})
-            with connection.getresponse() as response:
-                raw = response.read(65537)
-                if response.status != 200:
-                    if len(raw) <= 65536:
-                        try:
-                            failure = protocol.decode_frame(raw.decode("utf-8") + "\n", 65537).get("error")
-                        except (AttributeError, ValueError, UnicodeError):
-                            failure = None
-                        if isinstance(failure, str) and failure in RUNTIME_TRANSITION_FAILURES:
-                            raise AccessError(failure)
-                    raise AccessError("runtime-unavailable-or-busy")
-            if expired.is_set() or time.monotonic() >= deadline:
-                raise AccessError("runtime-operation-timeout")
-            if len(raw) > 65536: raise ValueError()
-            value = protocol.decode_frame(raw.decode("utf-8") + "\n", 65537)
-            if not isinstance(value, dict): raise ValueError()
-            return value
-        except (OSError, http.client.HTTPException, ValueError, UnicodeError):
-            if expired.is_set() or time.monotonic() >= deadline:
-                raise AccessError("runtime-operation-timeout") from None
-            raise AccessError("runtime-unavailable-or-busy") from None
-        finally:
-            if timer is not None: timer.cancel()
-            connection.close()
-            if timer is not None: timer.join(timeout=1)
+            connection = http.client.HTTPConnection(parts.hostname, parts.port, timeout=budget)
+            timer = None
+            expired = threading.Event()
+            try:
+                connection.connect()
+                transport = connection.sock
+                budget = deadline - time.monotonic()
+                if budget <= 0: raise AccessError("runtime-operation-timeout")
+                def interrupt(transport=transport, expired=expired):
+                    expired.set()
+                    try: transport.shutdown(socket.SHUT_RDWR)
+                    except OSError:
+                        # Completion can close this exact per-call socket first.
+                        return
+                timer = threading.Timer(budget, interrupt)
+                timer.daemon = True
+                timer.start()
+                connection.request("POST" if body is not None else "GET", path, body=body,
+                                   headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"})
+                with connection.getresponse() as response:
+                    raw = response.read(65537)
+                    if response.status != 200:
+                        if len(raw) <= 65536:
+                            try:
+                                failure = protocol.decode_frame(raw.decode("utf-8") + "\n", 65537).get("error")
+                            except (AttributeError, ValueError, UnicodeError):
+                                failure = None
+                            if isinstance(failure, str) and failure in RUNTIME_TRANSITION_FAILURES:
+                                raise AccessError(failure, http_status=response.status)
+                        raise AccessError("runtime-unavailable-or-busy", http_status=response.status)
+                if expired.is_set() or time.monotonic() >= deadline:
+                    raise AccessError("runtime-operation-timeout")
+                if len(raw) > 65536: raise ValueError()
+                value = protocol.decode_frame(raw.decode("utf-8") + "\n", 65537)
+                if not isinstance(value, dict): raise ValueError()
+                return value
+            except ConnectionResetError:
+                if expired.is_set() or time.monotonic() >= deadline:
+                    raise AccessError("runtime-operation-timeout") from None
+                # Only a fresh read can be repeated after a reset (including
+                # RemoteDisconnected). Never replay a possibly accepted POST.
+                if body is not None or attempt == 2:
+                    raise AccessError("runtime-unavailable-or-busy") from None
+            except (OSError, http.client.HTTPException, ValueError, UnicodeError):
+                if expired.is_set() or time.monotonic() >= deadline:
+                    raise AccessError("runtime-operation-timeout") from None
+                raise AccessError("runtime-unavailable-or-busy") from None
+            finally:
+                if timer is not None: timer.cancel()
+                connection.close()
+                if timer is not None: timer.join(timeout=1)
+
+    def native_snapshot(self, *, timeout, pinned_origin=None):
+        """Qualify the actual local gateway before choosing a mutation target.
+
+        IPv6 loopback avoids optional IPv4 forwarding/proxy layers. An IPv4-only
+        gateway remains supported, but only read-only discovery may fall back.
+        Both candidates, process checks and connection retries share one budget.
+        """
+        deadline = time.monotonic() + remaining(timeout)
+        def budget(): return remaining(deadline - time.monotonic())
+        def process_id():
+            raw = self.command(["systemctl", "show", UNIT, "--property=MainPID", "--value"],
+                               timeout=min(3, budget()))
+            if not raw.isdecimal() or int(raw) <= 0:
+                raise AccessError("runtime-unavailable-or-busy")
+            return int(raw)
+        pid = process_id()
+        identity = (self.native_port, self.native_key, pid)
+        candidates = ["http://[::1]:%d" % self.native_port, "http://127.0.0.1:%d" % self.native_port]
+        if pinned_origin is not None:
+            if pinned_origin not in candidates:
+                raise AccessError("invalid-service-origin")
+            candidates = [pinned_origin]
+        elif self._native_identity == identity and self.native_origin in candidates:
+            candidates.remove(self.native_origin)
+            candidates.insert(0, self.native_origin)
+        else:
+            self.native_origin = self._native_identity = None
+        for index, origin in enumerate(candidates):
+            # Reserve time for IPv4-only hosts even if an IPv6 listener stalls.
+            attempt_budget = min(3, budget() / (len(candidates) - index))
+            try:
+                snapshot = self.http(origin, "/pixel-ods/access-runtime", self.native_key,
+                                     None, timeout=attempt_budget)
+            except AccessError as error:
+                if (error.http_status is not None or index + 1 == len(candidates)
+                        or error.code not in ("runtime-unavailable-or-busy", "runtime-operation-timeout")):
+                    raise
+                continue
+            if (snapshot.get("available") is not True
+                    or snapshot.get("phase") not in ("idle", "busy", "held", "interrupted")
+                    or type(snapshot.get("active")) is not int or snapshot["active"] < 0
+                    or not isinstance(snapshot.get("revision"), str) or not HEX.fullmatch(snapshot["revision"])):
+                raise AccessError("admission-gate-unavailable")
+            if type(snapshot.get("pid")) is not int or snapshot["pid"] != pid or process_id() != pid:
+                raise AccessError("gateway-process-mismatch")
+            self.native_origin, self._native_identity = origin, identity
+            return snapshot
 
     def native(self, operation=None, token=None, *, timeout=60):
+        deadline = time.monotonic() + remaining(timeout)
+        def budget(): return remaining(deadline - time.monotonic())
         payload = None
-        if operation:
-            snapshot = self.native(timeout=timeout)
+        owned_hold = False
+        try:
+            if operation is None:
+                return self.native_snapshot(timeout=budget())
+            snapshot = self.native(timeout=budget())
             if snapshot.get("stopped"):
                 if operation != "acquire": raise AccessError("gateway-restart-required")
                 return self.stopped_native(token)
+            # Keep this exact target even if a later read invalidates the cache.
+            origin = self.native_origin
             payload = dict(operation=operation, token=token, revision=snapshot["revision"])
-        try:
-            return self.http(self.native_origin, "/pixel-ods/access-runtime", self.native_key, payload, timeout=timeout)
-        except AccessError:
+            if operation == "acquire": owned_hold = self.owns_native_hold(snapshot, token)
+            return self.http(origin, "/pixel-ods/access-runtime", self.native_key, payload, timeout=budget())
+        except AccessError as error:
+            # A hot reload can briefly refuse the management channel while the
+            # previous policy drains. Only an already-owned, unchanged hold is
+            # idempotent: never retry a new acquisition, a timeout, or a probe.
+            if operation == "acquire" and owned_hold and error.http_status == 409:
+                current = self.native_snapshot(timeout=min(3, budget()), pinned_origin=origin)
+                if (current.get("pid") == snapshot.get("pid")
+                        and current.get("revision") == snapshot.get("revision")
+                        and self.owns_native_hold(current, token)):
+                    return self.http(origin, "/pixel-ods/access-runtime", self.native_key,
+                                     payload, timeout=min(3, budget()))
             pending = self.pending()
             if operation is None and pending:
                 return self.stopped_native(pending["token"])
             raise
+
+    def owns_native_hold(self, snapshot, token):
+        """Read-only custody proof for one retry of an existing native lease."""
+        if (snapshot.get("available") is not True or snapshot.get("phase") != "held"
+                or type(snapshot.get("active")) is not int or snapshot["active"] != 0
+                or type(snapshot.get("pid")) is not int or snapshot["pid"] <= 0
+                or not isinstance(token, str) or not HEX.fullmatch(token)
+                or not isinstance(snapshot.get("revision"), str) or not HEX.fullmatch(snapshot["revision"])):
+            return False
+        try:
+            state = private_json(self.home / ".openclaw/.ods-access-runtime/state.json", self.owner.pw_uid, 4096)
+            return (state.get("phase") == "held" and state.get("revision") == snapshot["revision"]
+                    and state.get("tokenHash") == hashlib.sha256(token.encode()).hexdigest())
+        except (AccessError, OSError, ValueError):
+            return False
 
     def stopped_native(self, token):
         """Crash recovery only: an owned durable hold and an empty stopped unit.
@@ -548,7 +697,8 @@ class SystemdAccessBridge:
 
     def worker(self, operation="status", *, confirmed=False, config_hash=None, busy=None, restart=None,
                transaction_id=None, settings_revision=None, preferences=None, capabilities=None, activate_settings=None,
-               binding=None, activate_provider=None, expected_projection=None, provider_probe=None):
+               binding=None, activate_provider=None, expected_projection=None, provider_probe=None,
+               model_target=None, model_outcome=None):
         script = Path(__file__).resolve().parent / "access_mode_worker.py"
         # This launcher still runs as root. Never search the owner's validator
         # PATH for it; that PATH is intended only for the unprivileged worker.
@@ -575,6 +725,10 @@ class SystemdAccessBridge:
             request['provider_probe'] = provider_probe
         if operation in ("settings-apply", "settings-recover", "provider-change", "provider-recover"):
             request["transaction_id"] = transaction_id
+        if operation.startswith("model-") and operation != "model-status":
+            request["transaction_id"] = transaction_id
+        if operation == "model-apply": request["model_target"] = model_target
+        if operation == "model-finish": request["model_outcome"] = model_outcome
         if operation == "settings-apply":
             request.update(settings_revision=settings_revision, preferences=preferences, capabilities=capabilities)
         if operation == "provider-change":

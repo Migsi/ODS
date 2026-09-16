@@ -13,6 +13,7 @@ os.environ.setdefault("DASHBOARD_API_KEY", "dashboard-test-key")
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import pixel_chat_results as receipts
 from routers import pixel
+import pixel_chat_identity
 from test_pixel import FakeClient, FakeResponse, ConnectedRequest, DisconnectedRequest, stream_body
 
 OWNER = "dashboard-test-key"
@@ -22,6 +23,9 @@ FINAL = b'data: {"choices":[{"delta":{"content":"Saved result"}}]}\n\ndata: [DON
 
 @pytest.fixture
 def store(tmp_path, monkeypatch):
+    async def saved_identity(*_args, **_kwargs):
+        return {"schemaVersion": 1, "revision": 1, "displayName": "Portal"}
+    monkeypatch.setattr(pixel_chat_identity, "async_request_json", saved_identity)
     result = receipts.ChatResultStore(tmp_path / "receipts")
     monkeypatch.setattr(pixel, "_result_store", result)
     monkeypatch.setattr(pixel, "_result_tasks", {})

@@ -18,7 +18,7 @@ from urllib.parse import quote, urljoin, urlsplit
 
 import httpx
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
-from fastapi.responses import RedirectResponse
+from fastapi.responses import RedirectResponse, JSONResponse
 
 from env_values import parse_env_value
 from config import (
@@ -66,6 +66,15 @@ router = APIRouter(tags=["models"])
 
 _LIBRARY_PATH = Path(INSTALL_DIR) / "config" / "model-library.json"
 _MODELS_DIR = Path(DATA_DIR) / "models"
+
+
+def _installed_model_paths() -> dict[str, Path]:
+    from model_stores import scan_model_files
+    return scan_model_files(Path(DATA_DIR), container=Path("/.dockerenv").exists(), default_dir=_MODELS_DIR)
+
+
+def _installed_model_path(filename: str) -> Path | None:
+    return next((path for name, path in _installed_model_paths().items() if name.casefold() == filename.casefold()), None)
 _ENV_PATH = Path(INSTALL_DIR) / ".env"
 _HF_API_BASE = "https://huggingface.co"
 _HF_REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,95}/[A-Za-z0-9][A-Za-z0-9._-]{0,95}$")
@@ -306,18 +315,12 @@ def _write_imported_library(records: list[dict[str, Any]]) -> None:
 
 def _scan_downloaded_models() -> dict[str, int]:
     """Scan data/models/ for downloaded GGUF files. Returns {filename: size_bytes}."""
-    downloaded: dict[str, int] = {}
-    if not _MODELS_DIR.is_dir():
-        return downloaded
-    try:
-        for f in _MODELS_DIR.iterdir():
-            if _is_final_gguf_file(f):
-                try:
-                    downloaded[f.name] = f.stat().st_size
-                except OSError:
-                    pass
-    except OSError as exc:
-        logger.warning("Failed to scan models directory: %s", exc)
+    downloaded = {}
+    for name, path in _installed_model_paths().items():
+        try:
+            downloaded[name] = path.stat().st_size
+        except OSError:
+            continue
     return downloaded
 
 
@@ -1006,7 +1009,7 @@ async def _hf_repo_details(repo_id: str) -> dict[str, Any]:
                 if isinstance(part, dict)
             ] or [str(imported.get("gguf_file") or "")]
             artifact["installed"] = bool(filenames) and all(
-                (_MODELS_DIR / filename).is_file()
+                _installed_model_path(filename) is not None
                 for filename in filenames
             )
         else:
@@ -1341,7 +1344,7 @@ async def list_models(api_key: str = Depends(verify_api_key)):
         DATA_DIR,
         context_size,
         catalog=_load_library(),
-        downloaded_files_override=_scan_downloaded_models(),
+        downloaded_files_override=_installed_model_paths(),
     )
     _annotate_model_lifecycle(
         payload,
@@ -1354,7 +1357,7 @@ async def list_models(api_key: str = Depends(verify_api_key)):
             gpu_info,
             context_size,
             INSTALL_DIR,
-            model_files_dir(DATA_DIR) / loaded_entry["gguf"] if loaded_entry.get("gguf") else None,
+            _installed_model_path(loaded_entry["gguf"]) if loaded_entry.get("gguf") else None,
         )
         await asyncio.to_thread(
             record_model_performance,
@@ -1674,7 +1677,7 @@ def _local_gguf_filename_from_id(model_id: str) -> str | None:
 
 def _resolve_local_gguf_filename(model_id: str) -> str | None:
     candidate = _local_gguf_filename_from_id(model_id)
-    if not candidate or not _MODELS_DIR.is_dir():
+    if not candidate:
         return None
 
     candidate_lower = candidate.lower()
@@ -1684,7 +1687,7 @@ def _resolve_local_gguf_filename(model_id: str) -> str | None:
     logical_matches: list[Path] = []
     candidate_logical = _local_model_name_from_gguf(candidate).lower()
     try:
-        for path in _MODELS_DIR.iterdir():
+        for path in _installed_model_paths().values():
             if not _is_final_gguf_file(path):
                 continue
             if path.name.lower() == candidate_lower:
@@ -1710,9 +1713,8 @@ def _find_local_gguf_model(model_id: str) -> Optional[dict]:
     gguf_file = _resolve_local_gguf_filename(model_id)
     if not gguf_file:
         return None
-    models_dir = _MODELS_DIR.resolve()
-    target = (_MODELS_DIR / gguf_file).resolve()
-    if not target.is_relative_to(models_dir) or not _is_final_gguf_file(target):
+    target = _installed_model_path(gguf_file)
+    if target is None or not _is_final_gguf_file(target):
         return None
 
     context_length = 32768
@@ -1847,7 +1849,7 @@ async def _run_current_model_benchmark(model_id: str, max_tokens: int) -> dict:
         DATA_DIR,
         context_size,
         catalog=_load_library(),
-        downloaded_files_override=_scan_downloaded_models(),
+        downloaded_files_override=_installed_model_paths(),
     )
     target = next((m for m in payload["models"] if m["id"] == model_id), None)
     if target is None:
@@ -1886,7 +1888,7 @@ async def _run_current_model_benchmark(model_id: str, max_tokens: int) -> dict:
             detail="Benchmark returned implausible single-request throughput; result was not saved",
         )
     if gpu_info:
-        gguf_path = model_files_dir(DATA_DIR) / target["gguf"] if target.get("gguf") else None
+        gguf_path = _installed_model_path(target["gguf"]) if target.get("gguf") else None
         signature = build_sample_signature(target, gpu_info, context_size, INSTALL_DIR, gguf_path)
         for sample_name in {model_id, loaded_model, target.get("gguf") or "", target.get("llmModelName") or ""}:
             if not sample_name:
@@ -1954,6 +1956,55 @@ def cancel_download(api_key: str = Depends(verify_api_key)):
     """Cancel an in-progress model download."""
     result = _call_agent_model("/v1/model/download/cancel", {})
     return result
+
+
+def _model_recovery_projection(value):
+    phases = {'idle', 'completed', 'prepared', 'held', 'applying', 'applied', 'committing', 'rolling-back', 'unavailable'}
+    if (type(value) is not dict or type(value.get('pending')) is not bool
+            or value.get('phase') not in phases
+            or value['pending'] != (value['phase'] not in ('idle', 'completed'))):
+        raise ValueError('invalid-model-recovery')
+    transaction = value.get('transactionId')
+    if (transaction is not None and (type(transaction) is not str or re.fullmatch('[a-f0-9]{64}', transaction) is None)
+            or value['phase'] not in ('idle', 'unavailable') and transaction is None):
+        raise ValueError('invalid-model-recovery')
+    result = {'pending': value['pending'], 'phase': value['phase'], 'transactionId': transaction}
+    if value.get('outcome') in ('commit', 'rollback') and value['phase'] == 'completed':
+        result['outcome'] = value['outcome']
+    if value.get('reason') in ('model-recovery-proof-required', 'model-recovery-unavailable'):
+        result['reason'] = value['reason']
+    return result
+
+
+def _model_recovery_request(method):
+    try:
+        value = request_agent_json(method, '/v1/model/recovery' if method == 'GET' else '/v1/model/recover',
+                                   payload=None if method == 'GET' else {}, timeout=5 if method == 'GET' else 400)
+        return _model_recovery_projection(value)
+    except AgentHTTPError as exc:
+        if exc.status_code in (409, 503):
+            try:
+                return JSONResponse(_model_recovery_projection(_agent_http_detail(exc)), status_code=exc.status_code,
+                                    headers={'Cache-Control': 'no-store'})
+            except ValueError:
+                pass
+        raise HTTPException(status_code=503, detail='Model recovery is unavailable. No new model switch was started.') from None
+    except (AgentClientError, ValueError):
+        raise HTTPException(status_code=503, detail='Model recovery could not be confirmed. Refresh before retrying.') from None
+
+
+@router.get('/api/models/recovery')
+def model_recovery_status(api_key: str = Depends(verify_api_key)):
+    value = _model_recovery_request('GET')
+    return value if isinstance(value, JSONResponse) else JSONResponse(value, headers={'Cache-Control': 'no-store'})
+
+
+@router.post('/api/models/recovery')
+def recover_model_switch(body: dict | None = Body(default=None), api_key: str = Depends(verify_api_key)):
+    if body != {}:
+        raise HTTPException(status_code=400, detail='Recovery accepts an empty request only.')
+    value = _model_recovery_request('POST')
+    return value if isinstance(value, JSONResponse) else JSONResponse(value, headers={'Cache-Control': 'no-store'})
 
 
 @router.post("/api/models/{model_id}/load")

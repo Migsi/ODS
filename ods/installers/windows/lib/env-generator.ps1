@@ -765,6 +765,12 @@ function New-ODSEnv {
     }
     $existingLemonadeModel = Get-EnvOrNew "LEMONADE_MODEL" ""
     $existingGgufFile = Get-EnvOrNew "GGUF_FILE" ""
+    $existingModelStore = ([string](Get-EnvOrNew "ODS_ACTIVE_MODEL_STORE" "default")).Trim().Trim('"').Trim("'")
+    $preservedModelStore = 'default'
+    if ($existingGgufFile.Trim('"').Trim("'") -eq [string]$TierConfig.GgufFile -and
+        $existingModelStore -match '^[a-z][a-z0-9-]{0,47}$') {
+        $preservedModelStore = $existingModelStore
+    }
     $effectiveLemonadeModel = $existingLemonadeModel
     if ($windowsAmdLemonade) {
         $effectiveLemonadeModel = $(if (-not [string]::IsNullOrWhiteSpace($LemonadeModel)) {
@@ -955,6 +961,7 @@ MINIMAX_API_KEY=$(Get-EnvOrNew "MINIMAX_API_KEY" "")
 MODEL_PROFILE=$(Get-EnvOrNew "MODEL_PROFILE" "$(if ($TierConfig.ModelProfileRequested) { $TierConfig.ModelProfileRequested } else { "qwen" })")
 LLM_MODEL=$($TierConfig.LlmModel)
 GGUF_FILE=$($TierConfig.GgufFile)
+ODS_ACTIVE_MODEL_STORE=$preservedModelStore
 LEMONADE_MODEL=$effectiveLemonadeModel
 MAX_CONTEXT=$($TierConfig.MaxContext)
 CTX_SIZE=$($TierConfig.MaxContext)

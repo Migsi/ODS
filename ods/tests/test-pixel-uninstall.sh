@@ -291,7 +291,7 @@ write_access_fixture() {
     local access_program="$LIBEXEC_DIR/ods-pixel-access"
     local access_dropin_dir="$SYSTEMD_DIR/openclaw-gateway.service.d"
     local access_runtime_state="$HOME_DIR/.openclaw/.ods-access-runtime"
-    local owner_uid relative source
+    local owner_uid relative source relay_digest
     owner_uid="$(id -u)"
     mkdir -p "$INSTALL_DIR/bin/pixel_settings" "$INSTALL_DIR/bin/pixel_provider" \
         "$access_program/pixel_settings" "$access_program/pixel_provider" \
@@ -304,11 +304,14 @@ write_access_fixture() {
         "extensions/services/pixel-agent/host/access_mode_config.py"
         "extensions/services/pixel-agent/host/settings_transaction.py"
         "extensions/services/pixel-agent/host/provider_transaction.py"
+        "extensions/services/pixel-agent/host/model_transaction.py"
         "bin/pixel_access_bridge.py"
         "bin/pixel_access_client.py"
         "bin/pixel_access_reconcile.py"
         "bin/pixel_model_transition.py"
         "bin/pixel_access_protocol.py"
+        "bin/pixel_model_contract.py"
+        "bin/pixel_model_coordinator.py"
         "bin/pixel_settings/__init__.py"
         "bin/pixel_settings/contract.py"
         "bin/pixel_settings/projection.py"
@@ -338,8 +341,10 @@ write_access_fixture() {
         "$INSTALL_DIR/extensions/services/pixel-agent/host/ods-pixel-access.service"
     cp "$INSTALL_DIR/extensions/services/pixel-agent/host/ods-pixel-access.service" \
         "$SYSTEMD_DIR/ods-pixel-access.service"
+    printf '%064d' 0 > "$ETC_DIR/pixel-access-relay.key"
+    relay_digest="$(sha256sum "$ETC_DIR/pixel-access-relay.key" | cut -d' ' -f1)"
     cat > "$ETC_DIR/pixel-access.json" <<JSON
-{"install_dir":"$INSTALL_DIR","owner":"$(id -un)","openclaw_bin":"$MOCK_BIN/openclaw","gateway_port":18789,"settings_data_dir":null}
+{"install_dir":"$INSTALL_DIR","owner":"$(id -un)","openclaw_bin":"$MOCK_BIN/openclaw","gateway_port":18789,"settings_data_dir":null,"edge_owner_key_sha256":"$relay_digest"}
 JSON
     : > "$ACCESS_STATE/lock"
     printf '%s\n' '{"boundary":"fixture"}' > "$ACCESS_STATE/service-baseline.json"
@@ -354,7 +359,7 @@ JSON
     chmod 0644 "$access_program"/*.py "$access_program/pixel_settings"/*.py \
         "$access_program/pixel_provider"/*.py "$SYSTEMD_DIR/ods-pixel-access.service" \
         "$access_dropin_dir/90-ods-full-access.conf"
-    chmod 0600 "$ETC_DIR/pixel-access.json" "$ACCESS_STATE/lock" \
+    chmod 0600 "$ETC_DIR/pixel-access.json" "$ETC_DIR/pixel-access-relay.key" "$ACCESS_STATE/lock" \
         "$ACCESS_STATE/service-baseline.json"
     chmod 0700 "$ACCESS_STATE" "$ACCESS_PROBE_BASE/$owner_uid"
     chmod 0711 "$ACCESS_PROBE_BASE"
@@ -1635,6 +1640,7 @@ if ods_pixel_uninstall_managed "$INSTALL_DIR" "$HOME_DIR" \
     && [[ ! -e "$SYSTEMD_DIR/ods-pixel-access.service" \
         && ! -e "$LIBEXEC_DIR/ods-pixel-access" \
         && ! -e "$ETC_DIR/pixel-access.json" \
+        && ! -e "$ETC_DIR/pixel-access-relay.key" \
         && ! -e "$ACCESS_STATE" \
         && ! -e "$ACCESS_PROBE_BASE/$(id -u)" \
         && ! -e "$HOME_DIR/.openclaw/.ods-access-runtime" \
@@ -1771,12 +1777,13 @@ else
     fail "verified access coordinator could not be removed"
 fi
 
-for scenario in foreign modified_unit modified_program state_symlink pending_transition stop_failure still_active; do
+for scenario in foreign modified_unit modified_program relay_key state_symlink pending_transition stop_failure still_active; do
     write_access_fixture
     case "$scenario" in
         foreign) printf '{"install_dir":"/another-install","owner":"nobody"}\n' > "$ETC_DIR/pixel-access.json" ;;
         modified_unit) printf '\n# custom unit\n' >> "$SYSTEMD_DIR/ods-pixel-access.service" ;;
         modified_program) printf 'operator changes\n' > "$LIBEXEC_DIR/ods-pixel-access/access_mode_server.py" ;;
+        relay_key) printf 'changed\n' > "$ETC_DIR/pixel-access-relay.key" ;;
         state_symlink) mv "$ACCESS_STATE" "$ACCESS_STATE-outside"; ln -s "$ACCESS_STATE-outside" "$ACCESS_STATE" ;;
         pending_transition) printf '{}\n' > "$ACCESS_STATE/transition.json"; chmod 0600 "$ACCESS_STATE/transition.json" ;;
         stop_failure) export ACCESS_STOP_FAIL=true ;;

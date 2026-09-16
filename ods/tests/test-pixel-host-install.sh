@@ -506,13 +506,13 @@ fi
 plugin_list_bin="$TEST_ROOT/openclaw-plugin-list"
 cat > "$plugin_list_bin" <<SH
 #!/usr/bin/env bash
-printf '%s\n' '{"plugins":[{"id":"pixel-ods","status":"loaded","rootDir":"$plugin_tree","contracts":{"tools":["pixel_ods_status","pixel_ods_apps_list","pixel_ods_extensions", "pixel_ods_host_observe","pixel_ods_host_command_propose","pixel_ods_evidence_report","pixel_ods_evidence_readback","pixel_ods_research","pixel_ods_web_extract","pixel_ods_download_promote","pixel_ods_workspace_preview"]}}]}'
+printf '%s\n' '{"plugins":[{"id":"pixel-ods","status":"loaded","rootDir":"$plugin_tree","contracts":{"tools":["pixel_ods_status","pixel_ods_apps_list","pixel_ods_extensions", "pixel_ods_host_observe","pixel_ods_host_command_propose","pixel_ods_evidence_report","pixel_ods_evidence_readback","pixel_ods_research","pixel_ods_web_extract","pixel_ods_download_promote","pixel_ods_workspace_preview","pixel_ods_ask_user","pixel_ods_goal", "pixel_ods_activity", "pixel_ods_history"]}}]}'
 SH
 chmod 0755 "$plugin_list_bin"
 check _ods_pixel_verify_plugin_loaded "$owner" "$home" "$plugin_list_bin" "$plugin_tree"
 cat > "$plugin_list_bin" <<SH
 #!/usr/bin/env bash
-printf '%s\n' '{"plugins":[{"id":"pixel-ods","status":"blocked","rootDir":"$plugin_tree","contracts":{"tools":["pixel_ods_status","pixel_ods_apps_list","pixel_ods_extensions", "pixel_ods_host_observe","pixel_ods_host_command_propose","pixel_ods_evidence_report","pixel_ods_evidence_readback","pixel_ods_research","pixel_ods_web_extract","pixel_ods_download_promote","pixel_ods_workspace_preview"]}}]}'
+printf '%s\n' '{"plugins":[{"id":"pixel-ods","status":"blocked","rootDir":"$plugin_tree","contracts":{"tools":["pixel_ods_status","pixel_ods_apps_list","pixel_ods_extensions", "pixel_ods_host_observe","pixel_ods_host_command_propose","pixel_ods_evidence_report","pixel_ods_evidence_readback","pixel_ods_research","pixel_ods_web_extract","pixel_ods_download_promote","pixel_ods_workspace_preview","pixel_ods_ask_user","pixel_ods_goal", "pixel_ods_activity", "pixel_ods_history"]}}]}'
 SH
 if _ods_pixel_verify_plugin_loaded "$owner" "$home" "$plugin_list_bin" "$plugin_tree" >/dev/null 2>&1; then
     fail "blocked ODS Pixel plugin rejected"
@@ -560,7 +560,7 @@ fi
 plugin_registry_bin="$TEST_ROOT/openclaw-plugin-registry"
 cat > "$plugin_registry_bin" <<SH
 #!/usr/bin/env bash
-printf '%s\n' '{"refreshed":true,"registry":{"version":1,"refreshReason":"manual","plugins":[{"pluginId":"pixel-ods","enabled":true,"rootDir":"$plugin_tree","contributions":{"contracts":{"tools":["pixel_ods_apps_list","pixel_ods_extensions", "pixel_ods_host_observe","pixel_ods_host_command_propose","pixel_ods_evidence_report","pixel_ods_evidence_readback","pixel_ods_status","pixel_ods_research","pixel_ods_web_extract","pixel_ods_download_promote","pixel_ods_workspace_preview"]}}}]}}'
+printf '%s\n' '{"refreshed":true,"registry":{"version":1,"refreshReason":"manual","plugins":[{"pluginId":"pixel-ods","enabled":true,"rootDir":"$plugin_tree","contributions":{"contracts":{"tools":["pixel_ods_apps_list","pixel_ods_extensions", "pixel_ods_host_observe","pixel_ods_host_command_propose","pixel_ods_evidence_report","pixel_ods_evidence_readback","pixel_ods_status","pixel_ods_research","pixel_ods_web_extract","pixel_ods_download_promote","pixel_ods_workspace_preview","pixel_ods_ask_user","pixel_ods_goal", "pixel_ods_activity", "pixel_ods_history"]}}}]}}'
 SH
 chmod 0755 "$plugin_registry_bin"
 check _ods_pixel_refresh_plugin_registry "$owner" "$home" "$plugin_registry_bin" "$plugin_tree"
@@ -1274,7 +1274,7 @@ assert v["modelMaxTokens"] == 8192
 assert v["modelReasoning"] is False
 assert v["frontierBudgetProfile"] == "starter"
 assert v["operationsPolicyFile"] == sys.argv[2]
-assert v["gatewayExtensions"] == [{"id":"pixel-ods","path":"/opt/ods/pixel-plugin","sha256":"a"*64,"tools":["pixel_ods_status","pixel_ods_apps_list","pixel_ods_extensions", "pixel_ods_host_observe","pixel_ods_host_command_propose","pixel_ods_evidence_report","pixel_ods_evidence_readback","pixel_ods_research","pixel_ods_web_extract","pixel_ods_download_promote","pixel_ods_workspace_preview"]}]
+assert v["gatewayExtensions"] == [{"id":"pixel-ods","path":"/opt/ods/pixel-plugin","sha256":"a"*64,"tools":["pixel_ods_status","pixel_ods_apps_list","pixel_ods_extensions", "pixel_ods_host_observe","pixel_ods_host_command_propose","pixel_ods_evidence_report","pixel_ods_evidence_readback","pixel_ods_research","pixel_ods_web_extract","pixel_ods_download_promote","pixel_ods_workspace_preview","pixel_ods_ask_user","pixel_ods_goal", "pixel_ods_activity", "pixel_ods_history"]}]
 assert v["operationsLimbEnabled"] is True
 assert all(v[name] is False for name in ("emailLimbEnabled","calendarLimbEnabled","socialLimbEnabled","webLimbEnabled","frontierLimbEnabled"))
 ' "$answers" "$operations_policy"
@@ -1461,8 +1461,8 @@ assert value["tools"]["toolSearch"] == {"enabled": True, "mode": "tools", "searc
 assert "cron" in value["tools"]["alsoAllow"]
 assert "cron" in value["tools"]["sandbox"]["tools"]["allow"]
 assert agent["tools"]["deny"] == []
-assert {"pixel_ods_status", "pixel_ods_apps_list", "pixel_ods_extensions", "pixel_ods_host_observe", "pixel_ods_host_command_propose", "pixel_ods_evidence_report", "pixel_ods_evidence_readback", "pixel_ods_research","pixel_ods_web_extract", "pixel_ods_download_promote", "pixel_ods_workspace_preview"}.issubset(value["tools"]["alsoAllow"])
-assert {"web_search", "web_fetch", "pixel_ods_status", "pixel_ods_apps_list", "pixel_ods_extensions", "pixel_ods_host_observe", "pixel_ods_host_command_propose", "pixel_ods_evidence_report", "pixel_ods_evidence_readback", "pixel_ods_research","pixel_ods_web_extract", "pixel_ods_download_promote", "pixel_ods_workspace_preview"}.issubset(value["tools"]["sandbox"]["tools"]["allow"])
+assert {"pixel_ods_status", "pixel_ods_apps_list", "pixel_ods_extensions", "pixel_ods_host_observe", "pixel_ods_host_command_propose", "pixel_ods_evidence_report", "pixel_ods_evidence_readback", "pixel_ods_research","pixel_ods_web_extract", "pixel_ods_download_promote", "pixel_ods_workspace_preview","pixel_ods_ask_user","pixel_ods_goal", "pixel_ods_activity", "pixel_ods_history"}.issubset(value["tools"]["alsoAllow"])
+assert {"web_search", "web_fetch", "pixel_ods_status", "pixel_ods_apps_list", "pixel_ods_extensions", "pixel_ods_host_observe", "pixel_ods_host_command_propose", "pixel_ods_evidence_report", "pixel_ods_evidence_readback", "pixel_ods_research","pixel_ods_web_extract", "pixel_ods_download_promote", "pixel_ods_workspace_preview","pixel_ods_ask_user","pixel_ods_goal", "pixel_ods_activity", "pixel_ods_history"}.issubset(value["tools"]["sandbox"]["tools"]["allow"])
 assert value["plugins"]["entries"]["pixel-ods"]["hooks"]["allowConversationAccess"] is True
 assert value["plugins"]["entries"]["pixel-ods"]["config"] == {
     "modelContextWindow": model["contextWindow"],
@@ -1503,7 +1503,7 @@ assert value["tools"]["loopDetection"] == {
 context_window = model["contextWindow"]
 assert value["agents"]["defaults"]["compaction"] == {
     "reserveTokens": (context_window + 4 * model["maxTokens"] + 4) // 5,
-    "reserveTokensFloor": context_window // 2 if 8192 <= context_window < 32768 else 0,
+    "reserveTokensFloor": 0,
     "keepRecentTokens": max(512, min(20000, context_window // 16)),
 }
 if "qwen" in model["id"].lower() and model["reasoning"] is True:
@@ -1542,7 +1542,7 @@ cp "$runtime_config" "$runtime_recovery_candidate"
 chmod 0600 "$runtime_recovery_candidate"
 check test "$(_ods_pixel_apply_runtime_budget "$owner" "$runtime_home" "$runtime_config" "$runtime_validator")" = changed
 runtime_sha256="$(sha256sum "$runtime_config" | awk '{print $1}')"
-check python3 -c 'import json,sys; v=json.load(open(sys.argv[1])); d=v["agents"]["defaults"]; assert d["timeoutSeconds"] == 1800 and d["bootstrapMaxChars"] == 32000 and d["bootstrapTotalMaxChars"] == 96000 and d["contextInjection"] == "continuation-skip"; assert d["compaction"] == {"reserveTokens":9831,"reserveTokensFloor":0,"keepRecentTokens":2048}; assert d["sandbox"]["docker"]["binds"] == [sys.argv[2] + "/.openclaw/.ods-exec-control:/run/pixel-ods-control:ro"] and d["sandbox"]["docker"]["dangerouslyAllowExternalBindSources"] is True; a=v["agents"]["list"][0]; assert "thinkingDefault" not in a and a["tools"]["deny"] == [] and a["experimental"] == {"localModelLean":False} and a["bootstrapMaxChars"] == 14000 and a["bootstrapTotalMaxChars"] == 36000 and a["contextInjection"] == "continuation-skip" and a["contextLimits"] == {"toolResultMaxChars":8192} and a["params"]["chat_template_kwargs"]["enable_thinking"] is False; assert v["models"]["providers"]["ods-local"]["timeoutSeconds"] == 1800; m=v["models"]["providers"]["ods-local"]["models"][0]; assert m["reasoning"] is False and "compat" not in m; assert v["diagnostics"]["stuckSessionAbortMs"] == 1860000; assert v["session"]["writeLock"] == {"maxHoldMs":1920000,"staleMs":3600000}; assert {"pixel_ods_status","pixel_ods_apps_list","pixel_ods_extensions", "pixel_ods_host_observe","pixel_ods_host_command_propose","pixel_ods_evidence_report","pixel_ods_evidence_readback","pixel_ods_research","pixel_ods_web_extract","pixel_ods_download_promote","pixel_ods_workspace_preview"}.issubset(v["tools"]["alsoAllow"]); assert v["tools"]["toolSearch"] == {"enabled":True,"mode":"tools","searchDefaultLimit":5,"maxSearchLimit":10}; assert {"web_search","web_fetch","pixel_ods_status","pixel_ods_apps_list","pixel_ods_extensions", "pixel_ods_host_observe","pixel_ods_host_command_propose","pixel_ods_evidence_report","pixel_ods_evidence_readback","pixel_ods_research","pixel_ods_web_extract","pixel_ods_download_promote","pixel_ods_workspace_preview"}.issubset(v["tools"]["sandbox"]["tools"]["allow"]) and v["tools"]["loopDetection"]["globalCircuitBreakerThreshold"] == 6; assert v["plugins"]["entries"]["pixel-ods"]["hooks"]["allowConversationAccess"] is True and v["plugins"]["entries"]["pixel-ods"]["config"] == {"modelContextWindow":32768,"leanPrompt":False,"perplexicaPort":3004}; assert v["tools"]["web"]["fetch"]["enabled"] is True and v["tools"]["web"]["fetch"]["maxChars"] == 12000 and v["tools"]["web"]["fetch"]["timeoutSeconds"] == 20 and v["tools"]["web"]["fetch"]["ssrfPolicy"] == {"allowRfc2544BenchmarkRange":False,"allowIpv6UniqueLocalRange":False}' "$runtime_config" "$runtime_home"
+check python3 -c 'import json,sys; v=json.load(open(sys.argv[1])); d=v["agents"]["defaults"]; assert d["timeoutSeconds"] == 1800 and d["bootstrapMaxChars"] == 32000 and d["bootstrapTotalMaxChars"] == 96000 and d["contextInjection"] == "continuation-skip"; assert d["compaction"] == {"reserveTokens":9831,"reserveTokensFloor":0,"keepRecentTokens":2048}; assert d["sandbox"]["docker"]["binds"] == [sys.argv[2] + "/.openclaw/.ods-exec-control:/run/pixel-ods-control:ro"] and d["sandbox"]["docker"]["dangerouslyAllowExternalBindSources"] is True; a=v["agents"]["list"][0]; assert "thinkingDefault" not in a and a["tools"]["deny"] == [] and a["experimental"] == {"localModelLean":False} and a["bootstrapMaxChars"] == 14000 and a["bootstrapTotalMaxChars"] == 36000 and a["contextInjection"] == "continuation-skip" and a["contextLimits"] == {"toolResultMaxChars":8192} and a["params"]["chat_template_kwargs"]["enable_thinking"] is False; assert v["models"]["providers"]["ods-local"]["timeoutSeconds"] == 1800; m=v["models"]["providers"]["ods-local"]["models"][0]; assert m["reasoning"] is False and "compat" not in m; assert v["diagnostics"]["stuckSessionAbortMs"] == 1860000; assert v["session"]["writeLock"] == {"maxHoldMs":1920000,"staleMs":3600000}; assert {"pixel_ods_status","pixel_ods_apps_list","pixel_ods_extensions", "pixel_ods_host_observe","pixel_ods_host_command_propose","pixel_ods_evidence_report","pixel_ods_evidence_readback","pixel_ods_research","pixel_ods_web_extract","pixel_ods_download_promote","pixel_ods_workspace_preview","pixel_ods_ask_user","pixel_ods_goal", "pixel_ods_activity", "pixel_ods_history"}.issubset(v["tools"]["alsoAllow"]); assert v["tools"]["toolSearch"] == {"enabled":True,"mode":"tools","searchDefaultLimit":5,"maxSearchLimit":10}; assert {"web_search","web_fetch","pixel_ods_status","pixel_ods_apps_list","pixel_ods_extensions", "pixel_ods_host_observe","pixel_ods_host_command_propose","pixel_ods_evidence_report","pixel_ods_evidence_readback","pixel_ods_research","pixel_ods_web_extract","pixel_ods_download_promote","pixel_ods_workspace_preview","pixel_ods_ask_user","pixel_ods_goal", "pixel_ods_activity", "pixel_ods_history"}.issubset(v["tools"]["sandbox"]["tools"]["allow"]) and v["tools"]["loopDetection"]["globalCircuitBreakerThreshold"] == 6; assert v["plugins"]["entries"]["pixel-ods"]["hooks"]["allowConversationAccess"] is True and v["plugins"]["entries"]["pixel-ods"]["config"] == {"modelContextWindow":32768,"leanPrompt":False,"perplexicaPort":3004}; assert v["tools"]["web"]["fetch"]["enabled"] is True and v["tools"]["web"]["fetch"]["maxChars"] == 12000 and v["tools"]["web"]["fetch"]["timeoutSeconds"] == 20 and v["tools"]["web"]["fetch"]["ssrfPolicy"] == {"allowRfc2544BenchmarkRange":False,"allowIpv6UniqueLocalRange":False}' "$runtime_config" "$runtime_home"
 check test "$(_ods_pixel_apply_runtime_budget "$owner" "$runtime_home" "$runtime_config" "$runtime_validator")" = unchanged
 check test "$(sha256sum "$runtime_config" | awk '{print $1}')" = "$runtime_sha256"
 check test "$(PERPLEXICA_PORT=43004 _ods_pixel_apply_runtime_budget "$owner" "$runtime_home" "$runtime_config" "$runtime_validator")" = changed
@@ -1590,7 +1590,7 @@ destination.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
 destination.chmod(0o600)
 PY
 check test "$(_ods_pixel_apply_runtime_budget "$owner" "$runtime_home" "$runtime_compact_config" "$runtime_validator")" = changed
-check python3 -c 'import json,sys; v=json.load(open(sys.argv[1])); a=v["agents"]["list"][0]; assert a["bootstrapMaxChars"] == 2000 and a["bootstrapTotalMaxChars"] == 6000 and a["contextInjection"] == "never" and a["contextLimits"] == {"toolResultMaxChars":4000}; assert {k:a["params"][k] for k in ("temperature","topP","frequencyPenalty","presencePenalty")} == {"temperature":0.7,"topP":0.8,"frequencyPenalty":0.6,"presencePenalty":0.2}; assert v["agents"]["defaults"]["compaction"] == {"reserveTokens":2458,"reserveTokensFloor":4096,"keepRecentTokens":512}; assert v["plugins"]["entries"]["pixel-ods"]["config"] == {"modelContextWindow":8192,"leanPrompt":True,"perplexicaPort":3004}' "$runtime_compact_config"
+check python3 -c 'import json,sys; v=json.load(open(sys.argv[1])); a=v["agents"]["list"][0]; assert a["bootstrapMaxChars"] == 2000 and a["bootstrapTotalMaxChars"] == 6000 and a["contextInjection"] == "never" and a["contextLimits"] == {"toolResultMaxChars":4000}; assert {k:a["params"][k] for k in ("temperature","topP","frequencyPenalty","presencePenalty")} == {"temperature":0.7,"topP":0.8,"frequencyPenalty":0.6,"presencePenalty":0.2}; assert v["agents"]["defaults"]["compaction"] == {"reserveTokens":2458,"reserveTokensFloor":0,"keepRecentTokens":512}; assert v["plugins"]["entries"]["pixel-ods"]["config"] == {"modelContextWindow":8192,"leanPrompt":True,"perplexicaPort":3004}' "$runtime_compact_config"
 
 runtime_small_large_config="$runtime_home/.openclaw/small-model-large-context.json"
 python3 - "$runtime_config" "$runtime_small_large_config" <<'PY'
@@ -1977,6 +1977,20 @@ chmod 0600 "$reconcile_config"
 check _ods_pixel_uses_stable_model_alias "$owner" "$reconcile_home" "$gateway_answers"
 check _ods_pixel_stable_alias_matches_promoted_model "$owner" "$reconcile_home" \
     "$gateway_answers" qwen-gateway 65536 4096 false
+route_alias_answers="$TEST_ROOT/route-alias-onboarding.json"
+cp "$gateway_answers" "$route_alias_answers"
+route_fingerprint="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+_ods_pixel_update_onboarding_model "$owner" "$reconcile_home" "$route_alias_answers" \
+    qwen-gateway 65536 4096 false "$route_fingerprint"
+route_alias_candidate="$(_ods_pixel_stage_stable_alias_candidate \
+    "$owner" "$reconcile_home" "$route_alias_answers")"
+check test "$(_ods_pixel_apply_runtime_budget "$owner" "$reconcile_home" \
+    "$route_alias_candidate" "$runtime_validator" "$route_alias_answers")" = unchanged
+check _ods_pixel_candidate_is_managed_runtime_update "$owner" "$reconcile_home" \
+    "$route_alias_candidate" "$route_alias_answers"
+check python3 -c 'import json,sys; v=json.load(open(sys.argv[1])); assert v["plugins"]["entries"]["pixel-ods"]["config"]["modelRouteFingerprint"] == sys.argv[2]' \
+    "$route_alias_candidate" "$route_fingerprint"
+rm -f -- "$route_alias_candidate"
 stale_alias_answers="$TEST_ROOT/stale-alias-onboarding.json"
 cp "$gateway_answers" "$stale_alias_answers"
 _ods_pixel_update_onboarding_model "$owner" "$reconcile_home" "$stale_alias_answers" \
@@ -2198,6 +2212,7 @@ plugin="$ROOT/extensions/services/pixel-agent/plugin"
 check node --check "$plugin/index.js"
 check node --check "$plugin/projection.mjs"
 check node --check "$plugin/prompt-contract.mjs"
+check node --check "$plugin/playground-projects.mjs"
 check node --check "$plugin/tool-content.mjs"
 check node --check "$plugin/tool-loop-guard.mjs"
 check node --check "$plugin/web-extract.mjs"
@@ -2231,11 +2246,15 @@ import json,sys
 p=json.load(open(sys.argv[1])); m=json.load(open(sys.argv[2]))
 assert p["type"] == "module" and p["openclaw"]["extensions"] == ["./index.js"]
 assert "dependencies" not in p
-assert sorted(m["contracts"]["tools"]) == ["pixel_ods_apps_list","pixel_ods_download_promote","pixel_ods_evidence_readback","pixel_ods_evidence_report","pixel_ods_extensions", "pixel_ods_host_command_propose","pixel_ods_host_observe","pixel_ods_research","pixel_ods_status","pixel_ods_web_extract","pixel_ods_workspace_preview"]
+assert sorted(m["contracts"]["tools"]) == sorted(["pixel_ods_apps_list","pixel_ods_download_promote","pixel_ods_evidence_readback","pixel_ods_evidence_report","pixel_ods_extensions", "pixel_ods_host_command_propose","pixel_ods_host_observe","pixel_ods_research","pixel_ods_status","pixel_ods_web_extract","pixel_ods_workspace_preview","pixel_ods_ask_user","pixel_ods_goal", "pixel_ods_activity", "pixel_ods_history"])
 import re
 reserved = re.compile(r"^pixel_(?:gmail|calendar|social|web|ops|frontier)_")
 assert all(name != "pixel_limb_status" and not reserved.match(name) for name in m["contracts"]["tools"])
 assert m["toolMetadata"] == {
+    "pixel_ods_ask_user": {"replaySafe": True},
+    "pixel_ods_goal": {"replaySafe": True},
+    "pixel_ods_activity": {"replaySafe": True},
+    "pixel_ods_history": {"replaySafe": True},
     "pixel_ods_status": {"replaySafe": True},
     "pixel_ods_apps_list": {"replaySafe": True},
     "pixel_ods_extensions": {"replaySafe": True},
@@ -2394,7 +2413,7 @@ resume = installer[resume_start:resume_end]
 stop = resume.index("systemctl stop openclaw-gateway.service")
 retire = resume.index("_ods_pixel_recreate_agent_sandbox \"$owner\" \"$home\" \"$openclaw_bin\"")
 start = resume.index("systemctl start openclaw-gateway.service", retire)
-health = resume.index("_ods_pixel_wait_http \"Pixel gateway\"", start)
+health = resume.index("_ods_pixel_wait_gateway", start)
 verify = resume.index("\"$pixel_root/pixel\" verify", health)
 assert stop < retire < start < health < verify
 helper_start = text.index("_ods_pixel_recreate_agent_sandbox()")
@@ -2430,7 +2449,9 @@ assert "runtime_token_file=\"/run/ods-pixel/openclaw.json\"" in text
 assert "PIXEL_GATEWAY_TOKEN_FILE=$runtime_token_file" in text
 assert "PIXEL_GATEWAY_PORT=$gateway_port" in text
 assert "(( preview_port != gateway_port )) || return 1" in text
-assert "\"http://127.0.0.1:${pixel_gateway_port}/health\"" in text
+assert "_ods_pixel_gateway_health \"$gateway_port\"" in text
+assert "\"http://${host}:${port}/health\"" in text
+assert "_ods_pixel_wait_gateway 60 \"$pixel_gateway_port\"" in text
 assert installer.index("_ods_pixel_existing_gateway_port_matches") < installer.index("_ods_pixel_prepare_attempt_log")
 assert "_ods_pixel_installed_gateway_port" in text[text.index("_ods_pixel_install_access_service() {"):]
 assert "The installed Pixel gateway unit port differs from onboarding" in text

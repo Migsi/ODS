@@ -33,6 +33,8 @@ for name in ("access_mode_server.py", "pixel_access_bridge.py", "pixel_access_cl
              "pixel_provider/service_environment.py", "pixel_provider/service_activation.py",
              "pixel_provider/runtime_custody.py", "pixel_provider/coordinator.py", "provider_transaction.py"):
     protected(PROGRAM / name)
+for name in ("pixel_model_contract.py", "pixel_model_coordinator.py", "model_transaction.py"):
+    protected(PROGRAM / name)
 sys.path.insert(0, str(PROGRAM))
 from pixel_access_bridge import AccessError, SystemdAccessBridge, private_json
 from pixel_access_protocol import control_request, decode_frame
@@ -44,17 +46,34 @@ def main():
     owner = pwd.getpwnam(settings["owner"])
     if owner.pw_uid == 0: raise RuntimeError("invalid owner")
     install = Path(settings["install_dir"])
-    # Values remain private data. Never source .env or import owner code.
-    values = {}
-    for line in (install / ".env").read_text().splitlines():
-        if line.startswith("DASHBOARD_API_KEY="):
-            values["key"] = line.partition("=")[2].strip().strip("\"'")
+    # The installed key is bound to the actual Edge owner credential. Hybrid
+    # installations may have different Windows and guest .env files.
+    key_path = Path('/etc/ods/pixel-access-relay.key')
+    if settings.get('edge_owner_key_sha256'):
+        import hashlib
+        fd = os.open(key_path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, 'rb') as handle:
+            info = os.fstat(handle.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != owner.pw_uid or info.st_nlink != 1 or info.st_mode & 0o077 or info.st_size > 4096:
+                raise RuntimeError('unsafe owner relay credential')
+            key = handle.read(4097)
+        if hashlib.sha256(key).hexdigest() != settings['edge_owner_key_sha256']:
+            raise RuntimeError('owner relay credential changed')
+        key = key.decode('ascii')
+    else:
+        # Existing local installs remain readable until their coordinator is
+        # upgraded through the same custody-preserving installer.
+        key = ''
+        for line in (install / '.env').read_text().splitlines():
+            if line.startswith('DASHBOARD_API_KEY='):
+                key = line.partition('=')[2].strip().strip("\"'")
     def make_adapter():
         # Discovery has request-local owner/gateway snapshots. Never let another
         # handler replace the active transition's authentication or runtime data.
-        return SystemdAccessBridge(install, values.get("key", ""), installed_binary=settings["openclaw_bin"],
-                                   gateway_owner=owner.pw_name, gateway_port=settings.get("gateway_port"),
-                                   settings_data_dir=settings.get("settings_data_dir"))
+        return SystemdAccessBridge(install, key, installed_binary=settings["openclaw_bin"],
+                                   gateway_owner=owner.pw_name, settings_data_dir=settings.get("settings_data_dir"),
+                                   gateway_binding=settings.get('gateway_binding'),
+                                   gateway_port=settings.get('gateway_port'))
     address = "/run/ods-pixel-access/control.sock"
 
     class Handler(socketserver.StreamRequestHandler):
@@ -90,6 +109,8 @@ def main():
                     body = (adapter.provider_status(data_dir_id=request["data_dir_id"])
                             if request["operation"] == "provider-status"
                             else adapter.change_providers(request["request"], data_dir_id=request["data_dir_id"]))
+                elif request["operation"].startswith("model-"):
+                    status, body = 200, adapter.model_control(request["operation"], request.get("request"))
                 else: raise ValueError()
             except PermissionError: pass
             except AccessError as error: status, body = 409, {"error": error.code}

@@ -21,6 +21,7 @@ _ods_pixel_access_validate_or_remove() {
     sudo python3 - "$action" "$@" <<'PY'
 import errno
 import fcntl
+import hashlib
 import json
 import os
 import pathlib
@@ -102,11 +103,14 @@ sources = {
     "access_mode_config.py": install / "extensions/services/pixel-agent/host/access_mode_config.py",
     "settings_transaction.py": install / "extensions/services/pixel-agent/host/settings_transaction.py",
     "provider_transaction.py": install / "extensions/services/pixel-agent/host/provider_transaction.py",
+    "model_transaction.py": install / "extensions/services/pixel-agent/host/model_transaction.py",
     "pixel_access_bridge.py": install / "bin/pixel_access_bridge.py",
     "pixel_access_client.py": install / "bin/pixel_access_client.py",
     "pixel_access_reconcile.py": install / "bin/pixel_access_reconcile.py",
     "pixel_model_transition.py": install / "bin/pixel_model_transition.py",
     "pixel_access_protocol.py": install / "bin/pixel_access_protocol.py",
+    "pixel_model_contract.py": install / "bin/pixel_model_contract.py",
+    "pixel_model_coordinator.py": install / "bin/pixel_model_coordinator.py",
 }
 for name in ("__init__.py", "contract.py", "projection.py", "runtime.py", "coordinator.py"):
     sources[f"pixel_settings/{name}"] = install / "bin/pixel_settings" / name
@@ -117,7 +121,8 @@ for name in (
 ):
     sources[f"pixel_provider/{name}"] = install / "bin/pixel_provider" / name
 
-artifacts = (unit, program, config, state_root, probe_owner, dropin)
+relay_key = config.parent / "pixel-access-relay.key"
+artifacts = (unit, program, config, relay_key, state_root, probe_owner, dropin)
 if not any(present(path) for path in artifacts):
     print("absent")
     raise SystemExit(0)
@@ -174,19 +179,37 @@ config_present = present(config)
 if config_present:
     regular(config, root_uid, root_gid, 64 * 1024, private=True)
     value = json.loads(config.read_text(encoding="utf-8"))
+    base_keys = {"install_dir", "owner", "openclaw_bin", "gateway_port", "settings_data_dir"}
+    relay_keys = base_keys | {"edge_owner_key_sha256"}
+    legacy_relay_keys = (base_keys - {"gateway_port"}) | {"edge_owner_key_sha256"}
+    allowed_keys = (base_keys, relay_keys, relay_keys | {"gateway_binding"},
+                    legacy_relay_keys, legacy_relay_keys | {"gateway_binding"})
     if (not isinstance(value, dict)
-            or set(value) != {"install_dir", "owner", "openclaw_bin", "gateway_port", "settings_data_dir"}
+            or set(value) not in allowed_keys
             or value.get("install_dir") != str(install.resolve())
             or value.get("owner") != owner_name
             or not isinstance(value.get("openclaw_bin"), str)
             or not pathlib.Path(value["openclaw_bin"]).is_absolute()
-            or isinstance(value.get("gateway_port"), bool)
-            or not isinstance(value.get("gateway_port"), int)
-            or not 1 <= value["gateway_port"] <= 65535
+            or ("gateway_port" in value and
+                (isinstance(value["gateway_port"], bool)
+                 or not isinstance(value["gateway_port"], int)
+                 or not 1 <= value["gateway_port"] <= 65535))
             or not (value.get("settings_data_dir") is None
                     or (isinstance(value.get("settings_data_dir"), str)
                         and pathlib.Path(value["settings_data_dir"]).is_absolute()))):
         raise SystemExit("Pixel access configuration does not bind this ODS install")
+    if "edge_owner_key_sha256" in value:
+        digest = value["edge_owner_key_sha256"]
+        if (not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest)
+                or not present(relay_key)):
+            raise SystemExit("Pixel access relay credential is missing or invalid")
+        regular(relay_key, owner_uid, owner_gid, 4096, private=True)
+        if hashlib.sha256(relay_key.read_bytes()).hexdigest() != digest:
+            raise SystemExit("Pixel access relay credential changed")
+    elif present(relay_key):
+        raise SystemExit("Pixel access relay credential lacks a binding")
+elif present(relay_key):
+    raise SystemExit("Pixel access relay credential lacks configuration")
 
 # Dynamic privileged state is removable only when the immutable configuration
 # above binds it to this exact install and owner. A state-only remnant is
@@ -204,6 +227,7 @@ state_limits = {
     "transition.json": 8 * 1024 * 1024,
     "verified.json": 256 * 1024,
     "service-baseline.json": 64 * 1024,
+    "model-before.json": 8 * 1024 * 1024,
     "model-completed.json": 256 * 1024,
     "settings-verified.json": 256 * 1024,
     "provider-root-plan.json": 8 * 1024 * 1024,
@@ -261,7 +285,7 @@ for line in mount_lines:
     if any(mount == root or root in mount.parents for root in mount_roots):
         raise SystemExit(f"mount inside Pixel access cleanup root: {mount}")
 
-for path in (dropin, config, unit):
+for path in (dropin, relay_key, config, unit):
     if present(path):
         path.unlink()
 for path in (program, state_root, probe_owner):
@@ -317,6 +341,7 @@ ods_pixel_uninstall_managed() {
     local access_probe_base="${ODS_PIXEL_UNINSTALL_ACCESS_PROBE_DIR:-/var/lib/ods-pixel-access-probes}"
     local access_dropin_dir="$systemd_dir/openclaw-gateway.service.d"
     local access_dropin="$access_dropin_dir/90-ods-full-access.conf"
+    local access_relay_key="$etc_dir/pixel-access-relay.key"
     local ops_user="pixel-ops-broker"
     local ops_group="pixel-ops"
     local ops_unit="$systemd_dir/pixel-ops-broker.service"
@@ -1770,6 +1795,7 @@ PY
     if [[ -e "$access_unit" || -L "$access_unit" \
         || -e "$access_program" || -L "$access_program" \
         || -e "$access_config" || -L "$access_config" \
+        || -e "$access_relay_key" || -L "$access_relay_key" \
         || -e "$access_state" || -L "$access_state" \
         || -e "$access_probe_base/$owner_uid" || -L "$access_probe_base/$owner_uid" \
         || -e "$access_dropin" || -L "$access_dropin" ]]; then
@@ -2368,6 +2394,7 @@ PY
             || -e "$workspace_preview_state" || -e "$access_unit" || -L "$access_unit" \
             || -e "$access_program" || -L "$access_program" \
             || -e "$access_config" || -L "$access_config" \
+            || -e "$access_relay_key" || -L "$access_relay_key" \
             || -e "$access_state" || -L "$access_state" \
             || -e "$access_probe_base/$owner_uid" || -L "$access_probe_base/$owner_uid" \
             || -e "$access_dropin" || -L "$access_dropin" ]]; then

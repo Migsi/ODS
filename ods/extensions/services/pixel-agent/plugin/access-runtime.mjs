@@ -7,6 +7,7 @@ import os from 'node:os';
 import crypto from 'node:crypto';
 import {spawnSync} from 'node:child_process';
 import {readRuntimeSettings} from './settings-runtime-readback.mjs';
+import {readRuntimeModel} from './model-runtime-readback.mjs';
 
 const hex = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
 const hash = value => crypto.createHash('sha256').update(value).digest('hex');
@@ -145,7 +146,7 @@ export function createAccessRuntime({directory = path.join(os.homedir(), '.openc
     const unavailable = () => { throw new Error('POSIX admission unavailable'); };
     return {status: () => ({available: false, phase: 'unavailable', revision: null, active: 0, proof: null}),
       admit: () => ({outcome: 'pass'}), finish() {}, beforeTool() {}, afterTool() {},
-      acquire: unavailable, release: unavailable, probe: unavailable, readSettings: unavailable,
+      acquire: unavailable, release: unavailable, probe: unavailable, readSettings: unavailable, readModel: unavailable,
       owns: () => false, isProbe: () => false};
   }
   // Admission coverage was inspected against these exact installed contracts.
@@ -367,6 +368,13 @@ export function createAccessRuntime({directory = path.join(os.homedir(), '.openc
     return readRuntimeSettings(settingsConfig(), {pid: process.pid, runtimeVersion,
       revision: state.revision, observedAt: new Date().toISOString()});
   }
+  function readModel(token, expected) {
+    if (!qualified || failed || typeof settingsConfig !== 'function' ||
+        token !== undefined && (!owns(token) || expected !== state.revision || busy() || probeRun)) {
+      throw new Error('runtime model snapshot unavailable');
+    }
+    return readRuntimeModel(settingsConfig(), {pid:process.pid,revision:state.revision,observedAt:new Date().toISOString()});
+  }
   function release(token) {
     if (!owns(token) || busy() || probeRun) throw new Error('runtime lease mismatch');
     state.phase = 'idle'; state.tokenHash = null; changed(); return status();
@@ -442,6 +450,6 @@ export function createAccessRuntime({directory = path.join(os.homedir(), '.openc
       if (fs.existsSync(sentinel)) fs.unlinkSync(sentinel);
     }
   }
-  return {status, admit, finish, beforeTool, afterTool, acquire, release, probe, owns, readSettings, reconcileDetached,
+  return {status, admit, finish, beforeTool, afterTool, acquire, release, probe, owns, readSettings, readModel, reconcileDetached,
     classifyTransitionError: failure => transitionFailures.get(failure) ?? null, isProbe: isInternal};
 }

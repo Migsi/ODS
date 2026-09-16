@@ -4,6 +4,7 @@ import math
 from pathlib import PurePosixPath
 import re
 import uuid
+from pixel_model_contract import target as model_target, ModelError
 
 MAX_REQUEST = 16384
 MAX_REPLY = 8192
@@ -19,6 +20,10 @@ HOOKS = {"status": (), "full-access": ("busy", "restart"), "sandboxed": ("busy",
          "settings-recover": ("busy", "settings-activate"), "provider-status": (), "provider-worker-status": (),
          "provider-change": ("busy", "provider-activate"), "provider-recover": ("busy", "provider-activate")}
 HEX = re.compile(r"[a-f0-9]{64}\Z")
+KEYS.update({"model-status": BASE, "model-begin": BASE | {"transaction_id"},
+             "model-apply": BASE | {"transaction_id", "model_target"},
+             "model-rollback": BASE | {"transaction_id"}, "model-finish": BASE | {"transaction_id", "model_outcome"}})
+HOOKS.update({name: (() if name == "model-status" else ("busy",)) for name in KEYS if name.startswith("model-")})
 
 
 class ProtocolError(ValueError):
@@ -65,6 +70,7 @@ def control_request(value):
             "settings-change": {"operation", "data_dir_id", "request"},
             "provider-status": {"operation", "data_dir_id"},
             "provider-change": {"operation", "data_dir_id", "request"}}
+    keys.update({"model-status": {"operation"}, **{name: {"operation", "request"} for name in ("model-begin", "model-apply", "model-finish")}})
     if operation not in keys or set(value) != keys[operation]:
         raise ProtocolError("invalid-request")
     if operation.startswith(("settings-", "provider-")) and (type(value["data_dir_id"]) is not str or not HEX.fullmatch(value["data_dir_id"])):
@@ -107,6 +113,14 @@ def request(value):
             raise ProtocolError('owner-protocol-failed')
     if operation in ("settings-apply", "settings-recover", "provider-change", "provider-recover"):
         if type(value["transaction_id"]) is not str or not HEX.fullmatch(value["transaction_id"]):
+            raise ProtocolError("owner-protocol-failed")
+    if operation.startswith("model-") and operation != "model-status":
+        if type(value["transaction_id"]) is not str or not HEX.fullmatch(value["transaction_id"]):
+            raise ProtocolError("owner-protocol-failed")
+        if operation == "model-apply":
+            try: model_target(value["model_target"])
+            except ModelError: raise ProtocolError("owner-protocol-failed") from None
+        if operation == "model-finish" and value["model_outcome"] not in ("commit", "rollback"):
             raise ProtocolError("owner-protocol-failed")
     if operation == "settings-apply" and (
             type(value["settings_revision"]) is not int or not 0 <= value["settings_revision"] <= 2**53 - 1
@@ -154,6 +168,24 @@ def hook_reply(operation, name, value):
 def result(operation, value):
     if type(value) is not dict:
         raise ProtocolError("owner-protocol-failed")
+    if operation.startswith("model-"):
+        if type(value.get("configSha256")) is not str or not HEX.fullmatch(value["configSha256"]):
+            raise ProtocolError("owner-protocol-failed")
+        if operation != "model-status":
+            if set(value) != {"configSha256"}: raise ProtocolError("owner-protocol-failed")
+        else:
+            if (set(value) != {"configSha256", "contract", "limits", "pending", "transactionId", "completion"}
+                    or type(value["pending"]) is not bool or type(value["limits"]) is not dict
+                    or value["transactionId"] is not None and (type(value["transactionId"]) is not str or not HEX.fullmatch(value["transactionId"]))):
+                raise ProtocolError("owner-protocol-failed")
+            try: model_target(value["contract"])
+            except ModelError: raise ProtocolError("owner-protocol-failed") from None
+            done = value["completion"]
+            if done is not None and (type(done) is not dict or set(done) != {"transactionId", "outcome", "configSha256"}
+                    or done["outcome"] not in ("commit", "rollback")
+                    or any(type(done[key]) is not str or not HEX.fullmatch(done[key]) for key in ("transactionId", "configSha256"))):
+                raise ProtocolError("owner-protocol-failed")
+        return value
     if operation == 'provider-worker-status':
         if set(value) != {'ready'} or type(value['ready']) is not bool:
             raise ProtocolError('owner-protocol-failed')

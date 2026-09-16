@@ -592,6 +592,21 @@ test('settings readback refuses missing current-config support without reading s
   assert.equal(runtime.status().phase, 'held');
 });
 
+test('model status reads current config while model mutation readback requires exact held lease', linux, () => {
+  let config={agents:{list:[{id:'pixel',model:'ods-gateway/ods/current'}]},
+    models:{providers:{'ods-gateway':{models:[{id:'ods/current',name:'ODS Current (first)',contextWindow:65536,maxTokens:8192,reasoning:false}]}}},
+    plugins:{entries:{'pixel-ods':{enabled:true,config:{}}}}};
+  const runtime=createAccessRuntime({...fixture(),config:()=>{throw Error('startup config');},settingsConfig:()=>config});
+  assert.equal(runtime.readModel().contract.model,'first');
+  assert.throws(()=>runtime.readModel(token,runtime.status().revision));
+  const held=runtime.acquire(token,runtime.status().revision);
+  config.models.providers['ods-gateway'].models[0]={id:'ods/current',name:'ODS Current (next)',contextWindow:16384,maxTokens:4096,reasoning:false};
+  assert.equal(runtime.readModel(token,held.revision).contract.contextLength,16384);
+  assert.throws(()=>runtime.readModel(other,held.revision));
+  runtime.release(token);assert.throws(()=>runtime.readModel(token,held.revision));
+  assert.equal(runtime.readModel().contract.model,'next');
+});
+
 test('settings readback on an inherited hold refuses unqualified runtime versions', linux, () => {
   const options = fixture();
   seed(options, {version: 2, pid: 2147483647, bootId: '0'.repeat(8) + '-0000-0000-0000-' + '0'.repeat(12), startTicks: '1'}, 'held');
