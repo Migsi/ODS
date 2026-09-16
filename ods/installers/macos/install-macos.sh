@@ -454,7 +454,7 @@ api_key = os.environ["ODS_OPENCODE_API_KEY"]
 context = int(os.environ["ODS_OPENCODE_CONTEXT"])
 if context < 1024:
     raise SystemExit("OpenCode requires at least 1024 context tokens")
-output_limit = min(8192, context // 4)
+output_limit = min(32768, context // 4)
 provider_id = "llama-server"
 provider = data.setdefault("provider", {}).setdefault(provider_id, {})
 provider.update({

@@ -207,7 +207,7 @@ else
             exit 1
         fi
         _opencode_output_limit=$(( _opencode_context / 4 ))
-        (( _opencode_output_limit <= 8192 )) || _opencode_output_limit=8192
+        (( _opencode_output_limit <= 32768 )) || _opencode_output_limit=32768
 
         # Writes a fresh opencode.json from the template. Used for first-install
         # and as deterministic recovery when the jq rewrite path finds an
