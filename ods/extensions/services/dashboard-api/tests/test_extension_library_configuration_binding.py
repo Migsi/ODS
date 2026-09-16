@@ -268,6 +268,27 @@ def test_default_only_library_configuration_needs_no_secret_or_record():
     assert calls == []
 
 
+def test_reconciling_rebinds_the_same_approved_configuration() -> None:
+    definitions = [
+        _definition(
+            "gitea",
+            [_field("GITEA_PORT", kind="integer", default=7830)],
+        )
+    ]
+    applying = _transaction(definitions, None)
+    prior = binding.bind_library_configuration(
+        _command(definitions), lambda _id: applying, lambda _request: None
+    )
+    reconciling = {**applying, "state": "reconciling"}
+    current = binding.bind_library_configuration(
+        _command(definitions, state="reconciling"),
+        lambda _id: reconciling,
+        lambda _request: None,
+        expected_state="reconciling",
+    )
+    assert current == prior
+
+
 def test_secret_configuration_is_bound_without_reading_secret_values():
     fields = [
         _field(

@@ -418,7 +418,10 @@ class ApplicationObservationAdapter:
         self._lease = active_lease
         self._docker = docker_runner
 
-    def __call__(self, command: LifecycleWorkCommand) -> ObservationResult:
+    def collect(
+        self, command: LifecycleWorkCommand
+    ) -> tuple[LifecycleWorkCommand, CurrentEvidence]:
+        """Return the exact double-sampled input without classifying partial state."""
         if (
             type(command) is not LifecycleWorkCommand
             or not command.operation_key.startswith("apply:")
@@ -493,7 +496,7 @@ class ApplicationObservationAdapter:
             if record is not None:
                 active_record = asdict(record)
                 active_record["expected_containers"] = list(record.expected_containers)
-            return observe_application(
+            return (
                 bound,
                 CurrentEvidence(
                     active_record=active_record,
@@ -508,6 +511,15 @@ class ApplicationObservationAdapter:
                     active_override_digest=first_override,
                 ),
             )
+        except ApplicationObservationError:
+            raise
+        except Exception:
+            _fail("application-evidence-unavailable")
+
+    def __call__(self, command: LifecycleWorkCommand) -> ObservationResult:
+        bound, evidence = self.collect(command)
+        try:
+            return observe_application(bound, evidence)
         except ApplicationObservationError:
             raise
         except Exception:

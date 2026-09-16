@@ -309,7 +309,7 @@ def _plan_contracts(
         or any(type(item) is not str for item in command.service_ids)
     ):
         _deny("library-configuration-command-invalid")
-    if expected_state == "applying" and target_service_id is None:
+    if expected_state in {"applying", "reconciling"} and target_service_id is None:
         if len(command.service_ids) != 1:
             _deny("library-configuration-command-invalid")
         service_id = command.service_ids[0]

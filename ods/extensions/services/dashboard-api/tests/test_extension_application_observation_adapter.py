@@ -249,6 +249,33 @@ def test_completed_compensation_and_current_absence_are_observed_together(tmp_pa
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="POSIX host evidence only")
+def test_collect_exposes_partial_cleanup_without_calling_it_applied(tmp_path):
+    root, command, bound, identity, record, _receipt = _installed(tmp_path)
+    (root / "compose.override.yaml").unlink()
+    recovering = replace(
+        bound, plan_material=replace(bound.plan_material, state="reconciling")
+    )
+    completed = fixtures._compensation_snapshot(identity)
+    started = replace(completed, state="started", terminal_receipt=None)
+    adapter = adapter_mod.ApplicationObservationAdapter(
+        tmp_path,
+        FakeRecords(record),
+        FakeReceipts(fixtures._completed_snapshot(identity), started),
+        lambda _command: recovering,
+        lambda: True,
+        FakeDocker(identity),
+    )
+    observed_command, evidence = adapter.collect(command)
+    assert observed_command.plan_material.state == "reconciling"
+    assert evidence.active_override_digest is None
+    assert evidence.active_record is not None
+    assert evidence.compensation_snapshot == started
+    with pytest.raises(fixtures.obs_mod.ApplicationObservationError) as error:
+        adapter(command)
+    assert error.value.code == "override-drift"
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="POSIX host evidence only")
 def test_changed_compensation_receipt_refuses_absence(tmp_path):
     root, command, bound, identity, _record, _receipt = _installed(tmp_path)
     for name in (
