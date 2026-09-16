@@ -606,7 +606,8 @@ the original approved operation and application identity, and double-samples
 the receipt with current active files (including the generated override),
 record, and all containers in the fixed Compose project under the same lease.
 A completed apply with no compensation proof remains drift; a started-only
-compensation is not accepted as completion. This is an end-state proof, not a
+compensation is not accepted as completion, but a still-fully-applied app
+remains observable for safe compensation replay. This is an end-state proof, not a
 claim that the compensation command alone caused every disappearance. The
 mutating compensation dispatcher and production Dashboard executor remain
 disabled pending their separate recovery qualification.

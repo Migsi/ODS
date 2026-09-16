@@ -641,7 +641,7 @@ def _validate_completed_compensation(
     )
     compensated_identity = replace(identity, request_sha256=request_hash)
     _validate_receipt_snapshot(snapshot, compensated_command, compensated_identity)
-    if snapshot.state == "absent":
+    if snapshot.state in {"absent", "started", "failed"}:
         return False
     started = snapshot.started_receipt
     terminal = snapshot.terminal_receipt
@@ -707,6 +707,12 @@ def _classify_absent(
     """
     snapshot = evidence.receipt_snapshot
     compensated = _validate_completed_compensation(command, identity, evidence)
+
+    if (
+        evidence.compensation_snapshot is not None
+        and evidence.compensation_snapshot.state in {"started", "failed"}
+    ):
+        _bad("compensation-receipt-incomplete")
 
     if compensated:
         return ObservationResult(

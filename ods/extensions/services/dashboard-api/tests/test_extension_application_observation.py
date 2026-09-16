@@ -629,7 +629,29 @@ def test_started_compensation_is_not_proof_of_absence():
     )
     with pytest.raises(obs_mod.ApplicationObservationError) as exc:
         obs_mod.observe_application(_bound_command(state="reconciling"), evidence)
-    assert exc.value.code == "compensation-receipt-invalid"
+    assert exc.value.code == "compensation-receipt-incomplete"
+
+
+def test_started_compensation_does_not_hide_fully_applied_app():
+    identity = _get_identity()
+    compensation = _compensation_snapshot(identity)
+    compensation = replace(compensation, state="started", terminal_receipt=None)
+    evidence = _build_evidence(
+        record=_build_canonical_record(identity),
+        def_digest=DEFINITION_SHA,
+        compose_digest=COMPOSE_SHA,
+        config_digest=CONFIG_SHA,
+        containers=tuple(
+            _container_observation(name, identity=identity)
+            for name in CONTAINER_NAMES
+        ),
+        snapshot=_completed_snapshot(identity),
+        compensation=compensation,
+    )
+    result = obs_mod.observe_application(
+        _bound_command(state="reconciling"), evidence
+    )
+    assert result.classification == "APPLIED"
 
 
 def test_compensation_cannot_launder_wrong_completed_apply_evidence():
