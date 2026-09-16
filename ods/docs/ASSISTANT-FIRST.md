@@ -494,6 +494,8 @@ artifact bundle still contains only the manifest and Compose bytes, not the
 entire library tree. This is a pre-stage guard, not an apply bridge: a future
 effect must consume an exact full-tree snapshot or re-prove the same approved
 payload under host exclusion before changing active files or starting an app.
+The host stage factory now selects the installer's secured
+`data/extensions-library` as its library root, distinct from built-in services.
 
 A dormant SearXNG Compose-effect substrate now consumes the exact plan-bound
 application identity, immutable staged definition/Compose bytes, validated
