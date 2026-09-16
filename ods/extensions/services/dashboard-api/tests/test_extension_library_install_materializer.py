@@ -159,7 +159,7 @@ def test_non_install_or_tampered_snapshot_fails_before_root_mutation(tmp_path):
         replace(effect, action="update"),
         replace(
             effect,
-            payload=replace(effect.payload, digest="sha256:" + "0" * 64),
+            payload=effect.payload._replace(digest="sha256:" + "0" * 64),
         ),
     )
     for candidate in invalid:
