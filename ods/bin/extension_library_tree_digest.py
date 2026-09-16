@@ -11,9 +11,8 @@ import hashlib
 import os
 import stat
 import subprocess
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 MAX_TREE_BYTES = 50 * 1024 * 1024
 MAX_TREE_ENTRIES = 4096
@@ -28,15 +27,13 @@ class LibraryTreeDigestError(ValueError):
         self.code = code
 
 
-@dataclass(frozen=True)
-class LibraryTreeFile:
+class LibraryTreeFile(NamedTuple):
     relative_path: str
     content: bytes
     executable: bool
 
 
-@dataclass(frozen=True)
-class LibraryTreeSnapshot:
+class LibraryTreeSnapshot(NamedTuple):
     """Approved payload bytes; a later effect must consume these, not live paths."""
 
     digest: str
