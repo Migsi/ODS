@@ -860,6 +860,11 @@ async def pixel_chat_stream(request: Request, body: ChatStreamRequest, owner: st
         except (httpx.HTTPError, asyncio.TimeoutError) as exc:
             logger.warning("Pixel edge stream connection failed (%s)", type(exc).__name__)
             raise HTTPException(status_code=503, detail="Pixel stream is unavailable") from exc
+        if upstream.status_code == 409:
+            # Pixel Edge uses 409 while its managed runtime is transitioning.
+            # Preserve the actionable retry class without reflecting any
+            # upstream response body into the owner-facing dashboard.
+            raise HTTPException(status_code=409, detail=_MODEL_SWITCH_DETAIL)
         if upstream.status_code != 200:
             raise HTTPException(status_code=502, detail="Pixel request was rejected")
         if not upstream.headers.get("content-type", "").lower().startswith("text/event-stream"):
