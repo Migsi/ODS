@@ -149,19 +149,37 @@ def _file_digest(parent: int, name: str) -> str | None:
         os.close(descriptor)
 
 
-def _current_files(
-    install_root: Path, service_id: str
-) -> tuple[str | None, str | None, str | None]:
-    if not install_root.is_absolute() or any(
-        part in {".", ".."} for part in install_root.parts
+def _open_absolute_install(path: Path) -> int:
+    if (
+        not isinstance(path, Path)
+        or not path.is_absolute()
+        or any(part in {".", ".."} for part in path.parts)
     ):
         _fail("application-evidence-root-invalid")
     try:
-        root = os.open(install_root, _DIRECTORY_FLAGS)
+        descriptor = os.open("/", _DIRECTORY_FLAGS)
     except OSError:
         _fail("application-evidence-root-unavailable")
     try:
-        _owned_directory(root)
+        for component in path.parts[1:]:
+            child = os.open(component, _DIRECTORY_FLAGS, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = child
+        _owned_directory(descriptor)
+        return descriptor
+    except ApplicationEvidenceError:
+        os.close(descriptor)
+        raise
+    except OSError:
+        os.close(descriptor)
+        _fail("application-evidence-root-unavailable")
+
+
+def _current_files(
+    install_root: Path, service_id: str
+) -> tuple[str | None, str | None, str | None]:
+    root = _open_absolute_install(install_root)
+    try:
         parent = root
         opened: list[int] = []
         try:

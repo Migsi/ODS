@@ -243,6 +243,24 @@ def test_writable_configuration_file_fails_custody(tmp_path):
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="POSIX host evidence only")
+def test_intermediate_install_symlink_fails_closed(tmp_path):
+    _root, command, bound, identity, record, receipt = _installed(tmp_path)
+    alias = tmp_path.parent / (tmp_path.name + "-alias")
+    alias.symlink_to(tmp_path, target_is_directory=True)
+    adapter = adapter_mod.ApplicationObservationAdapter(
+        alias,
+        FakeRecords(record),
+        FakeReceipts(receipt),
+        lambda _command: bound,
+        lambda: True,
+        FakeDocker(identity),
+    )
+    with pytest.raises(adapter_mod.ApplicationEvidenceError) as error:
+        adapter(command)
+    assert error.value.code == "application-evidence-root-unavailable"
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="POSIX host evidence only")
 def test_plan_loader_cannot_broaden_command(tmp_path):
     _root, command, bound, identity, record, receipt = _installed(tmp_path)
     docker = FakeDocker(identity)
