@@ -89,11 +89,15 @@ class FakeReceipts:
 def _installed(tmp_path: Path):
     root = tmp_path / ".ods-assistant-first" / "applications" / fixtures.SERVICE_ID
     root.mkdir(parents=True)
+    for directory in (root, root.parent, root.parent.parent):
+        directory.chmod(0o700)
     for name, content in (
         ("manifest.yaml", MANIFEST), ("compose.yaml", COMPOSE),
         ("configuration.json", CONFIG),
     ):
-        (root / name).write_bytes(content)
+        target = root / name
+        target.write_bytes(content)
+        target.chmod(0o600)
     definition = fixtures._definition(fixtures.SERVICE_ID, digest_mod.canonical_document_sha256(COMPOSE))
     definition["definitionSha256"] = digest_mod.canonical_document_sha256(MANIFEST)
     transaction = fixtures._transaction("applying", [definition])
