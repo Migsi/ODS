@@ -503,6 +503,11 @@ class ComposeApplyEffect:
                 directory = child
             lock = _lock_active(directory)
             _assert_active_entries(directory)
+            # Reject an already unsafe or drifted target before the first
+            # possible publication. _publish rechecks under the same lock;
+            # a later race/failure is still an uncertain effect.
+            _read_exact(directory, _COMPOSE_NAME, compose)
+            _read_exact(directory, _OVERRIDE_NAME, override)
             # A failed publication can still have changed the active file.
             # After this point a failed terminal receipt is never justified.
             effect_may_have_started = True
