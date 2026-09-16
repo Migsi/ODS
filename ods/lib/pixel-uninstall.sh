@@ -61,6 +61,8 @@ state_root = pathlib.Path(state_raw)
 probe_base = pathlib.Path(probe_base_raw)
 probe_owner = probe_base / str(owner_uid)
 dropin = pathlib.Path(dropin_raw)
+provider_environment = config.parent / "pixel-provider.env"
+provider_dropin = dropin.parent / "95-ods-provider.conf"
 
 
 def present(path: pathlib.Path) -> bool:
@@ -122,7 +124,8 @@ for name in (
     sources[f"pixel_provider/{name}"] = install / "bin/pixel_provider" / name
 
 relay_key = config.parent / "pixel-access-relay.key"
-artifacts = (unit, program, config, relay_key, state_root, probe_owner, dropin)
+artifacts = (unit, program, config, relay_key, state_root, probe_owner, dropin,
+             provider_environment, provider_dropin)
 if not any(present(path) for path in artifacts):
     print("absent")
     raise SystemExit(0)
@@ -214,7 +217,8 @@ elif present(relay_key):
 # Dynamic privileged state is removable only when the immutable configuration
 # above binds it to this exact install and owner. A state-only remnant is
 # intentionally left untouched because its custody cannot be inferred safely.
-if any(present(path) for path in (state_root, probe_owner, dropin)) and not config_present:
+if any(present(path) for path in (state_root, probe_owner, dropin,
+                                  provider_environment, provider_dropin)) and not config_present:
     raise SystemExit("Pixel access state lacks an install-bound configuration")
 
 if present(dropin):
@@ -235,6 +239,7 @@ state_limits = {
     "provider-verified.json": 512 * 1024,
     "provider-service-environment.json": 1024 * 1024,
 }
+provider_managed = None
 if present(state_root):
     directory(state_root, root_uid, root_gid, exact_mode=0o700)
     for child in state_root.iterdir():
@@ -243,7 +248,9 @@ if present(state_root):
         regular(child, root_uid, root_gid, state_limits[child.name], private=True)
         if child.name != "lock":
             parsed = json.loads(child.read_text(encoding="utf-8"))
-            if not isinstance(parsed, dict):
+            if child.name == "provider-root-managed.json":
+                provider_managed = parsed
+            if not isinstance(parsed, dict) and not (child.name == "provider-root-managed.json" and parsed is None):
                 raise SystemExit(f"invalid Pixel access state: {child.name}")
     if present(state_root / "transition.json"):
         raise SystemExit("recover the pending Pixel access/settings/provider transition before uninstall")
@@ -253,6 +260,41 @@ if present(state_root):
                 fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except OSError as error:
                 raise SystemExit("Pixel access transition lock is busy") from error
+
+# Provider activation writes two additional root-owned service files. The
+# durable managed receipt is their only ODS custody proof; deleting that state
+# while leaving either file would break reinstall or retain an old provider.
+provider_files = {"environment": provider_environment, "dropin": provider_dropin}
+if provider_managed is None:
+    if any(present(path) for path in provider_files.values()):
+        raise SystemExit("Pixel provider service files lack a managed receipt")
+else:
+    if (type(provider_managed) is not dict
+            or set(provider_managed) != {"plan", "baseline", "environment"}
+            or not isinstance(provider_managed["plan"], dict)
+            or provider_managed["baseline"] != {"environment": None, "dropin": None}
+            or not isinstance(provider_managed["environment"], dict)
+            or set(provider_managed["environment"]) != set(provider_files)):
+        raise SystemExit("invalid Pixel provider managed receipt")
+    for name, path in provider_files.items():
+        image = provider_managed["environment"][name]
+        expected_mode = 0o600 if name == "environment" else 0o644
+        if (not isinstance(image, dict) or set(image) != {"hex", "mode"}
+                or type(image["mode"]) is not int or image["mode"] != expected_mode
+                or type(image["hex"]) is not str or len(image["hex"]) > 128 * 1024):
+            raise SystemExit(f"invalid Pixel provider {name} receipt")
+        try:
+            expected_bytes = bytes.fromhex(image["hex"])
+        except ValueError:
+            raise SystemExit(f"invalid Pixel provider {name} receipt") from None
+        if expected_bytes.hex() != image["hex"] or not present(path):
+            raise SystemExit(f"Pixel provider {name} file is missing or unbound")
+        if path.parent.resolve() != path.parent:
+            raise SystemExit(f"unsafe Pixel provider {name} directory")
+        directory(path.parent, root_uid, root_gid)
+        info = regular(path, root_uid, root_gid, 64 * 1024, private=name == "environment")
+        if stat.S_IMODE(info.st_mode) != expected_mode or path.read_bytes() != expected_bytes:
+            raise SystemExit(f"Pixel provider {name} file drifted from its managed receipt")
 
 if present(probe_owner):
     directory(probe_base, root_uid, root_gid, exact_mode=0o711)
@@ -285,7 +327,7 @@ for line in mount_lines:
     if any(mount == root or root in mount.parents for root in mount_roots):
         raise SystemExit(f"mount inside Pixel access cleanup root: {mount}")
 
-for path in (dropin, relay_key, config, unit):
+for path in (provider_dropin, provider_environment, dropin, relay_key, config, unit):
     if present(path):
         path.unlink()
 for path in (program, state_root, probe_owner):
@@ -342,6 +384,8 @@ ods_pixel_uninstall_managed() {
     local access_dropin_dir="$systemd_dir/openclaw-gateway.service.d"
     local access_dropin="$access_dropin_dir/90-ods-full-access.conf"
     local access_relay_key="$etc_dir/pixel-access-relay.key"
+    local provider_environment="$etc_dir/pixel-provider.env"
+    local provider_dropin="$access_dropin_dir/95-ods-provider.conf"
     local ops_user="pixel-ops-broker"
     local ops_group="pixel-ops"
     local ops_unit="$systemd_dir/pixel-ops-broker.service"
@@ -1796,6 +1840,8 @@ PY
         || -e "$access_program" || -L "$access_program" \
         || -e "$access_config" || -L "$access_config" \
         || -e "$access_relay_key" || -L "$access_relay_key" \
+        || -e "$provider_environment" || -L "$provider_environment" \
+        || -e "$provider_dropin" || -L "$provider_dropin" \
         || -e "$access_state" || -L "$access_state" \
         || -e "$access_probe_base/$owner_uid" || -L "$access_probe_base/$owner_uid" \
         || -e "$access_dropin" || -L "$access_dropin" ]]; then
@@ -2395,6 +2441,8 @@ PY
             || -e "$access_program" || -L "$access_program" \
             || -e "$access_config" || -L "$access_config" \
             || -e "$access_relay_key" || -L "$access_relay_key" \
+            || -e "$provider_environment" || -L "$provider_environment" \
+            || -e "$provider_dropin" || -L "$provider_dropin" \
             || -e "$access_state" || -L "$access_state" \
             || -e "$access_probe_base/$owner_uid" || -L "$access_probe_base/$owner_uid" \
             || -e "$access_dropin" || -L "$access_dropin" ]]; then

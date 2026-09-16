@@ -368,6 +368,26 @@ JSON
         "$access_runtime_state/.process-claim"
 }
 
+write_provider_service_fixture() {
+    local provider_env="$ETC_DIR/pixel-provider.env"
+    local provider_dropin="$SYSTEMD_DIR/openclaw-gateway.service.d/95-ods-provider.conf"
+    printf '%s\n' 'ODS_PROVIDER_FIXTURE=1' > "$provider_env"
+    printf '[Service]\nEnvironmentFile=%s\nBindPaths=%s\n' \
+        "$provider_env" "$INSTALL_DIR/data/pixel-providers" > "$provider_dropin"
+    chmod 0600 "$provider_env"
+    chmod 0644 "$provider_dropin"
+    python3 - "$provider_env" "$provider_dropin" "$ACCESS_STATE/provider-root-managed.json" <<'PY'
+import json, pathlib, sys
+environment, dropin, record = map(pathlib.Path, sys.argv[1:])
+image = lambda path: {'hex': path.read_bytes().hex(), 'mode': path.stat().st_mode & 0o777}
+record.write_text(json.dumps({'plan': {},
+    'baseline': {'environment': None, 'dropin': None},
+    'environment': {'environment': image(environment), 'dropin': image(dropin)}},
+    sort_keys=True) + '\n', encoding='utf-8')
+PY
+    chmod 0600 "$ACCESS_STATE/provider-root-managed.json"
+}
+
 write_active_fixture() {
     write_fixture
     local pixel_install="$HOME_DIR/.local/share/pixel"
@@ -1656,6 +1676,52 @@ if ods_pixel_uninstall_managed "$INSTALL_DIR" "$HOME_DIR" \
     fi
 else
     fail "verified Pixel access artifacts were not removed completely"
+fi
+
+write_access_fixture
+write_provider_service_fixture
+printf '%s\n' '[Service]' 'Environment=OPERATOR_OWNED=1' \
+    > "$SYSTEMD_DIR/openclaw-gateway.service.d/99-operator.conf"
+chmod 0644 "$SYSTEMD_DIR/openclaw-gateway.service.d/99-operator.conf"
+if ods_pixel_uninstall_managed "$INSTALL_DIR" "$HOME_DIR" \
+    && [[ ! -e "$ETC_DIR/pixel-provider.env" \
+        && ! -e "$SYSTEMD_DIR/openclaw-gateway.service.d/95-ods-provider.conf" \
+        && ! -e "$ACCESS_STATE" \
+        && -e "$SYSTEMD_DIR/openclaw-gateway.service.d/99-operator.conf" ]]; then
+    pass "provider service files leave with their verified access receipt; operator drop-in remains"
+else
+    fail "provider service files outlived their managed access receipt"
+fi
+
+for scenario in environment-drift dropin-drift missing-receipt deactivated-receipt; do
+    write_access_fixture
+    write_provider_service_fixture
+    case "$scenario" in
+        environment-drift) printf '%s\n' '# drift' >> "$ETC_DIR/pixel-provider.env" ;;
+        dropin-drift) printf '%s\n' '# drift' >> "$SYSTEMD_DIR/openclaw-gateway.service.d/95-ods-provider.conf" ;;
+        missing-receipt) rm -f -- "$ACCESS_STATE/provider-root-managed.json" ;;
+        deactivated-receipt) printf 'null\n' > "$ACCESS_STATE/provider-root-managed.json" ;;
+    esac
+    if ods_pixel_uninstall_managed "$INSTALL_DIR" "$HOME_DIR"; then
+        fail "unbound provider service $scenario was accepted"
+    else
+        [[ -e "$ETC_DIR/pixel-provider.env" \
+            && -e "$SYSTEMD_DIR/openclaw-gateway.service.d/95-ods-provider.conf" \
+            && -e "$ACCESS_STATE" && -e "$HOME_DIR/.config/ods/pixel-managed.json" \
+            && ! -s "$SYSTEMCTL_LOG" ]] \
+            && pass "unbound provider service $scenario fails before mutation" \
+            || fail "unbound provider service $scenario caused partial cleanup"
+    fi
+done
+
+write_access_fixture
+printf 'null\n' > "$ACCESS_STATE/provider-root-managed.json"
+chmod 0600 "$ACCESS_STATE/provider-root-managed.json"
+if ods_pixel_uninstall_managed "$INSTALL_DIR" "$HOME_DIR" \
+    && [[ ! -e "$ACCESS_STATE" && ! -e "$ETC_DIR/pixel-provider.env" ]]; then
+    pass "deactivated provider receipt without service files is removable"
+else
+    fail "deactivated provider receipt blocked safe Pixel cleanup"
 fi
 
 write_access_fixture
