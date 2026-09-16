@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import os
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -28,7 +27,7 @@ from test_extension_lifecycle_work_host_api import (  # noqa: E402
 )
 
 
-linux_effect = pytest.mark.skipif(os.name != "posix", reason="Linux generic data backup")
+linux_effect = pytest.mark.skipif(sys.platform != "linux", reason="Linux generic data backup and restore")
 
 
 @pytest.fixture(autouse=True)
