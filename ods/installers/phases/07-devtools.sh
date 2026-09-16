@@ -302,8 +302,8 @@ OPENCODE_EOF
                 rm -f "$svc_tmp"
             fi
 
-            systemctl --user daemon-reload 2>/dev/null || true
-            systemctl --user enable --now opencode-web.service >> "$LOG_FILE" 2>&1 && \
+            ods_systemctl_user daemon-reload 2>/dev/null || true
+            ods_systemctl_user enable --now opencode-web.service >> "$LOG_FILE" 2>&1 && \
                 ai_ok "OpenCode Web UI service installed (user-level, port 3003)" || \
                 ai_warn "OpenCode Web UI service failed to start"
 
@@ -317,9 +317,9 @@ OPENCODE_EOF
         # A rerun with --no-opencode must not leave an earlier ODS-managed
         # browser IDE running. Preserve the binary and user configuration so
         # an explicit future opt-in is reversible, but retire the managed unit.
-        if systemctl --user is-active --quiet opencode-web.service 2>/dev/null \
-            || systemctl --user is-enabled --quiet opencode-web.service 2>/dev/null; then
-            systemctl --user disable --now opencode-web.service >> "$LOG_FILE" 2>&1 || \
+        if ods_systemctl_user is-active --quiet opencode-web.service 2>/dev/null \
+            || ods_systemctl_user is-enabled --quiet opencode-web.service 2>/dev/null; then
+            ods_systemctl_user disable --now opencode-web.service >> "$LOG_FILE" 2>&1 || \
                 ai_warn "Could not stop the previously enabled OpenCode extension"
         fi
         log "OpenCode extension disabled; skipped installation and startup"
@@ -361,10 +361,10 @@ if [[ -f "$INSTALL_DIR/bin/ods-host-agent.py" ]]; then
         if systemctl status >/dev/null 2>&1 || [[ -d /run/systemd/system ]]; then
             # Migrate any pre-existing user-mode unit (idempotent — no-op if absent).
             if [[ -f "$HOME/.config/systemd/user/ods-host-agent.service" ]]; then
-                systemctl --user stop ods-host-agent.service 2>/dev/null || true
-                systemctl --user disable ods-host-agent.service 2>/dev/null || true
+                ods_systemctl_user stop ods-host-agent.service 2>/dev/null || true
+                ods_systemctl_user disable ods-host-agent.service 2>/dev/null || true
                 rm -f "$HOME/.config/systemd/user/ods-host-agent.service"
-                systemctl --user daemon-reload 2>/dev/null || true
+                ods_systemctl_user daemon-reload 2>/dev/null || true
                 ai_ok "Migrated host agent from --user mode to system mode"
             fi
 
