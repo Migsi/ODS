@@ -29,6 +29,7 @@ from extension_application_observation_adapter import (
     _current_containers,
     _current_files,
     _current_override,
+    _ids,
     _output,
     _run_docker,
     _unique_keys,
@@ -36,7 +37,7 @@ from extension_application_observation_adapter import (
 from extension_application_record_store import ApplicationRecord, ApplicationRecordStore
 from extension_application_observation import ContainerObservation
 from extension_document_digest import canonical_document_sha256
-from extension_library_compose_apply_effect import _override_bytes
+from extension_library_compose_apply_effect import _override_bytes, _project_name
 from extension_library_verify_binding import LibraryVerifySelection, bind_library_verify
 from extension_lifecycle_work import (
     REQUEST_SCHEMA,
@@ -175,6 +176,25 @@ def _inspect_current_container(
         return published, container_id, image_id
     except (ApplicationIdentityError, KeyError, TypeError, ValueError, UnicodeError):
         _fail("library-verify-port-unbound")
+
+
+def _project_ids(
+    service_id: str,
+    docker_runner: Callable[[list[str]], subprocess.CompletedProcess[bytes]],
+) -> set[str]:
+    return _ids(
+        _output(
+            docker_runner,
+            [
+                "docker",
+                "ps",
+                "-aq",
+                "--no-trunc",
+                "--filter",
+                f"label=com.docker.compose.project={_project_name(service_id)}",
+            ],
+        )
+    )
 
 
 def _declared_probe(selected: LibraryVerifySelection) -> tuple[int, str]:
@@ -369,6 +389,10 @@ class LibraryVerifyDispatcher:
             states.append((item.name, container_id, image_id, item.state, item.health))
         if len(main) != 1:
             _fail("library-verify-main-container-mismatch")
+        if _project_ids(selected.service_id, self._docker) != {
+            container_id for _, container_id, _, _, _ in states
+        }:
+            _fail("library-verify-container-set-mismatch")
         observed_services = [
             item.labels.get("com.docker.compose.service") for item in containers
         ]

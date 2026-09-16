@@ -179,6 +179,7 @@ def _dispatcher(monkeypatch, *, action: str = "install", prior: bool = False):
             "sha256:" + "d" * 64,
         ),
     )
+    monkeypatch.setattr(verify, "_project_ids", lambda _service, _runner: {"c" * 64})
     clock = [0.0]
     probes: list[tuple[int, str]] = []
 
@@ -323,6 +324,67 @@ def test_extra_published_port_is_refused(monkeypatch) -> None:
     assert probes == []
 
 
+def test_unexpected_container_in_compose_project_is_refused(monkeypatch) -> None:
+    command, dispatcher, _containers, probes, _clock = _dispatcher(monkeypatch)
+    monkeypatch.setattr(
+        verify, "_project_ids", lambda _service, _runner: {"c" * 64, "e" * 64}
+    )
+    with pytest.raises(verify.LibraryVerifyError) as caught:
+        dispatcher(command)
+    assert caught.value.code == "library-verify-container-set-mismatch"
+    assert probes == []
+
+
+@pytest.mark.parametrize("project_ids", [set(), {"e" * 64}])
+def test_missing_or_wrong_compose_project_container_is_refused(
+    monkeypatch, project_ids: set[str]
+) -> None:
+    command, dispatcher, _containers, probes, _clock = _dispatcher(monkeypatch)
+    monkeypatch.setattr(verify, "_project_ids", lambda _service, _runner: project_ids)
+    with pytest.raises(verify.LibraryVerifyError) as caught:
+        dispatcher(command)
+    assert caught.value.code == "library-verify-container-set-mismatch"
+    assert probes == []
+
+
+def test_project_query_includes_stopped_containers_and_uses_exact_project() -> None:
+    calls: list[list[str]] = []
+
+    def runner(argv: list[str]) -> subprocess.CompletedProcess[bytes]:
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, ("c" * 64 + "\n").encode(), b"")
+
+    assert verify._project_ids("gitea", runner) == {"c" * 64}
+    assert calls == [
+        [
+            "docker",
+            "ps",
+            "-aq",
+            "--no-trunc",
+            "--filter",
+            "label=com.docker.compose.project=ods-af-gitea",
+        ]
+    ]
+
+
+def test_dispatcher_uses_real_project_query_on_both_samples(monkeypatch) -> None:
+    project_ids = verify._project_ids
+    command, dispatcher, _containers, probes, _clock = _dispatcher(monkeypatch)
+    monkeypatch.setattr(verify, "_project_ids", project_ids)
+    calls: list[list[str]] = []
+
+    def runner(argv: list[str]) -> subprocess.CompletedProcess[bytes]:
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, ("c" * 64 + "\n").encode(), b"")
+
+    dispatcher._docker = runner
+    assert len(dispatcher(command)) == 64
+    assert len(calls) == 2
+    assert calls[0] == calls[1]
+    assert calls[0][-1] == "label=com.docker.compose.project=ods-af-gitea"
+    assert probes == [(7830, "/api/healthz")]
+
+
 def test_changed_container_state_between_probe_and_second_sample_fails(
     monkeypatch,
 ) -> None:
@@ -341,6 +403,9 @@ def test_changed_container_state_between_probe_and_second_sample_fails(
 def test_replaced_container_between_samples_fails(monkeypatch) -> None:
     command, dispatcher, _containers, _probes, _clock = _dispatcher(monkeypatch)
     current_id = ["c" * 64]
+    monkeypatch.setattr(
+        verify, "_project_ids", lambda _service, _runner: {current_id[0]}
+    )
     monkeypatch.setattr(
         verify,
         "_inspect_current_container",

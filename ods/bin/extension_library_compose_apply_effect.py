@@ -410,6 +410,10 @@ def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
+def _project_name(service_id: str) -> str:
+    return "ods-af-" + service_id
+
+
 def _containers(
     raw: bytes, services: tuple[str, ...], project_name: str
 ) -> tuple[str, ...]:
@@ -819,7 +823,7 @@ class LibraryComposeApplyEffect:
                 *_APPLICATION_PARTS, identity.service_id
             )
             project_directory = self._user_root / identity.service_id
-            project_name = "ods-af-" + identity.service_id
+            project_name = _project_name(identity.service_id)
             base_argv = (
                 "docker",
                 "compose",
