@@ -105,6 +105,26 @@ def _file_hash(digest: Any, name: str, content: bytes, executable: bool) -> None
     )
 
 
+def _bounded_paths(root: Path) -> list[Path]:
+    pending = [root]
+    paths: list[Path] = []
+    while pending:
+        parent = pending.pop()
+        try:
+            with os.scandir(parent) as entries:
+                for entry in entries:
+                    paths.append(Path(entry.path))
+                    if len(paths) > MAX_TREE_ENTRIES:
+                        _fail("library-tree-entry-limit")
+                    if entry.is_dir(follow_symlinks=False):
+                        pending.append(Path(entry.path))
+                    elif not entry.is_file(follow_symlinks=False):
+                        _fail("library-tree-entry-invalid")
+        except OSError:
+            _fail("library-tree-enumeration-unavailable")
+    return sorted(paths, key=lambda item: item.relative_to(root).as_posix())
+
+
 def digest_extension_tree(root: Any) -> str:
     """Hash every definition file and directory, excluding only its receipt.
 
@@ -119,14 +139,7 @@ def digest_extension_tree(root: Any) -> str:
         _fail("library-tree-root-unavailable")
     if not stat.S_ISDIR(root_info.st_mode) or root.is_symlink():
         _fail("library-tree-root-invalid")
-    try:
-        paths = sorted(
-            root.rglob("*"), key=lambda item: item.relative_to(root).as_posix()
-        )
-    except OSError:
-        _fail("library-tree-enumeration-unavailable")
-    if len(paths) > MAX_TREE_ENTRIES:
-        _fail("library-tree-entry-limit")
+    paths = _bounded_paths(root)
     digest = hashlib.sha256(_DOMAIN)
     total = 0
     for path in paths:
@@ -230,8 +243,14 @@ def digest_indexed_extension_tree(repository: Any, root: Any) -> str:
             digest.update(b"D\0" + name.encode("utf-8") + b"\0")
             continue
         mode, object_id = files[name]
+        size = _git(repository, "cat-file", "-s", object_id)
+        if size.returncode != 0 or not size.stdout.strip().isdigit():
+            _fail("library-tree-git-blob-invalid")
+        blob_size = int(size.stdout.strip())
+        if blob_size > MAX_TREE_BYTES - total:
+            _fail("library-tree-git-blob-invalid")
         blob = _git(repository, "cat-file", "blob", object_id)
-        if blob.returncode != 0 or len(blob.stdout) > MAX_TREE_BYTES - total:
+        if blob.returncode != 0 or len(blob.stdout) != blob_size:
             _fail("library-tree-git-blob-invalid")
         total += len(blob.stdout)
         _file_hash(digest, name, blob.stdout, mode == "100755")

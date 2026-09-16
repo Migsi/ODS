@@ -56,7 +56,9 @@ def test_crlf_bytes_are_hashed_without_platform_text_translation(tmp_path):
     assert tree.digest_extension_tree(root) != crlf
 
 
-def test_indexed_payload_is_stable_and_refuses_unstaged_or_untracked_edits(tmp_path):
+def test_indexed_payload_is_stable_and_refuses_unstaged_or_untracked_edits(
+    tmp_path, monkeypatch
+):
     repository = tmp_path / "repository"
     repository.mkdir()
     root = repository / "library" / "example"
@@ -85,6 +87,22 @@ def test_indexed_payload_is_stable_and_refuses_unstaged_or_untracked_edits(tmp_p
     git("add", "library/example/README.md")
     assert tree.digest_indexed_extension_tree(repository, root) != original
 
+    original_git = tree._git
+
+    def size_only(repository_path, *argv):
+        if argv[:2] == ("cat-file", "blob"):
+            raise AssertionError("oversized blob content was read")
+        return original_git(repository_path, *argv)
+
+    monkeypatch.setattr(tree, "MAX_TREE_BYTES", 2)
+    monkeypatch.setattr(tree, "_git", size_only)
+    with pytest.raises(
+        tree.LibraryTreeDigestError, match="library-tree-git-blob-invalid"
+    ):
+        tree.digest_indexed_extension_tree(repository, root)
+    monkeypatch.setattr(tree, "MAX_TREE_BYTES", 50 * 1024 * 1024)
+    monkeypatch.setattr(tree, "_git", original_git)
+
     (root / "untracked.sh").write_bytes(b"exit 0\n")
     with pytest.raises(
         tree.LibraryTreeDigestError, match="library-tree-untracked-entry"
@@ -106,6 +124,21 @@ def test_symlink_and_oversized_payload_fail_closed(tmp_path, monkeypatch):
     except OSError:
         pytest.skip("symlink creation unavailable")
     with pytest.raises(tree.LibraryTreeDigestError, match="library-tree-entry-invalid"):
+        tree.digest_extension_tree(root)
+
+
+def test_entry_limit_stops_enumeration_before_file_content(tmp_path, monkeypatch):
+    root = tmp_path / "extension"
+    root.mkdir()
+    for name in ("one", "two", "three"):
+        (root / name).write_bytes(b"payload")
+    monkeypatch.setattr(tree, "MAX_TREE_ENTRIES", 2)
+
+    def unexpected_read(*_args):
+        raise AssertionError("entry content was read after limit")
+
+    monkeypatch.setattr(tree, "_read_file", unexpected_read)
+    with pytest.raises(tree.LibraryTreeDigestError, match="library-tree-entry-limit"):
         tree.digest_extension_tree(root)
 
 
