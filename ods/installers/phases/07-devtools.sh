@@ -197,6 +197,17 @@ else
             ai_err "OpenCode switchboard config requires LITELLM_KEY, but it is empty."
             exit 1
         fi
+        # OpenCode reserves `limit.output` from `limit.context` when deciding
+        # whether to compact. Reserving the entire context for output causes
+        # a trivial completed chat to enter an unbounded compaction/continue
+        # loop on 32K installs. Keep at least three quarters for the prompt.
+        _opencode_context="${MAX_CONTEXT:-65536}"
+        if [[ ! "$_opencode_context" =~ ^[0-9]+$ ]] || (( _opencode_context < 1024 )); then
+            ai_err "OpenCode requires a numeric context of at least 1024 tokens."
+            exit 1
+        fi
+        _opencode_output_limit=$(( _opencode_context / 4 ))
+        (( _opencode_output_limit <= 8192 )) || _opencode_output_limit=8192
 
         # Writes a fresh opencode.json from the template. Used for first-install
         # and as deterministic recovery when the jq rewrite path finds an
@@ -219,8 +230,8 @@ else
         "${_opencode_model_id}": {
           "name": "${_opencode_model_name}",
           "limit": {
-            "context": ${MAX_CONTEXT:-65536},
-            "output": 32768
+            "context": ${_opencode_context},
+            "output": ${_opencode_output_limit}
           }
         }
       }
@@ -242,7 +253,8 @@ OPENCODE_EOF
                     --arg model_id "$_opencode_model_id" \
                     --arg model_name "$_opencode_model_name" \
                     --arg provider_name "$_opencode_provider_name" \
-                    --argjson context "${MAX_CONTEXT:-65536}" \
+                    --argjson context "$_opencode_context" \
+                    --argjson output "$_opencode_output_limit" \
                     '.["$schema"] = "https://opencode.ai/config.json"
                      | .model = ("llama-server/" + $model_id)
                      | .small_model = ("llama-server/" + $model_id)
@@ -254,7 +266,7 @@ OPENCODE_EOF
                      | .provider["llama-server"].models = {
                          ($model_id): {
                            "name": $model_name,
-                           "limit": {"context": $context, "output": ([32768, $context] | min)}
+                           "limit": {"context": $context, "output": $output}
                          }
                        }' \
                     "$OPENCODE_CONFIG_DIR/opencode.json" > "$_opencode_tmp" 2>/dev/null; then

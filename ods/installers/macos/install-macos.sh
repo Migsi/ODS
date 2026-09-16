@@ -452,6 +452,9 @@ model_name = os.environ["ODS_OPENCODE_MODEL"]
 base_url = os.environ["ODS_OPENCODE_BASE_URL"]
 api_key = os.environ["ODS_OPENCODE_API_KEY"]
 context = int(os.environ["ODS_OPENCODE_CONTEXT"])
+if context < 1024:
+    raise SystemExit("OpenCode requires at least 1024 context tokens")
+output_limit = min(8192, context // 4)
 provider_id = "llama-server"
 provider = data.setdefault("provider", {}).setdefault(provider_id, {})
 provider.update({
@@ -461,7 +464,7 @@ provider.update({
     "models": {
         model_name: {
             "name": model_name,
-            "limit": {"context": context, "output": min(32768, context)},
+            "limit": {"context": context, "output": output_limit},
         }
     },
 })

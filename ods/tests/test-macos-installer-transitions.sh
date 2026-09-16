@@ -202,8 +202,17 @@ import json, sys
 data = json.load(open(sys.argv[1], encoding="utf-8"))
 assert data["model"] == "llama-server/ods/current"
 provider = data["provider"]["llama-server"]
-assert provider["models"]["ods/current"]["limit"] == {"context": 131072, "output": 32768}
+assert provider["models"]["ods/current"]["limit"] == {"context": 131072, "output": 8192}
 assert provider["options"] == {"baseURL": "http://127.0.0.1:4000/v1", "apiKey": sys.argv[2]}
+PY
+_write_macos_opencode_config "$opencode_path" "ods/current" \
+    http://127.0.0.1:4000/v1 "$opencode_secret" 32768 >/dev/null
+"$python_cmd" - "$opencode_path" <<'PY'
+import json, sys
+data = json.load(open(sys.argv[1], encoding="utf-8"))
+assert data["provider"]["llama-server"]["models"]["ods/current"]["limit"] == {
+    "context": 32768, "output": 8192,
+}
 PY
 
 # shellcheck source=/dev/null
