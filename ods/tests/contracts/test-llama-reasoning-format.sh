@@ -69,6 +69,18 @@ else
     fail "docker-compose.cpu.yml must use a reasoning-aware llama.cpp build by default"
 fi
 
+# The CPU installer pull and AMD-to-CPU fallback must agree with Compose.
+# Otherwise a fresh install pulls the wrong image, or the fallback writes an
+# old tag to .env and overrides Compose's reasoning-aware default.
+for target in installers/phases/08-images.sh installers/phases/11-services.sh; do
+    if grep -Fq 'ghcr.io/ggml-org/llama.cpp:server-b9014' "$ROOT_DIR/$target" \
+        && ! grep -Fq 'ghcr.io/ggml-org/llama.cpp:server-b8248' "$ROOT_DIR/$target"; then
+        pass "$target uses the reasoning-aware CPU image by default"
+    else
+        fail "$target must default to the same reasoning-aware CPU image as Compose"
+    fi
+done
+
 if (( FAILURES > 0 )); then
     echo ""
     echo "[FAIL] llama.cpp reasoning-format contract"

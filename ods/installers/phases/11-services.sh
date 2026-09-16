@@ -369,7 +369,7 @@ else
         _phase11_env_set MAX_CONTEXT "$MAX_CONTEXT"
         _phase11_env_set CTX_SIZE "$MAX_CONTEXT"
         _phase11_env_set AUDIO_STT_MODEL "Systran/faster-whisper-base"
-        _phase11_env_set LLAMA_SERVER_IMAGE "${LLAMA_SERVER_IMAGE:-ghcr.io/ggml-org/llama.cpp:server-b8248}"
+        _phase11_env_set LLAMA_SERVER_IMAGE "${LLAMA_SERVER_IMAGE:-ghcr.io/ggml-org/llama.cpp:server-b9014}"
         ai_ok "Rewrote .env for CPU fallback"
     }
 
