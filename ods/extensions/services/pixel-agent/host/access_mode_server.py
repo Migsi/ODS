@@ -86,7 +86,7 @@ def main():
                 raw = self.rfile.readline(2049)
                 if len(raw) > 2048 or not raw.endswith(b"\n"): raise ValueError()
                 request = control_request(decode_frame(raw.decode("utf-8"), 2048))
-                if request["operation"] == "model-begin":
+                if request["operation"] in ("model-begin", "model-route-begin"):
                     self.connection.settimeout(1850)
                 adapter = make_adapter()
                 if request == {"operation": "status"}:
@@ -109,8 +109,11 @@ def main():
                     body = (adapter.provider_status(data_dir_id=request["data_dir_id"])
                             if request["operation"] == "provider-status"
                             else adapter.change_providers(request["request"], data_dir_id=request["data_dir_id"]))
-                elif request["operation"].startswith("model-"):
-                    status, body = 200, adapter.model_control(request["operation"], request.get("request"))
+                elif request["operation"].startswith("model-route-"):
+                    # The browser route has a different transaction contract
+                    # from the installed model-promotion hold above.
+                    operation = "model-" + request["operation"].removeprefix("model-route-")
+                    status, body = 200, adapter.model_control(operation, request.get("request"))
                 else: raise ValueError()
             except PermissionError: pass
             except AccessError as error: status, body = 409, {"error": error.code}

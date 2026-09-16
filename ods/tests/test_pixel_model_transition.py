@@ -407,6 +407,19 @@ class ModelTransitionTests(unittest.TestCase):
             protocol.control_request({"operation": "model-status", "request": {}})
         self.assertEqual(protocol.control_request({"operation": "model-begin"}),
                          {"operation": "model-begin"})
+        self.assertEqual(protocol.control_request({"operation": "model-route-status"}),
+                         {"operation": "model-route-status"})
+        route_begin = {"operation": "model-route-begin", "request": {
+            "revision": HEX_C, "transactionId": HEX_A}}
+        self.assertEqual(protocol.control_request(route_begin), route_begin)
+        route_finish = {"operation": "model-route-finish", "request": {
+            "transactionId": HEX_A, "outcome": "commit"}}
+        self.assertEqual(protocol.control_request(route_finish), route_finish)
+        with self.assertRaises(protocol.ProtocolError):
+            protocol.control_request({"operation": "model-route-begin"})
+        with self.assertRaises(protocol.ProtocolError):
+            protocol.control_request({"operation": "model-route-finish", "request": {
+                "transaction_id": HEX_A, "outcome": "applied"}})
         value = {"operation": "model-finish", "request": {
             "transaction_id": HEX_A, "outcome": "applied"}}
         self.assertEqual(protocol.control_request(value), value)
