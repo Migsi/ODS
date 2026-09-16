@@ -81,11 +81,13 @@ class ArtifactVerifierTests(unittest.TestCase):
         service.mkdir(mode=0o700)
         manifest_path = service / "manifest.yaml"
         manifest_path.write_bytes(manifest)
+        manifest_path.chmod(0o600)
         compose_path = None
         if compose is not None:
             compose_path = service / compose_file
-            compose_path.parent.mkdir(parents=True, exist_ok=True)
+            compose_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             compose_path.write_bytes(compose)
+            compose_path.chmod(0o600)
         return manifest_path, compose_path
 
     def assert_code(self, expected: str, action) -> verifier.HostArtifactError:
@@ -435,8 +437,10 @@ class ArtifactVerifierTests(unittest.TestCase):
         compose = b"services: {}\n"
         self.write("library", manifest, compose=compose)
         service = self.roots["library"] / "demo"
-        (service / "config").mkdir()
-        (service / "config" / "settings.yml").write_bytes(b"safe: true\n")
+        (service / "config").mkdir(mode=0o700)
+        settings = service / "config" / "settings.yml"
+        settings.write_bytes(b"safe: true\n")
+        settings.chmod(0o600)
         expected = digest_extension_tree(service)
         planned = replace(
             definition(manifest, compose=compose, compose_file="compose.yaml"),
@@ -461,8 +465,9 @@ class ArtifactVerifierTests(unittest.TestCase):
                 self.write("library", manifest, service_id=service_id, compose=compose)
                 service = self.roots["library"] / service_id
                 supporting = service / path
-                supporting.parent.mkdir(parents=True, exist_ok=True)
+                supporting.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
                 supporting.write_bytes(b"approved\n")
+                supporting.chmod(0o600)
                 expected = digest_extension_tree(service)
                 supporting.write_bytes(b"unapproved\n")
                 planned = replace(
@@ -478,6 +483,21 @@ class ArtifactVerifierTests(unittest.TestCase):
                     "artifact-library-tree-mismatch",
                     lambda: verifier.verify_planned_definition(planned, self.injected),
                 )
+
+    def test_group_writable_supporting_library_file_is_refused(self) -> None:
+        manifest = b"name: demo\n"
+        self.write("library", manifest)
+        service = self.roots["library"] / "demo"
+        supporting = service / "README.md"
+        supporting.write_bytes(b"approved\n")
+        supporting.chmod(0o600)
+        expected = digest_extension_tree(service)
+        supporting.chmod(0o660)
+        planned = replace(definition(manifest), source_tree_sha256=expected)
+        self.assert_code(
+            "artifact-library-tree-invalid",
+            lambda: verifier.verify_planned_definition(planned, self.injected),
+        )
 
     def test_library_tree_symlink_and_wrong_source_are_refused(self) -> None:
         manifest = b"name: demo\n"

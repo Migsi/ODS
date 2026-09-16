@@ -487,7 +487,9 @@ re-prove or stage the exact indexed payload before calling that logic.
 For a plan-bound library tree, the host artifact-stage verifier now hashes the
 complete live definition before and after opening its manifest and Compose
 bytes. A changed supporting config, hook, build context, or document refuses
-stage publication rather than passing a manifest-only check. The immutable
+stage publication rather than passing a manifest-only check. The live Linux
+tree check also refuses files or directories outside the host owner's custody
+or writable by another account. The immutable
 artifact bundle still contains only the manifest and Compose bytes, not the
 entire library tree. This is a pre-stage guard, not an apply bridge: a future
 effect must consume an exact full-tree snapshot or re-prove the same approved
