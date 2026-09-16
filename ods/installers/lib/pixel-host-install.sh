@@ -2041,7 +2041,10 @@ PY
 _ods_pixel_restart_gateway_and_verify() {
     local owner="$1" home="$2" pixel_root="$3" attempt ready=false previous_pid current_pid gateway_port
     local verify_attempt
-    gateway_port="$(_ods_pixel_gateway_port)" || return 1
+    # Background model promotion does not inherit Phase 06's gateway-port
+    # environment. Verify the installed, owner-validated endpoint rather than
+    # probing the default port and leaving the model hold unreleased.
+    gateway_port="$(_ods_pixel_installed_gateway_port "$owner" "$home")" || return 1
     previous_pid="$(systemctl show openclaw-gateway.service -p MainPID --value 2>/dev/null || true)"
     if ods_sudo_available; then
         # Writing the final ODS runtime overlay can make OpenClaw begin its own

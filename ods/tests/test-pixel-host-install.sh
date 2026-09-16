@@ -576,6 +576,11 @@ fi
 
 restart_probe="$TEST_ROOT/restart-probe"
 mkdir -p "$restart_probe/pixel-root"
+original_installed_gateway_port="$(declare -f _ods_pixel_installed_gateway_port)"
+_ods_pixel_installed_gateway_port() {
+    [[ "$1" == "$owner" && "$2" == "$home" ]] || return 1
+    printf '%s\n' 18790
+}
 if (
     restart_state="$restart_probe/state"
     systemctl() {
@@ -598,15 +603,16 @@ if (
         [[ "$*" == *"http://127.0.0.1:18790/health"* ]] || return 1
         printf '%s\n' '{"ok":true,"status":"live"}'
     }
+    sleep() { :; }
     ods_pixel_run_as_owner() {
         [[ "$1" == "$owner" && "$2" == "$home" \
             && "$3" == "$restart_probe/pixel-root/pixel" && "$4" == verify ]]
     }
-    PIXEL_GATEWAY_PORT=18790 _ods_pixel_restart_gateway_and_verify "$owner" "$home" "$restart_probe/pixel-root"
+    PIXEL_GATEWAY_PORT=18789 _ods_pixel_restart_gateway_and_verify "$owner" "$home" "$restart_probe/pixel-root"
 ); then
-    pass "privileged Pixel restart tolerates transient MainPID zero"
+    pass "privileged Pixel restart uses installed port and tolerates transient MainPID zero"
 else
-    fail "privileged Pixel restart tolerates transient MainPID zero"
+    fail "privileged Pixel restart uses installed port and tolerates transient MainPID zero"
 fi
 
 if (
@@ -640,7 +646,7 @@ if (
         printf 'x' >> "$retry_calls"
         [[ "$(wc -c < "$retry_calls")" -ge 2 ]]
     }
-    PIXEL_GATEWAY_PORT=18790 _ods_pixel_restart_gateway_and_verify "$owner" "$home" "$restart_probe/pixel-root" \
+    _ods_pixel_restart_gateway_and_verify "$owner" "$home" "$restart_probe/pixel-root" \
         && [[ "$(wc -c < "$retry_calls")" -eq 2 ]]
 ); then
     pass "Pixel restart retries one transient complete verification failure"
@@ -679,7 +685,7 @@ if (
         printf 'x' >> "$persistent_calls"
         return 1
     }
-    if PIXEL_GATEWAY_PORT=18790 _ods_pixel_restart_gateway_and_verify \
+    if _ods_pixel_restart_gateway_and_verify \
         "$owner" "$home" "$restart_probe/pixel-root" >/dev/null 2>&1; then
         return 1
     fi
@@ -701,6 +707,7 @@ if (
 else
     pass "unprivileged Pixel restart still rejects a missing owned process"
 fi
+eval "$original_installed_gateway_port"
 
 ingress_restart_answers="$restart_probe/onboarding.json"
 ingress_restart_status="$restart_probe/ods-status.json"
@@ -2117,6 +2124,11 @@ eval "$original_run_as_owner"
 gateway_mock_root="$TEST_ROOT/gateway-restart-mock"
 mkdir -p "$gateway_mock_root"
 printf '0\n' > "$gateway_mock_root/mainpid-calls"
+original_installed_gateway_port="$(declare -f _ods_pixel_installed_gateway_port)"
+_ods_pixel_installed_gateway_port() {
+    [[ "$1" == "$owner" && "$2" == "$reconcile_home" ]] || return 1
+    printf '%s\n' 18790
+}
 systemctl() {
     case "$*" in
         'show openclaw-gateway.service -p MainPID --value')
@@ -2179,6 +2191,7 @@ else
 fi
 check test ! -s "$gateway_mock_root/kills"
 unset -f systemctl id awk kill curl jq sleep ods_sudo_available
+eval "$original_installed_gateway_port"
 eval "$original_run_as_owner"
 
 plugin="$ROOT/extensions/services/pixel-agent/plugin"
