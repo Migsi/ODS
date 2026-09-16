@@ -119,6 +119,20 @@ def read_live_env_value(key: str, default: str = "") -> str:
     return os.environ.get(key, "") or default
 
 
+def read_live_env_values(keys: tuple[str, ...]) -> dict[str, str]:
+    """Read one persisted snapshot so a route and its credential cannot diverge."""
+    values = {key: os.environ.get(key, "") for key in keys}
+    try:
+        text = (Path(INSTALL_DIR) / ".env").read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return values
+    for line in text.splitlines():
+        key, separator, raw = line.partition("=")
+        if separator and key in values:
+            values[key] = parse_env_value(raw)
+    return values
+
+
 def _apply_host_native_llm_service_override(
     services: dict[str, dict[str, Any]],
     gpu_backend: str,

@@ -13,7 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 
-from config import SERVICES, PERSONAS, INSTALL_DIR, read_live_env_value
+from config import SERVICES, PERSONAS, INSTALL_DIR
 from host_agent_client import (
     AgentHTTPError,
     AgentProtocolError,
@@ -22,6 +22,7 @@ from host_agent_client import (
 )
 from models import PersonaRequest, ChatRequest
 from security import verify_api_key
+from setup_chat_route import resolve_chat_route
 
 logger = logging.getLogger(__name__)
 
@@ -207,8 +208,11 @@ async def chat(request: ChatRequest, api_key: str = Depends(verify_api_key)):
         system_prompt = await asyncio.to_thread(get_active_persona_prompt)
 
     _llm = SERVICES.get("llama-server", {})
-    llm_url = os.environ.get("OLLAMA_URL", f"http://{_llm.get('host', 'llama-server')}:{_llm.get('port', 0)}")
-    model = read_live_env_value("LLM_MODEL", "qwen3-coder-next")
+    try:
+        llm_url, model, headers = resolve_chat_route(
+            f"http://{_llm.get('host', 'llama-server')}:{_llm.get('port', 0)}")
+    except ValueError:
+        raise HTTPException(status_code=503, detail="Invalid LLM route configuration")
 
     payload = {
         "model": model,
@@ -218,8 +222,7 @@ async def chat(request: ChatRequest, api_key: str = Depends(verify_api_key)):
 
     try:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
-            _api_path = os.environ.get("LLM_API_BASE_PATH", "/v1")
-            async with session.post(f"{llm_url}{_api_path}/chat/completions", json=payload, headers={"Content-Type": "application/json"}) as resp:
+            async with session.post(llm_url, json=payload, headers=headers, allow_redirects=False) as resp:
                 if resp.status == 200:
                     data = await resp.json()
                     choices = data.get("choices") or [{}]
@@ -230,7 +233,7 @@ async def chat(request: ChatRequest, api_key: str = Depends(verify_api_key)):
                 else:
                     error_text = await resp.text()
                     raise HTTPException(status_code=resp.status, detail=f"LLM error: {error_text}")
-    except aiohttp.ClientError:
+    except (aiohttp.ClientError, asyncio.TimeoutError):
         logger.exception("Cannot reach LLM backend")
         raise HTTPException(status_code=503, detail="Cannot reach LLM backend")
 
