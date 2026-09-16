@@ -17,6 +17,7 @@ if str(BIN_DIR) not in sys.path:
 
 import extension_artifact_verifier as verifier  # noqa: E402
 from extension_document_digest import canonical_document_sha256  # noqa: E402
+from extension_library_tree_digest import digest_extension_tree  # noqa: E402
 from extension_lifecycle_plan import PlannedDefinition  # noqa: E402
 
 
@@ -428,6 +429,87 @@ class ArtifactVerifierTests(unittest.TestCase):
             self.injected,
         )
         self.assertEqual(inventory(), before)
+
+    def test_plan_bound_full_library_tree_matches_supporting_payload(self) -> None:
+        manifest = b"name: demo\n"
+        compose = b"services: {}\n"
+        self.write("library", manifest, compose=compose)
+        service = self.roots["library"] / "demo"
+        (service / "config").mkdir()
+        (service / "config" / "settings.yml").write_bytes(b"safe: true\n")
+        expected = digest_extension_tree(service)
+        planned = replace(
+            definition(manifest, compose=compose, compose_file="compose.yaml"),
+            source_tree_sha256=expected,
+        )
+
+        result = verifier.verify_planned_definition(planned, self.injected)
+        self.assertEqual(result.manifest.content, manifest)
+        self.assertEqual(result.compose.content, compose)
+
+    def test_changed_supporting_library_file_fails_before_staging(self) -> None:
+        manifest = b"name: demo\n"
+        compose = b"services: {}\n"
+        for kind, path in (
+            ("config", "config/settings.yml"),
+            ("hook", "hooks/setup.sh"),
+            ("build", "build/Dockerfile"),
+            ("doc", "README.md"),
+        ):
+            with self.subTest(kind=kind):
+                service_id = f"demo-{kind}"
+                self.write("library", manifest, service_id=service_id, compose=compose)
+                service = self.roots["library"] / service_id
+                supporting = service / path
+                supporting.parent.mkdir(parents=True, exist_ok=True)
+                supporting.write_bytes(b"approved\n")
+                expected = digest_extension_tree(service)
+                supporting.write_bytes(b"unapproved\n")
+                planned = replace(
+                    definition(
+                        manifest,
+                        service_id=service_id,
+                        compose=compose,
+                        compose_file="compose.yaml",
+                    ),
+                    source_tree_sha256=expected,
+                )
+                self.assert_code(
+                    "artifact-library-tree-mismatch",
+                    lambda: verifier.verify_planned_definition(planned, self.injected),
+                )
+
+    def test_library_tree_symlink_and_wrong_source_are_refused(self) -> None:
+        manifest = b"name: demo\n"
+        self.write("library", manifest)
+        service = self.roots["library"] / "demo"
+        expected = digest_extension_tree(service)
+        (service / "README.md").symlink_to(service / "manifest.yaml")
+        planned = replace(definition(manifest), source_tree_sha256=expected)
+        self.assert_code(
+            "artifact-library-tree-invalid",
+            lambda: verifier.verify_planned_definition(planned, self.injected),
+        )
+        self.assert_code(
+            "artifact-plan-invalid",
+            lambda: verifier.verify_planned_definition(
+                replace(planned, definition_source="builtin"), self.injected
+            ),
+        )
+
+    def test_library_tree_changed_between_artifact_reads_is_refused(self) -> None:
+        manifest = b"name: demo\n"
+        self.write("library", manifest)
+        expected = digest_extension_tree(self.roots["library"] / "demo")
+        planned = replace(definition(manifest), source_tree_sha256=expected)
+        with mock.patch.object(
+            verifier, "digest_extension_tree", side_effect=[expected, "sha256:" + "0" * 64]
+        ) as digest:
+            self.assert_code(
+                "artifact-library-tree-mismatch",
+                lambda: verifier.verify_planned_definition(planned, self.injected),
+            )
+        self.assertEqual(digest.call_count, 2)
 
     def test_module_has_no_effect_or_discovery_primitives(self) -> None:
         source_path = BIN_DIR / "extension_artifact_verifier.py"
