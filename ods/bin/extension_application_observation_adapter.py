@@ -31,7 +31,9 @@ from extension_application_record_store import ApplicationRecord, ApplicationRec
 from extension_document_digest import canonical_document_sha256
 from extension_lifecycle_work import LifecycleWorkCommand
 
-_DIRECTORY_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+_DIRECTORY_FLAGS = (
+    os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+)
 _FILE_FLAGS = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
 _CONTAINER_ID = re.compile(r"^[0-9a-f]{64}$")
 _CONTAINER_NAME = re.compile(r"^[a-z0-9][a-z0-9._-]{0,255}$")
@@ -50,7 +52,10 @@ def _fail(code: str) -> None:
 
 def _run_docker(argv: list[str]) -> subprocess.CompletedProcess[bytes]:
     return subprocess.run(
-        argv, capture_output=True, stdin=subprocess.DEVNULL, timeout=15,
+        argv,
+        capture_output=True,
+        stdin=subprocess.DEVNULL,
+        timeout=15,
         check=False,
     )
 
@@ -127,9 +132,11 @@ def _file_digest(parent: int, name: str) -> str | None:
                 _fail("application-evidence-file-drift")
             content.extend(part)
         after = os.fstat(descriptor)
-        if (
-            (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
-            != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+        if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) != (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
         ):
             _fail("application-evidence-file-drift")
         try:
@@ -142,8 +149,12 @@ def _file_digest(parent: int, name: str) -> str | None:
         os.close(descriptor)
 
 
-def _current_files(install_root: Path, service_id: str) -> tuple[str | None, str | None, str | None]:
-    if not install_root.is_absolute() or any(part in {".", ".."} for part in install_root.parts):
+def _current_files(
+    install_root: Path, service_id: str
+) -> tuple[str | None, str | None, str | None]:
+    if not install_root.is_absolute() or any(
+        part in {".", ".."} for part in install_root.parts
+    ):
         _fail("application-evidence-root-invalid")
     try:
         root = os.open(install_root, _DIRECTORY_FLAGS)
@@ -183,7 +194,9 @@ def _ids(raw: bytes) -> set[str]:
     if len(lines) > _MAX_HOST_CONTAINERS:
         _fail("application-evidence-docker-limit")
     ids = set(lines)
-    if any(_CONTAINER_ID.fullmatch(value) is None for value in ids) or len(ids) != len(lines):
+    if any(_CONTAINER_ID.fullmatch(value) is None for value in ids) or len(ids) != len(
+        lines
+    ):
         _fail("application-evidence-docker-invalid")
     return ids
 
@@ -204,7 +217,9 @@ def _current_containers(
 ) -> tuple[ContainerObservation, ...]:
     # Observe every container name, including stopped containers, so an
     # expected container with missing identity labels is still a partial effect.
-    raw = _output(runner, ["docker", "ps", "-a", "--no-trunc", "--format", "{{.ID}} {{.Names}}"])
+    raw = _output(
+        runner, ["docker", "ps", "-a", "--no-trunc", "--format", "{{.ID}} {{.Names}}"]
+    )
     try:
         lines = raw.decode("utf-8", "strict").splitlines()
     except UnicodeError:
@@ -215,33 +230,69 @@ def _current_containers(
     for line in lines:
         parts = line.split(" ", 1)
         if (
-            len(parts) != 2 or _CONTAINER_ID.fullmatch(parts[0]) is None
+            len(parts) != 2
+            or _CONTAINER_ID.fullmatch(parts[0]) is None
             or _CONTAINER_NAME.fullmatch(parts[1]) is None
             or parts[0] in names
         ):
             _fail("application-evidence-docker-invalid")
         names[parts[0]] = parts[1]
-    by_identity = _ids(_output(runner, [
-        "docker", "ps", "-aq", "--no-trunc", "--filter",
-        f"label={LABEL_NAMESPACE}.service_id={service_id}",
-    ]))
-    by_compose = _ids(_output(runner, [
-        "docker", "ps", "-aq", "--no-trunc", "--filter",
-        f"label=com.docker.compose.service={service_id}",
-    ]))
+    by_identity = _ids(
+        _output(
+            runner,
+            [
+                "docker",
+                "ps",
+                "-aq",
+                "--no-trunc",
+                "--filter",
+                f"label={LABEL_NAMESPACE}.service_id={service_id}",
+            ],
+        )
+    )
+    by_compose = _ids(
+        _output(
+            runner,
+            [
+                "docker",
+                "ps",
+                "-aq",
+                "--no-trunc",
+                "--filter",
+                f"label=com.docker.compose.service={service_id}",
+            ],
+        )
+    )
     if not (by_identity | by_compose) <= names.keys():
         _fail("application-evidence-docker-drift")
-    chosen = by_identity | by_compose | {
-        container_id for container_id, name in names.items()
-        if name in expected_names or name == service_id
-    }
+    chosen = (
+        by_identity
+        | by_compose
+        | {
+            container_id
+            for container_id, name in names.items()
+            if name in expected_names or name == service_id
+        }
+    )
     if len(chosen) > MAX_CONTAINERS:
         _fail("application-evidence-docker-limit")
     observations: list[ContainerObservation] = []
-    for container_id in sorted(chosen):
-        raw_inspect = _output(runner, ["docker", "inspect", "--format", "{{json .}}", container_id])
+    selected = sorted(chosen)
+    if selected:
+        raw_inspect = _output(
+            runner, ["docker", "inspect", "--format", "{{json .}}", *selected]
+        )
         try:
-            document: Any = json.loads(raw_inspect, object_pairs_hook=_unique_keys)
+            inspected = raw_inspect.decode("utf-8", "strict").splitlines()
+        except UnicodeError:
+            _fail("application-evidence-docker-invalid")
+        if len(inspected) != len(selected):
+            _fail("application-evidence-docker-drift")
+    else:
+        inspected = []
+    for container_id, line in zip(selected, inspected):
+        try:
+            document: Any = json.loads(line, object_pairs_hook=_unique_keys)
             status = document["State"]["Status"]
             health = document["State"].get("Health")
             health_name = "no_healthcheck" if health is None else health["Status"]
@@ -251,16 +302,24 @@ def _current_containers(
                 document["Id"] != container_id
                 or name != "/" + names[container_id]
                 or not isinstance(labels, dict)
-                or any(type(key) is not str or type(value) is not str for key, value in labels.items())
-                or type(status) is not str or type(health_name) is not str
+                or any(
+                    type(key) is not str or type(value) is not str
+                    for key, value in labels.items()
+                )
+                or type(status) is not str
+                or type(health_name) is not str
             ):
                 raise ValueError
         except (KeyError, TypeError, ValueError, UnicodeError):
             _fail("application-evidence-docker-invalid")
-        observations.append(ContainerObservation(
-            name=names[container_id], state=status, health=health_name,
-            labels=labels,
-        ))
+        observations.append(
+            ContainerObservation(
+                name=names[container_id],
+                state=status,
+                health=health_name,
+                labels=labels,
+            )
+        )
     return tuple(sorted(observations, key=lambda item: item.name))
 
 
@@ -268,17 +327,25 @@ class ApplicationObservationAdapter:
     """Collect twice under an admitted lease and refuse changed evidence."""
 
     def __init__(
-        self, install_root: Path, record_store: ApplicationRecordStore,
+        self,
+        install_root: Path,
+        record_store: ApplicationRecordStore,
         receipt_store: Any,
         plan_loader: Callable[[LifecycleWorkCommand], LifecycleWorkCommand],
         active_lease: Callable[[], bool],
-        docker_runner: Callable[[list[str]], subprocess.CompletedProcess[bytes]] = _run_docker,
+        docker_runner: Callable[
+            [list[str]], subprocess.CompletedProcess[bytes]
+        ] = _run_docker,
     ) -> None:
-        if sys.platform != "linux" or not all((
-            callable(getattr(record_store, "snapshot", None)),
-            callable(getattr(receipt_store, "snapshot", None)),
-            callable(plan_loader), callable(active_lease), callable(docker_runner),
-        )):
+        if sys.platform != "linux" or not all(
+            (
+                callable(getattr(record_store, "snapshot", None)),
+                callable(getattr(receipt_store, "snapshot", None)),
+                callable(plan_loader),
+                callable(active_lease),
+                callable(docker_runner),
+            )
+        ):
             _fail("application-evidence-platform-unqualified")
         self._root = install_root
         self._records = record_store
@@ -304,8 +371,13 @@ class ApplicationObservationAdapter:
                 or any(
                     getattr(bound, field) != getattr(command, field)
                     for field in (
-                        "transaction_id", "plan_hash", "operation_key",
-                        "request_hash", "service_ids", "payload", "timeout_seconds",
+                        "transaction_id",
+                        "plan_hash",
+                        "operation_key",
+                        "request_hash",
+                        "service_ids",
+                        "payload",
+                        "timeout_seconds",
                     )
                 )
             ):
@@ -314,16 +386,26 @@ class ApplicationObservationAdapter:
             record = self._records.snapshot(identity.service_id)
             if record is not None and type(record) is not ApplicationRecord:
                 _fail("application-evidence-record-invalid")
-            snapshot = self._receipts.snapshot(command.transaction_id, command.operation_key)
+            snapshot = self._receipts.snapshot(
+                command.transaction_id, command.operation_key
+            )
             expected_names = () if record is None else record.expected_containers
             first_files = _current_files(self._root, identity.service_id)
-            first_containers = _current_containers(identity.service_id, expected_names, self._docker)
+            first_containers = _current_containers(
+                identity.service_id, expected_names, self._docker
+            )
             second_files = _current_files(self._root, identity.service_id)
-            second_containers = _current_containers(identity.service_id, expected_names, self._docker)
+            second_containers = _current_containers(
+                identity.service_id, expected_names, self._docker
+            )
             if (
-                first_files != second_files or first_containers != second_containers
+                first_files != second_files
+                or first_containers != second_containers
                 or self._records.snapshot(identity.service_id) != record
-                or self._receipts.snapshot(command.transaction_id, command.operation_key) != snapshot
+                or self._receipts.snapshot(
+                    command.transaction_id, command.operation_key
+                )
+                != snapshot
                 or self._lease() is not True
             ):
                 _fail("application-evidence-current-drift")
@@ -331,15 +413,19 @@ class ApplicationObservationAdapter:
             if record is not None:
                 active_record = asdict(record)
                 active_record["expected_containers"] = list(record.expected_containers)
-            return observe_application(bound, CurrentEvidence(
-                active_record=active_record,
-                active_definition_digest=first_files[0],
-                active_compose_digest=first_files[1],
-                active_config_digest=first_files[2],
-                container_observations=first_containers,
-                receipt_snapshot=snapshot,
-                topology="docker", docker_available=True,
-            ))
+            return observe_application(
+                bound,
+                CurrentEvidence(
+                    active_record=active_record,
+                    active_definition_digest=first_files[0],
+                    active_compose_digest=first_files[1],
+                    active_config_digest=first_files[2],
+                    container_observations=first_containers,
+                    receipt_snapshot=snapshot,
+                    topology="docker",
+                    docker_available=True,
+                ),
+            )
         except ApplicationObservationError:
             raise
         except Exception:
