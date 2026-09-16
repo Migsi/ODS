@@ -142,8 +142,21 @@ def _status(bridge):
         raise AccessError("model-runtime-mismatch")
     if (_config(bridge)[1] != config_sha or _identity(bridge) != identity or native.get("revision") != observed["revision"]):
         raise AccessError("model-inspection-changed")
-    done_path = bridge.state / "model-completed.json"
+    done_path = bridge.state / "model-route-completed.json"
+    legacy = False
+    if not done_path.exists():
+        done_path = bridge.state / "model-completed.json"
+        legacy = True
     done = private_json(done_path, 0, 8192) if done_path.exists() else None
+    # The legacy filename was also used by install-time model promotion.
+    # Accept its valid receipt as belonging to that other transaction, never
+    # as evidence that a browser model switch completed.
+    if legacy and type(done) is dict and set(done) == {"kind", "transaction_id", "outcome", "config_sha256"}:
+        if (done["kind"] != "model-completion" or not checksum(done["transaction_id"])
+                or done["outcome"] not in ("applied", "rolled-back")
+                or not checksum(done["config_sha256"])):
+            raise AccessError("invalid-model-completion")
+        done = None
     if done and (not checksum(done.get("transactionId")) or done.get("outcome") not in ("commit", "rollback")
                  or not checksum(done.get("configSha256"))): raise AccessError("invalid-model-completion")
     done = done if done and done["configSha256"] == config_sha else None
@@ -234,7 +247,7 @@ def control(bridge, operation, request=None):
         _verify(bridge, journal, expected_sha)
         if owner["pending"]: worker("model-finish", model_outcome=outcome)
         journal.update(phase="releasing", outcome=outcome); _write(bridge, journal)
-        atomic_json(bridge.state / "model-completed.json", {"transactionId": journal["transactionId"], "outcome": outcome, "configSha256": expected_sha})
+        atomic_json(bridge.state / "model-route-completed.json", {"transactionId": journal["transactionId"], "outcome": outcome, "configSha256": expected_sha})
         bridge.edge("release", journal["token"], journal["edge_revision"])
         bridge.native("release", journal["token"])
         try:

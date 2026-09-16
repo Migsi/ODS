@@ -255,10 +255,33 @@ class ModelTransitionTests(unittest.TestCase):
             result = bridge.model_finish({"transaction_id": HEX_A, "outcome": "applied"})
             self.assertEqual(result, {"status": "released", "outcome": "applied"})
             self.assertFalse((bridge.state / "transition.json").exists())
-            self.assertTrue((bridge.state / "model-completed.json").exists())
+            self.assertTrue((bridge.state / "model-promotion-completed.json").exists())
             self.assertIn("discover-installing", bridge.calls)
             self.assertLess(bridge.calls.index("verify:sandboxed"), bridge.calls.index("native:release"))
             self.assertLess(bridge.calls.index("native:release"), bridge.calls.index("edge:release"))
+
+    def test_promotion_completion_ignores_legacy_browser_receipt(self):
+        with tempfile.TemporaryDirectory() as root:
+            bridge = FakeBridge(root)
+            legacy = bridge.state / "model-completed.json"
+            legacy.write_text(json.dumps({"transactionId": HEX_A, "outcome": "commit",
+                                          "configSha256": HEX_B}), encoding="utf-8")
+            self.assertIsNone(bridge.model_completion())
+            legacy.write_text(json.dumps({"transactionId": "bad", "outcome": "commit",
+                                          "configSha256": HEX_B}), encoding="utf-8")
+            with self.assertRaisesRegex(AccessError, "model-recovery-required"):
+                bridge.model_completion()
+
+    def test_promotion_completion_reads_legacy_and_prefers_namespaced_receipt(self):
+        with tempfile.TemporaryDirectory() as root:
+            bridge = FakeBridge(root)
+            legacy = {"kind": "model-completion", "transaction_id": HEX_A,
+                      "outcome": "applied", "config_sha256": HEX_B}
+            (bridge.state / "model-completed.json").write_text(json.dumps(legacy), encoding="utf-8")
+            self.assertEqual(bridge.model_completion(), legacy)
+            current = {**legacy, "transaction_id": HEX_C}
+            (bridge.state / "model-promotion-completed.json").write_text(json.dumps(current), encoding="utf-8")
+            self.assertEqual(bridge.model_completion(), current)
 
     def test_finish_replays_exact_root_completion_after_lost_socket_reply(self):
         with tempfile.TemporaryDirectory() as root:

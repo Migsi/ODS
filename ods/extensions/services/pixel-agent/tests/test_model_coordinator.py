@@ -78,6 +78,34 @@ def test_64k_to_16k_holds_through_actual_runtime_readback(adapter):
     assert finish(adapter)==done
     assert 'PRIVATE' not in json.dumps(done)
 
+def test_bootstrap_completion_does_not_block_browser_model_switch(adapter):
+    # Fresh installs leave the old shared receipt in this exact format.
+    adapter.state.mkdir(mode=0o700)
+    promotion = {"kind": "model-completion", "transaction_id": ID,
+                 "outcome": "applied", "config_sha256": sha(adapter.path)}
+    atomic_json(adapter.state / "model-completed.json", promotion)
+    assert c.control(adapter, 'model-status')['status'] == 'ready'
+    begin(adapter);apply(adapter)
+    done=finish(adapter)
+    assert done['status'] == 'completed' and done['outcome'] == 'commit'
+    assert (adapter.state / "model-route-completed.json").exists()
+    assert json.loads((adapter.state / "model-completed.json").read_text()) == promotion
+
+def test_legacy_browser_completion_is_read_without_rewriting_it(adapter):
+    adapter.state.mkdir(mode=0o700)
+    receipt={"transactionId": ID, "outcome": "commit", "configSha256": sha(adapter.path)}
+    atomic_json(adapter.state / "model-completed.json", receipt)
+    status=c.control(adapter, 'model-status')
+    assert status['status'] == 'completed' and status['transactionId'] == ID
+    assert not (adapter.state / "model-route-completed.json").exists()
+
+def test_malformed_legacy_promotion_receipt_fails_closed(adapter):
+    adapter.state.mkdir(mode=0o700)
+    atomic_json(adapter.state / "model-completed.json", {"kind": "model-completion",
+                "transaction_id": "bad", "outcome": "applied", "config_sha256": sha(adapter.path)})
+    with pytest.raises(AccessError,match='invalid-model-completion'):
+        c.control(adapter,'model-status')
+
 @pytest.mark.parametrize('failure',['preinvoke','lost-reply'])
 def test_lost_reply_or_partial_begin_can_restore_exact_bytes(adapter,failure):
     before=adapter.path.read_bytes();adapter.failure=failure

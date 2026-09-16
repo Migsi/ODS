@@ -999,9 +999,22 @@ class SystemdAccessBridge:
         finally: os.close(directory)
 
     def model_completion(self, request=None):
-        path = self.state / "model-completed.json"
+        path = self.state / "model-promotion-completed.json"
+        legacy = False
+        if not path.exists():
+            path = self.state / "model-completed.json"
+            legacy = True
         if not path.exists(): return None
         value = private_json(path, 0, 4096)
+        # Older releases shared this filename with browser model switching.
+        # A valid receipt from that separate transaction is not a promotion
+        # completion; malformed state still fails closed.
+        if legacy and type(value) is dict and set(value) == {"transactionId", "outcome", "configSha256"}:
+            if (type(value["transactionId"]) is not str or not HEX.fullmatch(value["transactionId"])
+                    or value["outcome"] not in ("commit", "rollback")
+                    or type(value["configSha256"]) is not str or not HEX.fullmatch(value["configSha256"])):
+                raise AccessError("model-recovery-required")
+            return None
         if (type(value) is not dict
                 or set(value) != {"kind", "transaction_id", "outcome", "config_sha256"}
                 or value.get("kind") != "model-completion"
@@ -1181,7 +1194,7 @@ class SystemdAccessBridge:
                             or released_edge.get("streams")):
                         raise
                 try:
-                    atomic_json(self.state / "model-completed.json", {
+                    atomic_json(self.state / "model-promotion-completed.json", {
                         "kind": "model-completion", "transaction_id": pending["transaction_id"],
                         "outcome": request["outcome"], "config_sha256": config["config_sha256"]})
                 except OSError:

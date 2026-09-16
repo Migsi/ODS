@@ -1833,6 +1833,9 @@ else
 fi
 
 write_access_fixture
+printf '{}\n' > "$ACCESS_STATE/model-promotion-completed.json"
+printf '{}\n' > "$ACCESS_STATE/model-route-completed.json"
+chmod 0600 "$ACCESS_STATE/model-promotion-completed.json" "$ACCESS_STATE/model-route-completed.json"
 if ods_pixel_uninstall_managed "$INSTALL_DIR" "$HOME_DIR"; then
     [[ ! -e "$ACCESS_STATE" && ! -e "$LIBEXEC_DIR/ods-pixel-access" \
         && ! -e "$ETC_DIR/pixel-access.json" && ! -e "$SYSTEMD_DIR/ods-pixel-access.service" ]] \
