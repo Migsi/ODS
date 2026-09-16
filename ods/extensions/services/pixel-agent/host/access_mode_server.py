@@ -72,6 +72,8 @@ def main():
                 adapter = make_adapter()
                 if request == {"operation": "status"}:
                     status, body = 200, adapter.status()
+                elif request == {"operation": "model-status"}:
+                    status, body = 200, adapter.model_status()
                 elif set(request) == {"operation", "request"} and request["operation"] == "change":
                     status, body = 200, adapter.change(request["request"])
                 elif request == {"operation": "model-begin"}:

@@ -818,6 +818,20 @@ class SystemdAccessBridge:
             raise AccessError("model-transaction-mismatch")
         return pending
 
+    def model_status(self):
+        """Disclose only the validated pending model handle to the host owner."""
+        if self.pending() is None:
+            return {"pending": False}
+        journal = self.model_journal()
+        result = {"pending": True, "kind": "model",
+                  "transaction_id": journal["transaction_id"],
+                  "phase": journal["phase"],
+                  "configured_mode": journal["configured_mode"],
+                  "start_config_sha256": journal["start_config_sha256"]}
+        if "error" in journal:
+            result["error"] = journal["error"]
+        return result
+
     def model_error(self, pending, error):
         pending["phase"] = "error"
         pending["error"] = error.code if isinstance(error, AccessError) else "model-transition-failed"

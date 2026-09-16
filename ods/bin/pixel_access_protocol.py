@@ -58,7 +58,8 @@ def control_request(value):
     if type(value) is not dict or type(value.get("operation")) is not str:
         raise ProtocolError("invalid-request")
     operation = value["operation"]
-    keys = {"status": {"operation"}, "change": {"operation", "request"},
+    keys = {"status": {"operation"}, "model-status": {"operation"},
+            "change": {"operation", "request"},
             "model-begin": {"operation"}, "model-finish": {"operation", "request"},
             "settings-status": {"operation", "data_dir_id"},
             "settings-change": {"operation", "data_dir_id", "request"},

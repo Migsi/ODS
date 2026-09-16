@@ -6,7 +6,7 @@ from pathlib import Path
 
 
 def request_access(operation, request=None, *, settings_data_dir=None):
-    if operation not in ("status", "change", "model-begin", "model-finish",
+    if operation not in ("status", "change", "model-status", "model-begin", "model-finish",
                           "settings-status", "settings-change", "provider-status", "provider-change"):
         raise ValueError("invalid access operation")
     payload = {"operation": operation}

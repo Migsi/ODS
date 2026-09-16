@@ -306,6 +306,30 @@ class ModelTransitionTests(unittest.TestCase):
             self.assertEqual(main(["begin"]), 0)
         output.assert_called_once_with(HEX_A)
 
+    def test_model_status_is_read_only_and_never_discloses_gate_token(self):
+        with tempfile.TemporaryDirectory() as root:
+            bridge = FakeBridge(root)
+            self.assertEqual(bridge.model_status(), {"pending": False})
+            journal = model_journal("error")
+            journal["error"] = "model-transition-failed"
+            path = bridge.state / "transition.json"
+            path.write_text(json.dumps(journal), encoding="utf-8")
+            before = path.read_bytes()
+            disclosed = bridge.model_status()
+            self.assertEqual(disclosed, {"pending": True, "kind": "model",
+                                         "transaction_id": HEX_A, "phase": "error",
+                                         "configured_mode": "sandboxed",
+                                         "start_config_sha256": HEX_C,
+                                         "error": "model-transition-failed"})
+            self.assertNotIn("token", disclosed)
+            self.assertNotIn("edge_revision", disclosed)
+            self.assertEqual(path.read_bytes(), before)
+            self.assertEqual(bridge.calls, [])
+            journal["token"] = "not-a-token"
+            path.write_text(json.dumps(journal), encoding="utf-8")
+            with self.assertRaisesRegex(AccessError, "model-recovery-required"):
+                bridge.model_status()
+
     def test_finish_recovers_native_released_error_before_retry(self):
         with tempfile.TemporaryDirectory() as root:
             bridge = FakeBridge(root)
@@ -377,6 +401,10 @@ class ModelTransitionTests(unittest.TestCase):
             self.assertTrue((bridge.state / "transition.json").exists())
 
     def test_control_and_cli_contracts_are_bounded(self):
+        self.assertEqual(protocol.control_request({"operation": "model-status"}),
+                         {"operation": "model-status"})
+        with self.assertRaises(protocol.ProtocolError):
+            protocol.control_request({"operation": "model-status", "request": {}})
         self.assertEqual(protocol.control_request({"operation": "model-begin"}),
                          {"operation": "model-begin"})
         value = {"operation": "model-finish", "request": {
@@ -392,6 +420,17 @@ class ModelTransitionTests(unittest.TestCase):
         self.assertEqual(execute("finish", HEX_A, "applied", request=lambda *args: (
             calls.append(args) or (200, {"status": "released", "outcome": "applied"}))), "released")
         self.assertNotIn(HEX_B, repr(calls))
+        status_body = {"pending": True, "kind": "model", "transaction_id": HEX_A,
+                       "phase": "held", "configured_mode": "sandboxed",
+                       "start_config_sha256": HEX_C}
+        self.assertEqual(execute("status", request=lambda operation: (
+            200, status_body if operation == "model-status" else {})), status_body)
+        with self.assertRaisesRegex(RuntimeError, "model-transition-status-failed"):
+            execute("status", request=lambda _operation: (200, dict(status_body, token=HEX_B)))
+        with self.assertRaisesRegex(RuntimeError, "model-transition-status-failed") as failed:
+            execute("status", request=lambda _operation: (
+                200, dict(status_body, token=HEX_B, error=HEX_B)))
+        self.assertNotIn(HEX_B, str(failed.exception))
 
 
 if __name__ == "__main__":
