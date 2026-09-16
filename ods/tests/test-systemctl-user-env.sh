@@ -43,4 +43,22 @@ grep -Fxq 'runtime=/custom/runtime' "$capture_existing"
 grep -Fxq 'bus=unix:path=/custom/bus' "$capture_existing"
 grep -Fxq 'args=--user daemon-reload' "$capture_existing"
 
+capture_uninstall="$TMP/uninstall.env"
+run_probe "$capture_uninstall" bash -c \
+    'source <(sed -n "/^ods_uninstall_systemctl_user() {/,/^}/p" "$1"); ods_uninstall_systemctl_user disable --now opencode-web.service' _ \
+    "$ROOT/ods-uninstall.sh"
+
+grep -Fxq "runtime=$expected_runtime" "$capture_uninstall"
+grep -Fxq "bus=unix:path=$expected_runtime/bus" "$capture_uninstall"
+grep -Fxq 'args=--user disable --now opencode-web.service' "$capture_uninstall"
+
+grep -Fq 'ods_systemctl_user enable --now "${timer}.timer"' \
+    "$ROOT/installers/phases/10-amd-tuning.sh"
+[[ "$(grep -Fc 'ods_systemctl_user is-active opencode-web' \
+    "$ROOT/installers/phases/13-summary.sh")" -eq 2 ]]
+! grep -Eq '^[[:space:]]*systemctl --user' \
+    "$ROOT/installers/phases/10-amd-tuning.sh" \
+    "$ROOT/installers/phases/13-summary.sh" \
+    "$ROOT/ods-uninstall.sh"
+
 printf '[PASS] unattended systemctl --user calls receive a reachable user-bus environment\n'

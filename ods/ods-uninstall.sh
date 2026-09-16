@@ -21,6 +21,16 @@ log_ok()    { echo -e "${GREEN}[OK]${NC} $*"; }
 log_warn()  { echo -e "${YELLOW}[WARN]${NC} $*"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $*" >&2; }
 
+ods_uninstall_systemctl_user() {
+    local user_uid user_runtime_dir user_bus_address
+    user_uid="$(id -u)"
+    user_runtime_dir="${XDG_RUNTIME_DIR:-/run/user/$user_uid}"
+    user_bus_address="${DBUS_SESSION_BUS_ADDRESS:-unix:path=$user_runtime_dir/bus}"
+    env XDG_RUNTIME_DIR="$user_runtime_dir" \
+        DBUS_SESSION_BUS_ADDRESS="$user_bus_address" \
+        systemctl --user "$@"
+}
+
 SUDO_CREDENTIAL_READY=false
 
 prepare_sudo_credential() {
@@ -320,12 +330,8 @@ SYSTEMD_USER_DIR="$HOME/.config/systemd/user"
 _ods_uninstall_uid="$(id -u)"
 _ods_uninstall_runtime_dir="/run/user/$_ods_uninstall_uid"
 if [[ -d "$_ods_uninstall_runtime_dir" && -S "$_ods_uninstall_runtime_dir/bus" ]]; then
-    env XDG_RUNTIME_DIR="$_ods_uninstall_runtime_dir" \
-        DBUS_SESSION_BUS_ADDRESS="unix:path=$_ods_uninstall_runtime_dir/bus" \
-        systemctl --user stop ods-model-upgrade.service 2>/dev/null || true
-    env XDG_RUNTIME_DIR="$_ods_uninstall_runtime_dir" \
-        DBUS_SESSION_BUS_ADDRESS="unix:path=$_ods_uninstall_runtime_dir/bus" \
-        systemctl --user reset-failed ods-model-upgrade.service 2>/dev/null || true
+    ods_uninstall_systemctl_user stop ods-model-upgrade.service 2>/dev/null || true
+    ods_uninstall_systemctl_user reset-failed ods-model-upgrade.service 2>/dev/null || true
 fi
 for unit in opencode-web.service openclaw-session-cleanup.timer \
             memory-shepherd-workspace.timer memory-shepherd-memory.timer \
@@ -333,11 +339,11 @@ for unit in opencode-web.service openclaw-session-cleanup.timer \
             memory-shepherd-workspace.service memory-shepherd-memory.service \
             ods-host-agent.service; do
     if [[ -f "$SYSTEMD_USER_DIR/$unit" ]]; then
-        systemctl --user disable --now "$unit" 2>/dev/null || true
+        ods_uninstall_systemctl_user disable --now "$unit" 2>/dev/null || true
         rm -f "$SYSTEMD_USER_DIR/$unit"
     fi
 done
-systemctl --user daemon-reload 2>/dev/null || true
+ods_uninstall_systemctl_user daemon-reload 2>/dev/null || true
 
 # 2a. Remove macOS LaunchAgents (#1882). install-macos.sh creates
 # com.ods.host-agent and com.ods.opencode-web as RunAtLoad+KeepAlive agents;
