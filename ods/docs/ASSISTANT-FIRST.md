@@ -178,7 +178,9 @@ Every receipted `apply:<serviceId>` now requires a started-state observer
 before any dispatcher may run. After a possible file/container effect, the
 dispatcher can raise `LifecycleWorkUncertainEffect`; the receipt stays started,
 and a retry must first classify actual state. An observer that finds partial or
-contradictory state refuses redispatch. This contract alone does not publish
+contradictory state refuses redispatch. The image-preparation observer-failure
+terminalization option cannot terminalize an apply observation failure. This
+contract alone does not publish
 application records or select generic apply in production.
 
 Future host work is also bound to the exact approved transaction before a

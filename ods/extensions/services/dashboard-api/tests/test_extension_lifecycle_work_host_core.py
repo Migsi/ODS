@@ -693,7 +693,12 @@ def test_uncertain_apply_preserves_started_receipt_until_observation_recovers():
 
     with pytest.raises(host_work.LifecycleWorkExecutionError) as refused:
         host_work.dispatch_receipted_lifecycle_work(
-            command, uncertain, store, _load_plan, partial
+            command,
+            uncertain,
+            store,
+            _load_plan,
+            partial,
+            terminalize_observer_failure=True,
         )
     assert refused.value.code == "application-evidence-partial"
     assert (
@@ -764,6 +769,60 @@ def test_receipted_dispatch_requires_plan_binding_before_the_worker():
     assert replay.value.code == "lifecycle-work-terminal-failed"
     assert loader_calls == [True]
     assert worker_calls == []
+
+
+def test_completed_apply_replay_needs_no_observer_or_new_dispatch():
+    command = host_work.parse_lifecycle_work_request(
+        work_request(
+            "apply:documents",
+            ["documents"],
+            payload_for("apply:documents", ["documents"]),
+        )
+    )
+    store = _begun_store(command)
+    first = host_work.dispatch_receipted_lifecycle_work(
+        command,
+        lambda _value: EVIDENCE_HASH,
+        store,
+        _load_plan,
+        lambda _value: host_work.LifecycleWorkStartedObservation("missing"),
+    )
+    replay = host_work.dispatch_receipted_lifecycle_work(
+        command,
+        lambda _value: (_ for _ in ()).throw(AssertionError("redispatched")),
+        store,
+        _load_plan,
+    )
+    assert replay == first
+
+
+def test_uncertain_observer_failure_cannot_be_terminalized():
+    command = host_work.parse_lifecycle_work_request(
+        work_request(
+            "apply:documents",
+            ["documents"],
+            payload_for("apply:documents", ["documents"]),
+        )
+    )
+    store = _begun_store(command)
+    calls = []
+
+    def uncertain(_value):
+        raise host_work.LifecycleWorkUncertainEffect("application-evidence-partial")
+
+    with pytest.raises(host_work.LifecycleWorkUncertainEffect):
+        host_work.dispatch_receipted_lifecycle_work(
+            command,
+            lambda value: calls.append(value) or EVIDENCE_HASH,
+            store,
+            _load_plan,
+            uncertain,
+            terminalize_observer_failure=True,
+        )
+    assert calls == []
+    assert store.snapshot(command.transaction_id, command.operation_key).state == (
+        "started"
+    )
 
 
 def test_receipted_dispatch_requires_the_exact_started_binding():

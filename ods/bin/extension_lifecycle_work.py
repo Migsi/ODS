@@ -463,11 +463,6 @@ def dispatch_receipted_lifecycle_work(
         raise LifecycleWorkUnavailable("lifecycle-work-plan-loader-unavailable")
     if started_observer is not None and not callable(started_observer):
         raise LifecycleWorkUnavailable("lifecycle-work-started-observer-unavailable")
-    if command.operation_key.startswith("apply:") and started_observer is None:
-        # A started-only apply receipt could mean either a fresh request or a
-        # partial previous effect. Do not dispatch unless current-state
-        # observation can distinguish those cases before every attempt.
-        raise LifecycleWorkUnavailable("lifecycle-work-started-observer-unavailable")
     if type(terminalize_observer_failure) is not bool:
         _invalid()
     if receipt_store is None or not callable(getattr(receipt_store, "snapshot", None)):
@@ -487,11 +482,23 @@ def dispatch_receipted_lifecycle_work(
             return _completed_result(command, terminal.evidence_hash)
         raise LifecycleWorkExecutionError("lifecycle-work-terminal-failed")
 
+    if command.operation_key.startswith("apply:") and started_observer is None:
+        # Only a started-only apply receipt could mean a partial effect.
+        # An exact completed terminal has already replayed above without
+        # requiring an observer or another worker call.
+        raise LifecycleWorkUnavailable("lifecycle-work-started-observer-unavailable")
+
     if started_observer is not None:
         try:
             observation = _require_started_observation(started_observer(command))
+        except LifecycleWorkUncertainEffect:
+            # The opt-in observer-failure terminalization flag must not turn
+            # an ambiguous current-state probe into a false failed terminal.
+            raise
         except LifecycleWorkError as observer_error:
-            if terminalize_observer_failure:
+            if terminalize_observer_failure and not command.operation_key.startswith(
+                "apply:"
+            ):
                 _terminalize_failed_receipt(
                     receipt_store, snapshot, command, observer_error
                 )
@@ -500,7 +507,9 @@ def dispatch_receipted_lifecycle_work(
             observer_error = LifecycleWorkExecutionError(
                 "lifecycle-work-started-observer-unavailable"
             )
-            if terminalize_observer_failure:
+            if terminalize_observer_failure and not command.operation_key.startswith(
+                "apply:"
+            ):
                 _terminalize_failed_receipt(
                     receipt_store, snapshot, command, observer_error
                 )
