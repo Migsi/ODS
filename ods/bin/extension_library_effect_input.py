@@ -160,7 +160,7 @@ def verify_plan_bound_library_payload(
     definition, mutable = _planned_definition(command)
     staged = _staged_definition(command, staged_batch, mutable)
     if (
-        type(library_root) is not Path
+        not isinstance(library_root, Path)
         or not library_root.is_absolute()
         or ".." in library_root.parts
     ):
