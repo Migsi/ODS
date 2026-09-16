@@ -13898,6 +13898,11 @@ def _opencode_model_route(env: dict, model_id: str) -> tuple[str, str, str]:
     return provider_id, model_id, model_id
 
 
+def _opencode_output_limit(context_length: int) -> int:
+    """Leave prompt room after a model switch, as the fresh installers do."""
+    return min(32768, max(1, context_length // 4))
+
+
 def _opencode_config_matches(
     config: object,
     provider_id: str,
@@ -13923,6 +13928,7 @@ def _opencode_config_matches(
         and options.get("apiKey") == api_key
         and isinstance(limit, dict)
         and limit.get("context") == context_length
+        and limit.get("output") == _opencode_output_limit(context_length)
     )
 
 
@@ -13988,7 +13994,7 @@ def _update_opencode_config(
             limit = {}
             model["limit"] = limit
         limit["context"] = context_length
-        limit["output"] = min(32768, context_length)
+        limit["output"] = _opencode_output_limit(context_length)
 
         _atomic_write_json(path, config, 0o600)
         try:

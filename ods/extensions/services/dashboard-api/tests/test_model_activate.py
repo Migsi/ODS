@@ -6857,7 +6857,7 @@ class TestModelActivateRollback:
             assert provider["options"]["apiKey"] == "no-key"
             assert provider["models"][expected_model_id]["limit"] == {
                 "context": 4096,
-                "output": 4096,
+                "output": 1024,
             }
         primary_config = json.loads(primary.read_text(encoding="utf-8"))
         compat_config = json.loads(compat.read_text(encoding="utf-8"))
@@ -6929,7 +6929,7 @@ class TestModelActivateRollback:
             assert "qwen3-coder-next" not in provider["models"]
             assert provider["models"]["ods/current"]["limit"] == {
                 "context": 4096,
-                "output": 4096,
+                "output": 1024,
             }
 
     def test_opencode_update_failure_restores_exact_files(self, tmp_path, monkeypatch):
@@ -7722,6 +7722,32 @@ class TestModelActivateRollback:
         )
 
         assert json.loads(compat.read_text(encoding="utf-8"))["theme"] == "current"
+
+    @pytest.mark.parametrize(
+        ("context_length", "expected_output"),
+        [(4096, 1024), (32768, 8192), (65536, 16384), (131072, 32768)],
+    )
+    def test_model_switch_opencode_output_reserves_prompt_context(
+        self, tmp_path, monkeypatch, context_length, expected_output,
+    ):
+        config_path = tmp_path / "config.json"
+        config_path.write_text("{}", encoding="utf-8")
+        monkeypatch.setattr(_mod, "_opencode_config_paths", lambda: (config_path,))
+        snapshot = _mod._capture_opencode_config()
+
+        _mod._update_opencode_config(
+            {"ODS_MODEL_SWITCHBOARD": "enabled", "LITELLM_KEY": "test-key"},
+            snapshot,
+            "qwen3.5-27b-q4",
+            context_length,
+        )
+
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        assert config["model"] == "llama-server/ods/current"
+        assert config["small_model"] == config["model"]
+        limit = config["provider"]["llama-server"]["models"]["ods/current"]["limit"]
+        assert limit == {"context": context_length, "output": expected_output}
+        assert limit["output"] < limit["context"]
 
     def test_litellm_is_verified_before_active_opencode_restarts(
         self, tmp_path, monkeypatch,
