@@ -30,7 +30,7 @@ function Get-WindowsOpenCodeOutputLimit {
     }
     # OpenCode reserves output tokens from context before deciding to compact.
     # Equal context/output budgets can loop on synthetic continuation turns.
-    return [long][Math]::Min(32768, [Math]::Floor($ContextLimit / 4))
+    return [long][Math]::Min(32768.0, [Math]::Floor($ContextLimit / 4))
 }
 
 function New-WindowsOpenCodeConfigObject {

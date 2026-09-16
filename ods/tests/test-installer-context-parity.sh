@@ -182,7 +182,7 @@ assert_grep "installers/macos/install-macos.sh" '--context-length "\$MAX_CONTEXT
     "macOS Hermes patcher receives context length"
 assert_grep "installers/macos/ods-macos.sh" 'ENV_CTX_SIZE:-65536' \
     "macOS native llama restart defaults to 64K context"
-assert_grep "installers/phases/07-devtools.sh" '"context": \$\{MAX_CONTEXT:-65536\}' \
+assert_grep "installers/phases/07-devtools.sh" '_opencode_context="\$\{MAX_CONTEXT:-65536\}"' \
     "Linux OpenCode config defaults to 64K context"
 assert_grep "installers/phases/07-devtools.sh" 'ODS_MODEL_SWITCHBOARD' \
     "Linux OpenCode config reads switchboard mode"
