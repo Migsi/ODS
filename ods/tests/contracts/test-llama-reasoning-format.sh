@@ -9,7 +9,8 @@
 # behaviour the default exists to prevent.
 #
 # Docker is exempt: docker-compose.base.yml passes LLAMA_ARG_REASONING into the
-# container environment, which llama.cpp reads natively.
+# container environment. The CPU image must support that setting; b8248 did
+# not, so its documented default was silently ignored on CPU-only installs.
 #
 # The .env values (off/on/auto) are not llama.cpp's vocabulary, so each
 # launcher also has to map them; the check below requires both the flag and the
@@ -60,6 +61,12 @@ if grep -q 'LLAMA_ARG_REASONING=${LLAMA_REASONING' "$ROOT_DIR/docker-compose.bas
     pass "docker-compose.base.yml forwards LLAMA_REASONING to the container environment"
 else
     fail "docker-compose.base.yml no longer forwards LLAMA_REASONING as LLAMA_ARG_REASONING"
+fi
+
+if grep -Fq 'image: ${LLAMA_SERVER_IMAGE:-ghcr.io/ggml-org/llama.cpp:server-b9014}' "$ROOT_DIR/docker-compose.cpu.yml"; then
+    pass "docker-compose.cpu.yml defaults to a llama.cpp build that honors LLAMA_ARG_REASONING"
+else
+    fail "docker-compose.cpu.yml must use a reasoning-aware llama.cpp build by default"
 fi
 
 if (( FAILURES > 0 )); then
