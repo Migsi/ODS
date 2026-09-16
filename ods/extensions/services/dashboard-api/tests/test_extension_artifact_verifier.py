@@ -209,7 +209,9 @@ class ArtifactVerifierTests(unittest.TestCase):
                 definition(manifest), self.injected
             ),
         )
-        (service / "manifest.yaml").write_bytes(manifest)
+        manifest_path = service / "manifest.yaml"
+        manifest_path.write_bytes(manifest)
+        manifest_path.chmod(0o600)
         planned = definition(
             manifest,
             compose=b"services: {}\n",
@@ -266,7 +268,9 @@ class ArtifactVerifierTests(unittest.TestCase):
         )
 
         (service / "manifest.yaml").unlink()
-        (service / "manifest.yaml").write_bytes(manifest)
+        manifest_path = service / "manifest.yaml"
+        manifest_path.write_bytes(manifest)
+        manifest_path.chmod(0o600)
         nested_target = self.base / "nested-target"
         nested_target.mkdir()
         compose = b"services: {}\n"
