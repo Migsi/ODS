@@ -95,9 +95,10 @@ EOF
 make_install() {
     local install_dir="$1"
 
-    mkdir -p "$install_dir/data" "$install_dir/lib"
+    mkdir -p "$install_dir/data" "$install_dir/lib" "$install_dir/systemd"
     cp "$TARGET" "$install_dir/ods-uninstall.sh"
     cp "$ROOT_DIR/lib/safe-env.sh" "$install_dir/lib/safe-env.sh"
+    cp "$ROOT_DIR/lib/system-uninstall.sh" "$install_dir/lib/system-uninstall.sh"
     touch "$install_dir/ods-cli"
     touch "$install_dir/docker-compose.base.yml"
     touch "$install_dir/docker-compose.cpu.yml"
@@ -117,6 +118,7 @@ run_uninstall() {
     DOCKER_LOG="${DOCKER_LOG:?}" \
     SUDO_LOG="${SUDO_LOG:?}" \
     SUDO_VALIDATE_EXIT_CODE="${SUDO_VALIDATE_EXIT_CODE:-0}" \
+    ODS_UNINSTALL_SYSTEMD_DIR="$install_dir/systemd" \
         bash "$install_dir/ods-uninstall.sh" --force "$@" >/dev/null
 }
 

@@ -212,16 +212,13 @@ if $NON_INTERACTIVE && ! $KEEP_DATA && [[ "$(id -u)" -ne 0 ]] && command -v sudo
     prepare_sudo_credential || exit 1
 fi
 
-# Retire verified host services before deleting their installation or data.
-if [[ "$(uname -s)" == "Linux" ]]; then
-    if [[ -f "$SCRIPT_DIR/lib/system-uninstall.sh" ]]; then
-        . "$SCRIPT_DIR/lib/system-uninstall.sh"
-        if ! ods_uninstall_system_units "$INSTALL_DIR" "$HOME"; then
-            log_error "System service cleanup failed; installation retained"
-            exit 1
-        fi
-    elif [[ -e /etc/systemd/system/ods-host-agent.service || -e /etc/systemd/system/ods-mdns.service ]]; then
-        log_error "System service uninstall helper is missing; installation retained"
+# Check system-unit custody without stopping a recovery service or removing
+# Pixel. A foreign unit must fail before either independent cleanup begins.
+if [[ "$(uname -s)" == "Linux" && -f "$SCRIPT_DIR/lib/system-uninstall.sh" ]]; then
+    . "$SCRIPT_DIR/lib/system-uninstall.sh"
+    if ! ODS_SYSTEM_UNINSTALL_VALIDATE_ONLY=true \
+        ods_uninstall_system_units "$INSTALL_DIR" "$HOME"; then
+        log_error "System service validation failed; Pixel and installation retained"
         exit 1
     fi
 fi
@@ -243,6 +240,23 @@ if [[ "$(uname -s)" == "Linux" ]]; then
         exit 1
     fi
     unset _ods_pixel_marker
+fi
+
+# A pending Pixel transition must retain its host-agent and other recovery
+# services. Only retire verified system units after Pixel's fail-closed
+# uninstall has succeeded; the old ordering stopped the host agent first and
+# stranded a held model transition when Pixel correctly refused cleanup.
+if [[ "$(uname -s)" == "Linux" ]]; then
+    if [[ -f "$SCRIPT_DIR/lib/system-uninstall.sh" ]]; then
+        . "$SCRIPT_DIR/lib/system-uninstall.sh"
+        if ! ods_uninstall_system_units "$INSTALL_DIR" "$HOME"; then
+            log_error "System service cleanup failed; installation retained"
+            exit 1
+        fi
+    elif [[ -e /etc/systemd/system/ods-host-agent.service || -e /etc/systemd/system/ods-mdns.service ]]; then
+        log_error "System service uninstall helper is missing; installation retained"
+        exit 1
+    fi
 fi
 
 # 1. Stop and remove Docker containers
