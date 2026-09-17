@@ -200,18 +200,36 @@ LLM_RECOVERY=""
 _doctor_check_external_llm() {
     local url="$1" provider="$2" model="$3"
     local health_path
+    local lemonade_key="" probe_ok=false
 
     LLM_URL="$url"
     LLM_PROVIDER="${provider:-external}"
     LLM_MODEL="$model"
+    LLM_RECOVERY=""
+    LLM_LOCAL_WARNING="false"
 
     case "$provider" in
         ollama)     health_path="/api/tags" ;;
         lmstudio)   health_path="/v1/models" ;;
+        lemonade)
+            local api_path="${LEMONADE_API_BASE_PATH:-/api/v1}"
+            api_path="/${api_path#/}"
+            health_path="${api_path%/}/models"
+            lemonade_key="${LEMONADE_API_KEY:-${LEMONADE_ADMIN_API_KEY:-${LITELLM_LEMONADE_API_KEY:-}}}"
+            ;;
         *)          health_path="/v1/models" ;;  # OpenAI-compat fallback
     esac
 
-    if command -v curl >/dev/null 2>&1 && curl -sf --max-time 5 "${url}${health_path}" > /dev/null 2>&1; then
+    if command -v curl >/dev/null 2>&1; then
+        if curl -sf --max-time 5 "${url%/}${health_path}" > /dev/null 2>&1; then
+            probe_ok=true
+        elif [[ "$provider" == lemonade && -n "$lemonade_key" ]] \
+                && curl -sf --max-time 5 -H "Authorization: Bearer ${lemonade_key}" \
+                    "${url%/}${health_path}" > /dev/null 2>&1; then
+            probe_ok=true
+        fi
+    fi
+    if [[ "$probe_ok" == true ]]; then
         LLM_STATUS="ok"
         log_ok "LLM backend: ${provider:-external} (external) — responding"
         log_ok "  Endpoint : $url"
@@ -279,6 +297,19 @@ _doctor_check_llm_backend() {
     if [ -n "$ext_url" ]; then
         # External LLM mode — skip llama-server check
         _doctor_check_external_llm "$ext_url" "$ext_provider" "$ext_model"
+    elif [[ "${LEMONADE_EXTERNAL:-false}" == "true" && ( "$mode" == "lemonade" || "${LLM_BACKEND:-}" == "lemonade" ) ]]; then
+        local lemonade_url="${LEMONADE_BASE_URL:-}"
+        if [[ -n "$lemonade_url" ]]; then
+            _doctor_check_external_llm "$lemonade_url" lemonade "${LEMONADE_MODEL:-}"
+        else
+            LLM_URL=""
+            LLM_PROVIDER="lemonade"
+            LLM_MODEL="${LEMONADE_MODEL:-}"
+            LLM_STATUS="fail"
+            LLM_RECOVERY="set LEMONADE_BASE_URL to the host-reachable Lemonade endpoint"
+            log_fail "LLM backend: lemonade (external) — host endpoint missing"
+            log_info "  Recovery : ${LLM_RECOVERY}"
+        fi
     elif [[ "$mode" == "cloud" ]]; then
         local cloud_url="${LLM_API_URL:-}"
         if [ -n "$cloud_url" ]; then
@@ -326,7 +357,7 @@ _doctor_check_llm_backend() {
             LLM_RECOVERY=""
         fi
     else
-        # Local, hybrid, lemonade modes (or default local) — existing llama-server container check unchanged
+        # Managed local/hybrid runtimes still use the local container check.
         _doctor_check_llama_server
     fi
 }
