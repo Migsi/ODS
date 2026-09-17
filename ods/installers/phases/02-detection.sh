@@ -50,13 +50,9 @@ if [[ "${ODS_MODE:-local}" == "cloud" ]]; then
     GPU_MEMORY_TYPE="none"
     TIER="CLOUD"
     if grep -qi microsoft /proc/version 2>/dev/null; then
-        _wsl_ram_bytes=""
-        if command -v powershell.exe &>/dev/null; then
-            _wsl_ram_bytes=$(powershell.exe -NoProfile -Command \
-                "(Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory" 2>/dev/null | tr -d '\r')
-        fi
-        if [[ -n "$_wsl_ram_bytes" && "$_wsl_ram_bytes" =~ ^[0-9]+$ ]]; then
-            RAM_KB=$((_wsl_ram_bytes / 1024))
+        _wsl_host_kb="$(ods_wsl_host_ram_kb)" || _wsl_host_kb=""
+        if [[ -n "$_wsl_host_kb" ]]; then
+            RAM_KB="$_wsl_host_kb"
         else
             RAM_KB=$(grep MemTotal /proc/meminfo | awk '{print $2}')
         fi
@@ -90,18 +86,7 @@ load_capability_profile || true
 # reserved value only for coarse tier selection; system_ram_min_gb profiles and
 # the persisted SYSTEM_RAM_GB contract describe actual addressable VM memory.
 if grep -qi microsoft /proc/version 2>/dev/null; then
-    _wsl_ram_kb=""
-    if command -v powershell.exe &>/dev/null; then
-        _wsl_ram_bytes=$(powershell.exe -NoProfile -Command \
-            "(Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory" 2>/dev/null | tr -d '\r')
-        if [[ -n "$_wsl_ram_bytes" && "$_wsl_ram_bytes" =~ ^[0-9]+$ ]]; then
-            _wsl_ram_kb=$((_wsl_ram_bytes / 1024))
-        fi
-    fi
-    if [[ -z "$_wsl_ram_kb" ]] && command -v wmic.exe &>/dev/null; then
-        _wsl_ram_kb=$(wmic.exe OS get TotalVisibleMemorySize /value 2>/dev/null \
-            | grep -oE '[0-9]+' | sed -n '1p')
-    fi
+    _wsl_ram_kb="$(ods_wsl_host_ram_kb)" || _wsl_ram_kb=""
     _wsl_vm_kb=$(grep MemTotal /proc/meminfo | awk '{print $2}')
     RAM_KB="$_wsl_vm_kb"
     RAM_GB=$((RAM_KB / 1024 / 1024))
