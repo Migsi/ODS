@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import re
+import time
 from pathlib import Path
 from typing import AsyncIterator, Literal
 from urllib.parse import urlparse
@@ -37,6 +38,8 @@ _DEFAULT_EDGE_URL = "http://pixel-edge:9595"
 _MODEL = "pixel/default"
 _CHAT_STREAM_TIMEOUT_SECONDS = 2040.0
 _CLIENT_DISCONNECT_POLL_SECONDS = 0.25
+_STREAM_KEEPALIVE_SECONDS = 15.0
+_STREAM_KEEPALIVE = b": pixel working\n\n"
 _CLIENT_CANCEL_TIMEOUT_SECONDS = 7.0
 _MAX_KEY_LENGTH = 4096
 _MAX_STATUS_BYTES = 64 * 1024
@@ -710,6 +713,7 @@ async def _retained_chat_stream(request, body, owner):
 
     async def subscribe():
         after = -1
+        last_sent = time.monotonic()
         while True:
             # Snapshot terminal state before yielding any bytes. Sending a chunk
             # can suspend this subscriber while the producer commits its tail.
@@ -718,10 +722,17 @@ async def _retained_chat_stream(request, body, owner):
             for chunk in store.chunks(identity, after):
                 after = chunk["sequence"]
                 yield chunk["data"]
+                last_sent = time.monotonic()
             if row is None or row["state"] != "active":
                 return
             if await request.is_disconnected():
                 return
+            if time.monotonic() - last_sent >= _STREAM_KEEPALIVE_SECONDS:
+                # A CPU-backed local model can spend minutes in prompt prefill.
+                # Keep the subscriber alive without inventing an answer or
+                # persisting transport-only comments in the result receipt.
+                yield _STREAM_KEEPALIVE
+                last_sent = time.monotonic()
             # Subscriber disposal never cancels the independent bounded producer.
             await asyncio.sleep(_CLIENT_DISCONNECT_POLL_SECONDS)
 
@@ -854,6 +865,7 @@ async def _iter_upstream_chunks(
     """Yield upstream bytes while promptly observing a silent client exit."""
     iterator = upstream.aiter_bytes().__aiter__()
     pending: asyncio.Task[bytes] | None = None
+    last_sent = time.monotonic()
     try:
         while True:
             pending = asyncio.create_task(anext(iterator))
@@ -866,12 +878,16 @@ async def _iter_upstream_chunks(
                     break
                 if await request.is_disconnected():
                     raise _ClientDisconnected
+                if time.monotonic() - last_sent >= _STREAM_KEEPALIVE_SECONDS:
+                    yield _STREAM_KEEPALIVE
+                    last_sent = time.monotonic()
             try:
                 chunk = pending.result()
             except StopAsyncIteration:
                 return
             pending = None
             yield chunk
+            last_sent = time.monotonic()
     finally:
         if pending is not None and not pending.done():
             pending.cancel()

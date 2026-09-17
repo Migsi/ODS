@@ -566,6 +566,57 @@ async def test_chat_forwards_exact_body_and_narrow_edge_key_only():
 
 
 @pytest.mark.asyncio
+async def test_chat_keeps_silent_local_inference_stream_alive_without_faking_answer(monkeypatch):
+    first = b'data: {"choices":[{"delta":{"content":"first"}}]}\n\n'
+    done = b"data: [DONE]\n\n"
+
+    class SlowResponse(FakeResponse):
+        async def aiter_bytes(self):
+            yield first
+            await asyncio.sleep(0.08)
+            yield done
+
+    monkeypatch.setattr(pixel, "_STREAM_KEEPALIVE_SECONDS", 0.02)
+    monkeypatch.setattr(pixel, "_CLIENT_DISCONNECT_POLL_SECONDS", 0.005)
+    body = pixel.ChatStreamRequest.model_validate(
+        {"chat_id": "slow_cpu", "messages": [{"role": "user", "content": "hello"}]}
+    )
+    upstream = SlowResponse(content_type="text/event-stream")
+    with patch.object(pixel.httpx, "AsyncClient", return_value=FakeClient(upstream)):
+        response = await pixel.pixel_chat_stream(ConnectedRequest(), body)
+        streamed = await stream_body(response)
+
+    assert streamed.startswith(first)
+    assert streamed.endswith(done)
+    assert pixel._STREAM_KEEPALIVE in streamed[len(first):-len(done)]
+    assert streamed.count(b"data: [DONE]") == 1
+    assert pixel_runtime_state._local_pixel_stream_active() is False
+
+
+@pytest.mark.asyncio
+async def test_chat_keepalive_before_first_upstream_byte_is_only_a_comment(monkeypatch):
+    class SlowFirstResponse(FakeResponse):
+        async def aiter_bytes(self):
+            await asyncio.sleep(0.08)
+            yield b'data: {"choices":[{"delta":{"content":"ready"}}]}\n\n'
+            yield b'data: [DONE]\n\n'
+
+    monkeypatch.setattr(pixel, "_STREAM_KEEPALIVE_SECONDS", 0.02)
+    monkeypatch.setattr(pixel, "_CLIENT_DISCONNECT_POLL_SECONDS", 0.005)
+    body = pixel.ChatStreamRequest.model_validate(
+        {"chat_id": "slow_first_byte", "messages": [{"role": "user", "content": "hello"}]}
+    )
+    upstream = SlowFirstResponse(content_type="text/event-stream")
+    with patch.object(pixel.httpx, "AsyncClient", return_value=FakeClient(upstream)):
+        response = await pixel.pixel_chat_stream(ConnectedRequest(), body)
+        streamed = await stream_body(response)
+
+    assert streamed.startswith(pixel._STREAM_KEEPALIVE)
+    assert b'ready' in streamed
+    assert streamed.endswith(b'data: [DONE]\n\n')
+
+
+@pytest.mark.asyncio
 async def test_chat_rejects_before_opening_edge_when_stream_capacity_is_full(monkeypatch):
     body = pixel.ChatStreamRequest.model_validate(
         {"chat_id": "capacity", "messages": [{"role": "user", "content": "hello"}]}

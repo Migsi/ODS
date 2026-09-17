@@ -53,3 +53,37 @@ def test_retained_stream_drains_tail_committed_during_send(store, monkeypatch, t
         assert await stream_body(replay) == retained
 
     asyncio.run(run())
+
+
+def test_retained_subscriber_keepalive_is_not_part_of_durable_reply(store, monkeypatch):
+    async def run():
+        first = b'data: {"choices":[{"delta":{"content":"First "}}]}\n\n'
+        last = b'data: {"choices":[{"delta":{"content":"last"}}]}\n\n'
+
+        class SlowUpstream(FakeResponse):
+            async def aiter_bytes(self):
+                yield first
+                await asyncio.sleep(0.08)
+                yield last
+                yield b'data: [DONE]\n\n'
+
+        monkeypatch.setattr(pixel, '_STREAM_KEEPALIVE_SECONDS', 0.02)
+        monkeypatch.setattr(pixel, '_CLIENT_DISCONNECT_POLL_SECONDS', 0.005)
+        monkeypatch.setattr(
+            pixel.httpx, 'AsyncClient',
+            lambda **kw: FakeClient(SlowUpstream(content_type='text/event-stream')),
+        )
+        response = await pixel.pixel_chat_stream(ConnectedRequest(), body(), OWNER)
+        streamed = await stream_body(response)
+        retained = b''.join(row['data'] for row in store.chunks(IDENTITY))
+
+        assert first in streamed and last in streamed
+        assert pixel._STREAM_KEEPALIVE in streamed
+        assert pixel._STREAM_KEEPALIVE not in retained
+        assert b'First ' in retained and b'last' in retained
+        assert retained.count(b'data: [DONE]') == 1
+        assert store.get(IDENTITY)['state'] == 'complete'
+        replay = await pixel.pixel_chat_stream(ConnectedRequest(), body(), OWNER)
+        assert await stream_body(replay) == retained
+
+    asyncio.run(run())
