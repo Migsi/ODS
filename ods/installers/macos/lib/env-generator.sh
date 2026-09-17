@@ -421,9 +421,9 @@ generate_ods_env() {
     opencode_password=$(new_secure_base64 16)
     local searxng_secret
     searxng_secret=$(new_secure_hex 32)
-    # Langfuse (LLM Observability)
-    # NOTE: macOS env-generator always regenerates secrets (no merge logic).
-    # If reinstalling with existing Langfuse data, run: rm -rf data/langfuse/
+    # Langfuse (LLM Observability). A forced reinstall may regenerate other
+    # secrets, but data-bound Langfuse credentials must stay paired with its
+    # persisted PostgreSQL, ClickHouse, Redis, and MinIO state.
     local langfuse_nextauth_secret
     langfuse_nextauth_secret=$(new_secure_hex 32)
     local langfuse_salt
@@ -448,6 +448,32 @@ generate_ods_env() {
     langfuse_init_project_id=$(new_secure_hex 16)
     local langfuse_init_user_password
     langfuse_init_user_password=$(new_secure_hex 16)
+    if [[ -f "${install_dir}/data/langfuse/postgres/PG_VERSION" ]]; then
+        local langfuse_key
+        for langfuse_key in \
+            LANGFUSE_NEXTAUTH_SECRET LANGFUSE_SALT LANGFUSE_ENCRYPTION_KEY \
+            LANGFUSE_DB_PASSWORD LANGFUSE_CLICKHOUSE_PASSWORD LANGFUSE_REDIS_PASSWORD \
+            LANGFUSE_MINIO_ACCESS_KEY LANGFUSE_MINIO_SECRET_KEY \
+            LANGFUSE_PROJECT_PUBLIC_KEY LANGFUSE_PROJECT_SECRET_KEY \
+            LANGFUSE_INIT_PROJECT_ID LANGFUSE_INIT_USER_PASSWORD; do
+            if [[ -z "$(read_env_value "$env_path" "$langfuse_key")" ]]; then
+                printf 'Existing Langfuse database requires %s in the previous .env; refusing to rotate persisted credentials.\n' "$langfuse_key" >&2
+                return 1
+            fi
+        done
+        langfuse_nextauth_secret=$(read_env_value "$env_path" LANGFUSE_NEXTAUTH_SECRET)
+        langfuse_salt=$(read_env_value "$env_path" LANGFUSE_SALT)
+        langfuse_encryption_key=$(read_env_value "$env_path" LANGFUSE_ENCRYPTION_KEY)
+        langfuse_db_password=$(read_env_value "$env_path" LANGFUSE_DB_PASSWORD)
+        langfuse_clickhouse_password=$(read_env_value "$env_path" LANGFUSE_CLICKHOUSE_PASSWORD)
+        langfuse_redis_password=$(read_env_value "$env_path" LANGFUSE_REDIS_PASSWORD)
+        langfuse_minio_access_key=$(read_env_value "$env_path" LANGFUSE_MINIO_ACCESS_KEY)
+        langfuse_minio_secret_key=$(read_env_value "$env_path" LANGFUSE_MINIO_SECRET_KEY)
+        langfuse_project_public_key=$(read_env_value "$env_path" LANGFUSE_PROJECT_PUBLIC_KEY)
+        langfuse_project_secret_key=$(read_env_value "$env_path" LANGFUSE_PROJECT_SECRET_KEY)
+        langfuse_init_project_id=$(read_env_value "$env_path" LANGFUSE_INIT_PROJECT_ID)
+        langfuse_init_user_password=$(read_env_value "$env_path" LANGFUSE_INIT_USER_PASSWORD)
+    fi
     # Colima's user-mode host.docker.internal route can become unreachable
     # under load. The orchestrator enables its private vmnet address first;
     # bridge loopback-only host services through that scoped interface.
@@ -695,10 +721,7 @@ N8N_WEBHOOK_URL=http://localhost:5678
 TIMEZONE=${tz}
 
 #=== Langfuse (LLM Observability) ===
-# NOTE: this value is only written on first install or --force (the macOS
-# env-generator early-returns when .env already exists). Users who re-run
-# ./install-macos.sh --langfuse on an existing install should instead use
-# post-install: 'ods enable langfuse'.
+# Existing Langfuse state keeps its data-bound secrets even with --force.
 LANGFUSE_ENABLED=${ENABLE_LANGFUSE:-false}
 LANGFUSE_NEXTAUTH_SECRET=${langfuse_nextauth_secret}
 LANGFUSE_SALT=${langfuse_salt}

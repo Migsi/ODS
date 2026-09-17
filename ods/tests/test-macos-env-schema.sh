@@ -95,3 +95,37 @@ for tier in 1 CLOUD; do
     fi
     pass "tier $tier: generated .env validates against .env.schema.json"
 done
+
+# A forced reinstall must not rotate credentials already bound to a persisted
+# Langfuse database. Other install secrets may still rotate under --force.
+langfuse_dir="$TMP_DIR/langfuse-force"
+generate_env 1 "$langfuse_dir"
+mkdir -p "$langfuse_dir/data/langfuse/postgres"
+printf '16\n' > "$langfuse_dir/data/langfuse/postgres/PG_VERSION"
+old_langfuse="$(grep '^LANGFUSE_' "$langfuse_dir/.env")"
+old_dashboard_key="$(grep '^DASHBOARD_API_KEY=' "$langfuse_dir/.env")"
+generate_env 1 "$langfuse_dir"
+[[ "$(grep '^LANGFUSE_' "$langfuse_dir/.env")" == "$old_langfuse" ]] \
+    || fail 'forced reinstall rotated persisted Langfuse credentials'
+[[ "$(grep '^DASHBOARD_API_KEY=' "$langfuse_dir/.env")" != "$old_dashboard_key" ]] \
+    || fail 'forced reinstall did not rotate an unbound install secret'
+pass 'forced reinstall preserves persisted Langfuse credentials'
+
+missing_env_dir="$TMP_DIR/langfuse-without-env"
+mkdir -p "$missing_env_dir/data/langfuse/postgres"
+printf '16\n' > "$missing_env_dir/data/langfuse/postgres/PG_VERSION"
+if (generate_env 1 "$missing_env_dir") >/dev/null 2>&1; then
+    fail 'persisted Langfuse database accepted a missing prior .env'
+fi
+[[ ! -f "$missing_env_dir/.env" ]] \
+    || fail 'missing prior Langfuse credentials still produced a new .env'
+pass 'persisted Langfuse database fails closed without prior credentials'
+
+sed '/^LANGFUSE_DB_PASSWORD=/d' "$langfuse_dir/.env" > "$langfuse_dir/.env.missing-key"
+mv "$langfuse_dir/.env.missing-key" "$langfuse_dir/.env"
+if (generate_env 1 "$langfuse_dir") >/dev/null 2>&1; then
+    fail 'persisted Langfuse database accepted a missing password'
+fi
+[[ "$(grep -c '^LANGFUSE_DB_PASSWORD=' "$langfuse_dir/.env" || true)" -eq 0 ]] \
+    || fail 'rejected Langfuse credentials were overwritten'
+pass 'persisted Langfuse database fails closed on an incomplete prior .env'
