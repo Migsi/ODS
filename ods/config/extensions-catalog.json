@@ -10,7 +10,9 @@
       "gpu_backends": [
         "amd",
         "nvidia",
-        "apple"
+        "apple",
+        "cpu",
+        "none"
       ],
       "compose_file": "compose.yaml",
       "depends_on": [],

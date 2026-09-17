@@ -188,6 +188,26 @@ class TestExtensionsCatalog:
         assert "compat" in ids
         assert "incompat" not in ids
 
+    def test_aider_is_visible_and_installable_on_cpu_fallback(self, test_client, monkeypatch, tmp_path):
+        """The CPU fallback must not hide Aider's zero-VRAM CLI card."""
+        catalog_path = Path(__file__).resolve().parents[4] / "config" / "extensions-catalog.json"
+        catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
+        aider = next(ext for ext in catalog["extensions"] if ext["id"] == "aider")
+        gpu_only = _make_catalog_ext("gpu-only", "GPU only", gpu_backends=["nvidia"])
+        _patch_extensions_config(monkeypatch, [aider, gpu_only], gpu_backend="cpu", tmp_path=tmp_path)
+        library_dir = tmp_path / "lib" / "aider"
+        library_dir.mkdir(parents=True)
+        (library_dir / "compose.yaml").write_text("services:\n  aider:\n    image: test/aider\n")
+
+        with patch("helpers.get_all_services", new_callable=AsyncMock, return_value=[]):
+            resp = test_client.get("/api/extensions/catalog", headers=test_client.auth_headers)
+
+        assert resp.status_code == 200
+        by_id = {ext["id"]: ext for ext in resp.json()["extensions"]}
+        assert by_id["aider"]["status"] == "not_installed"
+        assert by_id["aider"]["installable"] is True
+        assert by_id["gpu-only"]["status"] == "incompatible"
+
     def test_catalog_summary_counts(self, test_client, monkeypatch, tmp_path):
         """Summary counts correctly reflect extension statuses."""
         catalog = [
