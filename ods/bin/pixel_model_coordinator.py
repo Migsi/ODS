@@ -2,6 +2,8 @@
 import hashlib
 import json
 import os
+import stat
+import tempfile
 import time
 from pixel_access_bridge import AccessError, UNIT, atomic_json, private_json, digest, remaining
 from pixel_settings.coordinator import _read, _identity, _valid_identity
@@ -14,7 +16,7 @@ def _sha(value):
 
 def _journal(value):
     required = {"kind", "phase", "token", "transactionId", "edge_revision", "edgeHeld", "beforeSha", "afterSha", "target", "boundary", "mode", "beforeIdentity"}
-    if (type(value) is not dict or set(value) - required - {"outcome"} or not required <= set(value)
+    if (type(value) is not dict or set(value) - required - {"outcome", "markerBeforeSha"} or not required <= set(value)
             or value["kind"] != "model" or value["phase"] not in ("acquiring", "held", "applying", "applied", "restoring", "releasing")
             or any(not checksum(value[key]) for key in ("token", "transactionId", "edge_revision", "beforeSha"))
             or value["afterSha"] is not None and not checksum(value["afterSha"])
@@ -23,6 +25,8 @@ def _journal(value):
             or not _valid_identity(value["beforeIdentity"])
             or type(value["edgeHeld"]) is not bool
             or "outcome" in value and value["outcome"] not in ("commit", "rollback")):
+        raise AccessError("invalid-model-transition")
+    if "markerBeforeSha" in value and not checksum(value["markerBeforeSha"]):
         raise AccessError("invalid-model-transition")
     if value["target"] is not None: target(value["target"])
     return value
@@ -34,6 +38,76 @@ def _write(bridge, journal):
 
 def _config(bridge):
     return _read(bridge.home / ".openclaw/openclaw.json", bridge.owner.pw_uid)
+
+
+def _marker_digest(config):
+    if type(config) is not dict:
+        raise AccessError("model-marker-invalid")
+    canonical = json.dumps(config, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(b"ods-pixel-openclaw-v1\0" + canonical).hexdigest()
+
+
+def _managed_marker(bridge):
+    path = bridge.home / ".config/ods/pixel-managed.json"
+    for directory, unsafe_bits in ((path.parent.parent, 0o022), (path.parent, 0o077)):
+        info = directory.lstat()
+        if (not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode)
+                or info.st_uid != bridge.owner.pw_uid or info.st_mode & unsafe_bits):
+            raise AccessError("model-marker-unsafe")
+    marker = private_json(path, bridge.owner.pw_uid, 65536)
+    if (type(marker) is not dict or marker.get("schema_version") != 2
+            or marker.get("manager") != "ods" or marker.get("state") != "ready"
+            or marker.get("initial_active_state") != "absent"
+            or marker.get("install_dir") != str(bridge.install)
+            or type(marker.get("configuration_sha256")) is not str
+            or not checksum(marker["configuration_sha256"])):
+        raise AccessError("model-marker-invalid")
+    return path, marker
+
+
+def _bind_managed_marker(bridge, journal, expected_sha):
+    before = private_json(bridge.state / "model-before.json", 0, 8 * 1024 * 1024)
+    prior = _marker_digest(before)
+    # Pre-upgrade journals did not carry markerBeforeSha. Their root-owned
+    # model-before snapshot and the still-bound owner marker can prove the
+    # same prior configuration without silently adopting unrelated drift.
+    if prior != journal.get("markerBeforeSha", prior):
+        raise AccessError("model-before-changed")
+    config, config_sha = _config(bridge)
+    if config_sha != expected_sha:
+        raise AccessError("model-config-changed")
+    path, marker = _managed_marker(bridge)
+    current = _marker_digest(config)
+    if marker["configuration_sha256"] == current:
+        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try: os.fsync(directory)
+        finally: os.close(directory)
+        return  # A retry after the marker rename is idempotent.
+    if marker["configuration_sha256"] != prior:
+        raise AccessError("model-marker-drifted")
+    original = path.lstat()
+    marker["configuration_sha256"] = current
+    fd, temporary = tempfile.mkstemp(prefix=".pixel-managed.", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+            if os.geteuid() != bridge.owner.pw_uid or os.getegid() != bridge.owner.pw_gid:
+                os.fchown(handle.fileno(), bridge.owner.pw_uid, bridge.owner.pw_gid)
+            os.fchmod(handle.fileno(), 0o600)
+            json.dump(marker, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        observed = path.lstat()
+        if ((observed.st_dev, observed.st_ino, observed.st_mtime_ns, observed.st_size)
+                != (original.st_dev, original.st_ino, original.st_mtime_ns, original.st_size)):
+            raise AccessError("model-marker-drifted")
+        os.replace(temporary, path)
+        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try: os.fsync(directory)
+        finally: os.close(directory)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
 
 
 def _readback(bridge, journal=None):
@@ -193,9 +267,13 @@ def control(bridge, operation, request=None):
             if access["busy"]: raise AccessError("runtime-busy")
             if access["configured_mode"] not in ("sandboxed", "full-access"): raise AccessError("model-access-mode-unknown")
             config, config_sha = _config(bridge)
+            _, marker = _managed_marker(bridge)
+            if marker["configuration_sha256"] != _marker_digest(config):
+                raise AccessError("model-marker-drifted")
             journal = dict(kind="model", phase="acquiring", token=os.urandom(32).hex(), transactionId=request["transactionId"],
                            edge_revision=access["_edge"]["revision"], edgeHeld=False, beforeSha=config_sha, afterSha=None, target=None,
-                           boundary=bridge.unit_boundary(), mode=access["configured_mode"], beforeIdentity=_identity(bridge))
+                           boundary=bridge.unit_boundary(), mode=access["configured_mode"], beforeIdentity=_identity(bridge),
+                           markerBeforeSha=marker["configuration_sha256"])
             atomic_json(bridge.state / "model-before.json", config)
             _write(bridge, journal)
         _hold(bridge, journal)
@@ -246,6 +324,7 @@ def control(bridge, operation, request=None):
                     "config_sha256": expected_sha, "boundary": journal["boundary"]})
         _verify(bridge, journal, expected_sha)
         if owner["pending"]: worker("model-finish", model_outcome=outcome)
+        _bind_managed_marker(bridge, journal, expected_sha)
         journal.update(phase="releasing", outcome=outcome); _write(bridge, journal)
         atomic_json(bridge.state / "model-route-completed.json", {"transactionId": journal["transactionId"], "outcome": outcome, "configSha256": expected_sha})
         bridge.edge("release", journal["token"], journal["edge_revision"])
