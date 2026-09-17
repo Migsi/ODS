@@ -2998,6 +2998,12 @@ _ods_pixel_runtime_model_identity() {
     if [[ -n "${EXTERNAL_LLM_URL:-}" ]]; then
         model="${EXTERNAL_LLM_MODEL:-}"
         [[ -n "$model" ]] || return 1
+    elif [[ "${LEMONADE_EXTERNAL:-false}" == true ]]; then
+        # WSL can attach to a Windows-hosted Lemonade server while its Linux
+        # hardware detector correctly reports CPU. Bind Pixel to the served
+        # model, not the stale GGUF selected before the external route.
+        model="${LEMONADE_MODEL:-}"
+        [[ -n "$model" ]] || return 1
     elif [[ "${GPU_BACKEND:-}" == amd \
         && "${LLM_BACKEND:-}" == lemonade \
         && "${AMD_INFERENCE_RUNTIME:-}" == lemonade ]]; then
