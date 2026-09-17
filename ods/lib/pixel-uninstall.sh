@@ -241,10 +241,20 @@ state_limits = {
     "provider-verified.json": 512 * 1024,
     "provider-service-environment.json": 1024 * 1024,
 }
+# A hard stop between mkstemp and os.replace can leave an incomplete
+# root-owned bridge write behind. It is not a receipt or pending transaction,
+# but must be recognized narrowly so it cannot strand an otherwise safe
+# uninstall. Python tempfile uses eight [a-z0-9_] characters here.
+abandoned_state_temp = re.compile(r"\.transition-[a-z0-9_]{8}\Z")
 provider_managed = None
 if present(state_root):
     directory(state_root, root_uid, root_gid, exact_mode=0o700)
     for child in state_root.iterdir():
+        if abandoned_state_temp.fullmatch(child.name):
+            info = regular(child, root_uid, root_gid, 8 * 1024 * 1024, private=True)
+            if stat.S_IMODE(info.st_mode) != 0o600:
+                raise SystemExit(f"unsafe managed Pixel access temp file: {child}")
+            continue
         if child.name not in state_limits:
             raise SystemExit(f"unexpected Pixel access state: {child.name}")
         regular(child, root_uid, root_gid, state_limits[child.name], private=True)
