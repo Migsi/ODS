@@ -353,6 +353,14 @@ def _strip_llm_api_suffix(base_url: str) -> str:
 
 
 def _configured_llm_base_url(host: str, port: int) -> str:
+    # LiteLLM's LLM_API_URL is an alias gateway, not the physical Lemonade
+    # runtime. Model identity and readiness probes must follow the same
+    # backend endpoint as the installed host-inference route.
+    if LLM_BACKEND == "lemonade":
+        for key in ("LEMONADE_CONTAINER_BASE_URL", "LEMONADE_BASE_URL"):
+            value = read_env_value(key, INSTALL_DIR)
+            if value:
+                return _strip_llm_api_suffix(value)
     for key in ("LLM_URL", "LLM_API_URL", "OLLAMA_URL"):
         value = read_env_value(key, INSTALL_DIR)
         if value:

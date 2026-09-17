@@ -1957,6 +1957,26 @@ def test_api_models_falls_back_to_loaded_model_probe(test_client, monkeypatch, t
     assert payload["models"][0]["performance"]["source"] == "measured_local"
 
 
+def test_lemonade_model_probe_uses_physical_backend_not_litellm_alias(monkeypatch, tmp_path):
+    import routers.models as models_router
+
+    values = {
+        "LLM_API_URL": "http://litellm:4000",
+        "LEMONADE_CONTAINER_BASE_URL": "http://192.168.0.166:8080",
+        "LEMONADE_BASE_URL": "http://192.168.0.167:8080",
+    }
+    monkeypatch.setattr(models_router, "INSTALL_DIR", str(tmp_path))
+    monkeypatch.setattr(models_router, "read_env_value", lambda key, _root: values.get(key))
+    monkeypatch.setattr(models_router, "LLM_BACKEND", "lemonade")
+
+    assert models_router._configured_llm_base_url("llama-server", 8080) == "http://192.168.0.166:8080"
+    values.pop("LEMONADE_CONTAINER_BASE_URL")
+    assert models_router._configured_llm_base_url("llama-server", 8080) == "http://192.168.0.167:8080"
+
+    monkeypatch.setattr(models_router, "LLM_BACKEND", "llama-server")
+    assert models_router._configured_llm_base_url("llama-server", 8080) == "http://litellm:4000"
+
+
 def test_api_models_marks_installer_configured_model(test_client, monkeypatch, tmp_path):
     models_router, install_dir, _data_dir = _patch_model_router_paths(monkeypatch, tmp_path)
     _write_model_library(install_dir, [{
