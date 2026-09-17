@@ -779,12 +779,12 @@
         "perplexica": {
           "status": "unsupported_until_revalidated",
           "label": "Perplexica revalidation required",
-          "reason": "Earlier fleet runs found Perplexica nonce failures with this model on Tower2 and M5. A 2026-09-15 Tower3 public-beta run again returned an apologetic Perplexica response without the verification phrase, while ODS Talk, LiteLLM, Open WebUI, and Pixel routed and answered on the selected Granite model. Perplexica answered the same harmless payload after Tower3 recovered its Qwen3.5-27B model. Keep Granite 3.2 2B out of all-app release coverage on these hosts until Perplexica passes a real revalidation.",
-          "evidence": "fleet-test/runs/2026-07-23T21-41-59Z-release-product-cf6dffb8e8bb-harness-47eedd6c0b40-hosts-six-scope-6cycle-switchboard/model-ui/cycle-005/tower2; fleet-test/runs/2026-07-23T21-41-59Z-release-product-cf6dffb8e8bb-harness-47eedd6c0b40-hosts-six-scope-6cycle-switchboard/model-ui/cycle-005/m5-mbp; ods-public-beta-fleet-green-20260911/release-four-host-2f985137-abb61b2-r46/model-ui/cycle-006/tower3/model-ui.json; Tower3 Perplexica live comparator 2026-09-15T16:59Z",
-          "recordedAt": "2026-09-15T16:59:00Z",
-          "productSha": "2f985137b9680151395d59d0498a7fa7e169ff2e",
-          "harnessSha": "abb61b2586cb347e0a163d4f8feb2acf74e9cee0",
-          "hostScope": ["tower2", "m5-mbp", "tower3"]
+          "reason": "Fleet runs on Tower2, M5, Tower3, and Tower1 found Perplexica nonce failures with this model. On the 2026-09-17 Tower1 public-beta candidate, Perplexica returned an apologetic response without the verification phrase while Pixel, OpenCode, LiteLLM, Open WebUI, and ODS Talk answered on the selected Granite model. A Tower3 comparator answered the same harmless payload after restoring Qwen3.5-27B. Keep Granite 3.2 2B out of all-app release coverage on these hosts until Perplexica passes a real revalidation.",
+          "evidence": "fleet-test/runs/2026-07-23T21-41-59Z-release-product-cf6dffb8e8bb-harness-47eedd6c0b40-hosts-six-scope-6cycle-switchboard/model-ui/cycle-005/tower2; fleet-test/runs/2026-07-23T21-41-59Z-release-product-cf6dffb8e8bb-harness-47eedd6c0b40-hosts-six-scope-6cycle-switchboard/model-ui/cycle-005/m5-mbp; ods-public-beta-fleet-green-20260911/release-four-host-2f985137-abb61b2-r46/model-ui/cycle-006/tower3/model-ui.json; Tower3 Perplexica live comparator 2026-09-15T16:59Z; ods-public-beta-fleet-green-20260911/release-tower1-pr5579-afe7408-ff56b22-r208/model-ui/cycle-006/tower1/model-ui.json",
+          "recordedAt": "2026-09-17T01:19:42Z",
+          "productSha": "afe74085e572c167f44563efc68476f1a910e179",
+          "harnessSha": "ff56b224a69d8b955a23fd24af8407c9ccf6b4e8",
+          "hostScope": ["tower2", "m5-mbp", "tower3", "tower1"]
         },
         "hermes_talk": {
           "status": "unsupported_until_revalidated",
