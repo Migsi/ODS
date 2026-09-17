@@ -14,7 +14,7 @@ import os
 import re
 import time
 from pathlib import Path
-from typing import AsyncIterator, Literal
+from typing import AsyncIterator, Callable, Literal
 from urllib.parse import urlparse
 
 import httpx
@@ -861,6 +861,7 @@ def _edge_chat_body(body, messages):
 async def _iter_upstream_chunks(
     upstream: httpx.Response,
     request: Request,
+    can_emit_keepalive: Callable[[], bool],
 ) -> AsyncIterator[bytes]:
     """Yield upstream bytes while promptly observing a silent client exit."""
     iterator = upstream.aiter_bytes().__aiter__()
@@ -878,7 +879,10 @@ async def _iter_upstream_chunks(
                     break
                 if await request.is_disconnected():
                     raise _ClientDisconnected
-                if time.monotonic() - last_sent >= _STREAM_KEEPALIVE_SECONDS:
+                # A comment is safe only between complete SSE lines. The
+                # caller may be holding an upstream fragment without a newline;
+                # injecting a comment there would corrupt that data line.
+                if can_emit_keepalive() and time.monotonic() - last_sent >= _STREAM_KEEPALIVE_SECONDS:
                     yield _STREAM_KEEPALIVE
                     last_sent = time.monotonic()
             try:
@@ -993,7 +997,7 @@ async def pixel_chat_stream(request: Request, body: ChatStreamRequest, owner: st
         try:
             async with async_timeout(_CHAT_STREAM_TIMEOUT_SECONDS):
                 buffered = bytearray()
-                async for chunk in _iter_upstream_chunks(upstream, request):
+                async for chunk in _iter_upstream_chunks(upstream, request, lambda: not buffered):
                     buffered.extend(chunk)
                     while True:
                         newline = buffered.find(b"\n")

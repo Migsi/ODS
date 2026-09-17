@@ -617,6 +617,35 @@ async def test_chat_keepalive_before_first_upstream_byte_is_only_a_comment(monke
 
 
 @pytest.mark.asyncio
+async def test_chat_keepalive_never_splits_an_upstream_sse_line(monkeypatch):
+    first = b'data: {"choices":[{"delta":{"content":"par'
+    last = b'tial"}}]}\n\n'
+    done = b'data: [DONE]\n\n'
+
+    class FragmentedResponse(FakeResponse):
+        async def aiter_bytes(self):
+            yield first
+            await asyncio.sleep(0.08)
+            yield last
+            await asyncio.sleep(0.08)
+            yield done
+
+    monkeypatch.setattr(pixel, "_STREAM_KEEPALIVE_SECONDS", 0.02)
+    monkeypatch.setattr(pixel, "_CLIENT_DISCONNECT_POLL_SECONDS", 0.005)
+    body = pixel.ChatStreamRequest.model_validate(
+        {"chat_id": "fragmented_cpu", "messages": [{"role": "user", "content": "hello"}]}
+    )
+    upstream = FragmentedResponse(content_type="text/event-stream")
+    with patch.object(pixel.httpx, "AsyncClient", return_value=FakeClient(upstream)):
+        response = await pixel.pixel_chat_stream(ConnectedRequest(), body)
+        streamed = await stream_body(response)
+
+    assert streamed.startswith(first + last)
+    assert pixel._STREAM_KEEPALIVE in streamed[len(first + last):-len(done)]
+    assert streamed.endswith(done)
+
+
+@pytest.mark.asyncio
 async def test_chat_rejects_before_opening_edge_when_stream_capacity_is_full(monkeypatch):
     body = pixel.ChatStreamRequest.model_validate(
         {"chat_id": "capacity", "messages": [{"role": "user", "content": "hello"}]}
