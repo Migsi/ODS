@@ -138,11 +138,14 @@ def test_exact_normal_repo_fixture():
 
         canonical = _build_exact_repo_fixture(site)
 
-        # Pre-snapshot source tree snapshot for mutation check
+        # Compare the user's source files, not Git's own transient maintenance
+        # locks. Git may remove .git/objects/maintenance.lock after git commit
+        # returns, independently of publication.
         source_files_pre = {}
         for f in site.rglob("*"):
-            if f.is_file():
-                source_files_pre[str(f.relative_to(site))] = f.read_bytes()
+            rel = f.relative_to(site)
+            if f.is_file() and ".git" not in rel.parts:
+                source_files_pre[str(rel)] = f.read_bytes()
 
         # Publish — must succeed with the revised patch
         result = MODULE.publish_snapshot(workspace, previews, "gitea-demo", os.getuid())
