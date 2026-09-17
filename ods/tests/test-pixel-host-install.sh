@@ -2287,7 +2287,9 @@ import pathlib,sys
 text=pathlib.Path(sys.argv[1]).read_text()
 access_bridge=pathlib.Path(sys.argv[2]).read_text()
 installer=text[text.index("ods_pixel_install_default_agent() {"):]
-assert "local -a pixel_prerequisites=(litellm dashboard-api pixel-edge pixel-model-relay)" in installer
+assert "local -a pixel_prerequisites=(litellm dashboard-api pixel-edge pixel-model-relay searxng)" in installer
+assert "pixel_prerequisites+=(searxng)" not in installer
+assert installer.index("\"ODS local search\"") < installer.index("\"$pixel_root/pixel\" plan")
 assert "ods_pixel_run_as_owner \"$owner\" \"$home\" curl" in text
 assert "_ods_pixel_wait_ingress \"$owner\" \"$home\"" in installer
 assert installer.index("_ods_pixel_wait_ingress \"$owner\" \"$home\"") < installer.index("_ods_pixel_mark_ready \"$owner\" \"$home\"")

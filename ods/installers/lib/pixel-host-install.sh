@@ -4597,7 +4597,10 @@ ods_pixel_install_default_agent() {
     # transition gate. Start the edge before the host ingress is installed;
     # its transition endpoint is independent of upstream chat readiness, and
     # the final access reproof below still runs only after ingress is healthy.
-    local -a pixel_prerequisites=(litellm dashboard-api pixel-edge pixel-model-relay)
+    # Pixel's plan preflight probes SearXNG even when its agentic web-search
+    # provider is Parallel. ODS also shares SearXNG with OWUI/Perplexica, so
+    # a clean install must start it before Pixel plans its host deployment.
+    local -a pixel_prerequisites=(litellm dashboard-api pixel-edge pixel-model-relay searxng)
     owner="${PIXEL_SERVICE_USER:-$(ods_pixel_install_owner)}" || return 1
     home="$(ods_pixel_owner_home "$owner")" || return 1
     pixel_gateway_port="$(_ods_pixel_gateway_port)" || {
@@ -4677,8 +4680,7 @@ ods_pixel_install_default_agent() {
         "$plugin_root/host/native_search.py" --answers-file "$answers" \
         --provider "${PIXEL_WEB_SEARCH_PROVIDER:-}")" || return 1
     case "$web_search_provider" in
-        searxng) pixel_prerequisites+=(searxng) ;;
-        parallel-free) ;;
+        searxng|parallel-free) ;;
         *) ai_bad "Pixel returned an invalid native search provider."; return 1 ;;
     esac
     ai "Starting the ODS model gateway, control API, and search prerequisites for Pixel review..."
@@ -4697,9 +4699,9 @@ ods_pixel_install_default_agent() {
     fi
     _ods_pixel_wait_model_gateway "ODS Pixel model relay" "${PIXEL_MODEL_RELAY_PORT:-4006}" \
         "${PIXEL_MODEL_RELAY_KEY:-}" "$gateway_alias" 180
-    if [[ "$web_search_provider" == searxng ]]; then
-        _ods_pixel_wait_http "ODS local search" "http://127.0.0.1:${SEARXNG_PORT:-8888}/search?q=pixel-preflight&format=json" 90 '.results | type == "array"'
-    fi
+    _ods_pixel_wait_http "ODS local search" \
+        "http://127.0.0.1:${SEARXNG_PORT:-8888}/search?q=pixel-preflight&format=json" \
+        90 '.results | type == "array"'
     _ods_pixel_wait_http "ODS control API" \
         "http://127.0.0.1:${DASHBOARD_API_PORT:-3002}/health" 90
 
