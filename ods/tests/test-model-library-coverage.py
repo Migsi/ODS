@@ -477,6 +477,20 @@ def test_granite32_2b_is_direct_chat_only_after_windows_talk_timeout():
     assert not _agent_viable_for_release(model, host="windows-laptop")
 
 
+def test_granite4_h_tiny_opencode_warning_is_scoped_to_tower1():
+    catalog = json.loads(CATALOG.read_text(encoding="utf-8"))
+    by_id = {model["id"]: model for model in catalog["models"]}
+
+    model = by_id["granite4.0-h-tiny-q4"]
+    opencode = model["app_compatibility"]["opencode"]
+
+    assert opencode["status"] == "unsupported_until_revalidated"
+    assert opencode["hostScope"] == ["tower1"]
+    assert "cycle-002/tower1/model-ui.json" in opencode["evidence"]
+    assert not _agent_viable_for_release(model, host="tower1")
+    assert _agent_viable_for_release(model, host="tower3")
+
+
 def test_granite4_h_350m_is_not_agent_viable_after_talk_probe_failure():
     catalog = json.loads(CATALOG.read_text(encoding="utf-8"))
     by_id = {model["id"]: model for model in catalog["models"]}

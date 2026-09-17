@@ -356,6 +356,19 @@
       "tokens_per_sec_estimate": 80,
       "llm_model_name": "granite-4.0-h-tiny",
       "llama_server_image": null,
+      "app_compatibility": {
+        "opencode": {
+          "status": "unsupported_until_revalidated",
+          "label": "OpenCode revalidation required",
+          "reason": "In the 2026-09-17 Tower1 exact-head release cycle, OpenCode's build agent issued a read tool call against a fabricated path instead of returning its requested verification phrase on Granite 4.0 H-Tiny. The same installed OpenCode path answered on the baseline and neighboring Granite 4.0 models; Pixel, ODS Talk, LiteLLM, Open WebUI, and Perplexica passed on H-Tiny with exact model-route evidence. Keep this model out of Tower1 all-app release coverage until OpenCode behavior is revalidated.",
+          "evidence": "ods-public-beta-fleet-green-20260911/release-tower1-pr5579-471bc50-135daf6-r216/model-ui/cycle-002/tower1/model-ui.json",
+          "recordedAt": "2026-09-17T08:46:03Z",
+          "productSha": "471bc50df3b3a127aa83ac208c7220e19493d8f6",
+          "harnessSha": "135daf604399fe757e8364d3721767a22bafe541",
+          "hostScope": ["tower1"],
+          "expiresAt": "2026-10-17T00:00:00Z"
+        }
+      },
       "install_recommendation": false
     },
     {
@@ -784,7 +797,8 @@
           "recordedAt": "2026-09-17T01:19:42Z",
           "productSha": "afe74085e572c167f44563efc68476f1a910e179",
           "harnessSha": "ff56b224a69d8b955a23fd24af8407c9ccf6b4e8",
-          "hostScope": ["tower2", "m5-mbp", "tower3", "tower1"]
+          "hostScope": ["tower2", "m5-mbp", "tower3", "tower1"],
+          "expiresAt": "2026-10-17T00:00:00Z"
         },
         "hermes_talk": {
           "status": "unsupported_until_revalidated",
