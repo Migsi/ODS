@@ -4518,7 +4518,10 @@ class TestModelActivationOwnership:
 
         assert handler.response_code == 200
         response = handler.parse_response()
-        assert response == {"status": "idle", "activeAgentViable": False}
+        assert response == {
+            "status": "idle", "activeAgentViable": False,
+            "modelTransactionPending": False,
+        }
         assert "runtimeModelId" not in response
         assert "capabilities" not in response
 
@@ -4547,6 +4550,7 @@ class TestModelActivationOwnership:
             "status": "idle",
             "activeAgentViable": True,
             "activeRuntime": {"source": "remote-provider", **runtime},
+            "modelTransactionPending": False,
         }
 
     def test_model_status_applies_new_pixel_specific_revocation(
@@ -4659,7 +4663,7 @@ class TestModelActivationOwnership:
         assert _mod._switchboard_state_needs_current_env_verification(state_path) is True
         payload = {"status": "idle"}
         _mod._project_switchboard_agent_viability(payload)
-        assert payload == {"status": "idle"}
+        assert payload == {"status": "idle", "modelTransactionPending": False}
 
     @pytest.mark.parametrize("agent_viable", [True, False])
     @pytest.mark.parametrize("backend", ["llama-server", "lemonade"])
@@ -7328,7 +7332,9 @@ class TestModelDownloadFileIntegrity:
         _mod.AgentHandler._handle_model_status(handler)
 
         assert handler.response_code == 200
-        assert handler.parse_response() == {"status": "idle"}
+        assert handler.parse_response() == {
+            "status": "idle", "modelTransactionPending": False,
+        }
         assert readiness_calls == []
         assert scheduled == ["model-status"]
         doc = json.loads(state_path.read_text(encoding="utf-8"))
@@ -7368,7 +7374,9 @@ class TestModelDownloadFileIntegrity:
         _mod.AgentHandler._handle_model_status(handler)
 
         assert handler.response_code == 200
-        assert handler.parse_response() == {"status": "idle"}
+        assert handler.parse_response() == {
+            "status": "idle", "modelTransactionPending": False,
+        }
         assert scheduled == ["model-status"]
 
     def test_empty_finished_download_is_failed_not_complete(self, tmp_path, monkeypatch):
