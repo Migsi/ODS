@@ -66,8 +66,8 @@ curl -X POST http://localhost:3002/api/workflows/my-workflow-id/enable
 
 | Path (host) | Mounted at (container) | Contents |
 |-------------|------------------------|----------|
-| `data/n8n/` | `/home/node/.n8n` | Workflows, credentials, execution history |
-| `config/n8n/` | `/home/node/workflows` | Pre-built workflow templates |
+| `data/n8n/` | `/tmp/.n8n` | Workflows, credentials, execution history (persistent bind mount) |
+| `config/n8n/` | `/tmp/workflows` | Pre-built workflow templates |
 
 ## LLM Integration
 

@@ -485,7 +485,7 @@ SQLite databases are in Docker volumes:
 
 Access via:
 ```bash
-docker compose exec n8n sqlite3 /home/node/.n8n/database.sqlite
+docker compose exec n8n sqlite3 /tmp/.n8n/database.sqlite
 ```
 
 ### Can I use OpenAI/Anthropic APIs?
