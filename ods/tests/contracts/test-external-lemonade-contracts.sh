@@ -257,18 +257,19 @@ if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; 
   for compose_file in "${compose_files[@]}"; do
     [[ -n "$compose_file" ]] && compose_args+=(-f "$compose_file")
   done
-  WEBUI_SECRET=test \
-  HERMES_DASHBOARD_SESSION_TOKEN=test-hermes-dashboard-session-token \
-  LITELLM_KEY=test \
-  OPENCLAW_TOKEN=test \
-  N8N_USER=test@example.local \
-  N8N_PASS=test \
-  SEARXNG_SECRET=test \
-  ODS_SESSION_SECRET=test \
-  LEMONADE_EXTERNAL=true \
-  ODS_MODE=lemonade \
-  GPU_BACKEND=amd \
-  external_services="$(docker compose "${compose_args[@]}" config --services)" \
+  external_services="$(env \
+    WEBUI_SECRET=test \
+    HERMES_DASHBOARD_SESSION_TOKEN=test-hermes-dashboard-session-token \
+    LITELLM_KEY=test \
+    OPENCLAW_TOKEN=test \
+    N8N_USER=test@example.local \
+    N8N_PASS=test \
+    SEARXNG_SECRET=test \
+    ODS_SESSION_SECRET=test \
+    LEMONADE_EXTERNAL=true \
+    ODS_MODE=lemonade \
+    GPU_BACKEND=amd \
+    docker compose "${compose_args[@]}" config --services)" \
     || { echo "[FAIL] external Lemonade compose config must not have missing dependencies"; exit 1; }
   grep -qx 'model-router' <<<"$external_services" \
     || { echo "[FAIL] external Lemonade must build the model-router for Pixel switching"; exit 1; }
