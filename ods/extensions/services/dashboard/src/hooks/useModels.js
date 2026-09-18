@@ -176,7 +176,7 @@ function modelActivationModeError(effectiveMode, configuredMode, llmBackend, ext
   if (llmBackend === 'external') {
     return 'ODS is using an external Ollama or LM Studio backend. Re-run the installer with --no-external-llm before activating a downloaded local model.'
   }
-  if (llmBackend === 'lemonade' && externalLemonade) {
+  if (externalLemonade) {
     return 'Lemonade is managed outside ODS. Change the loaded model in Lemonade, then use Adopt loaded model here to update ODS and Pixel.'
   }
   if (effectiveMode === 'unknown' || configuredMode === 'unknown') {

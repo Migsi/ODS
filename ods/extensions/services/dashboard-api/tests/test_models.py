@@ -1722,8 +1722,11 @@ def test_api_models_returns_full_catalog_without_fake_tokens(test_client, monkey
 def test_api_models_reports_unmatched_external_runtime_without_fake_performance(test_client, monkeypatch, tmp_path):
     models_router, install_dir, _data_dir = _patch_model_router_paths(monkeypatch, tmp_path)
     monkeypatch.setattr(models_router, "LLM_BACKEND", "lemonade")
-    monkeypatch.setenv("AMD_INFERENCE_RUNTIME_MODE", "external-lemonade")
-    monkeypatch.setenv("AMD_INFERENCE_MANAGED", "false")
+    monkeypatch.setattr(models_router, "read_live_env_values", lambda _keys: {
+        "LLM_BACKEND": "lemonade",
+        "AMD_INFERENCE_RUNTIME_MODE": "external-lemonade",
+        "AMD_INFERENCE_MANAGED": "false",
+    })
     _write_model_library(install_dir, [{
         "id": "qwen3.6-35b-a3b-ud-q4",
         "name": "Qwen 3.6 35B-A3B",
@@ -1769,7 +1772,8 @@ def test_api_models_reports_unmatched_external_runtime_without_fake_performance(
         ("lemonade", "windows-legacy-lemonade", "true", "", False),
         ("lemonade", "", "", "true", True),
         ("lemonade", "", "false", "", True),
-        ("llama-server", "external-lemonade", "false", "true", False),
+        ("llama-server", "external-lemonade", "false", "true", True),
+        ("llama-server", "linux-container", "true", "", False),
     ],
 )
 def test_external_lemonade_runtime_flag(
@@ -1777,12 +1781,43 @@ def test_external_lemonade_runtime_flag(
 ):
     import routers.models as models_router
 
-    monkeypatch.setattr(models_router, "LLM_BACKEND", backend)
-    monkeypatch.setenv("AMD_INFERENCE_RUNTIME_MODE", runtime_mode)
-    monkeypatch.setenv("AMD_INFERENCE_MANAGED", managed)
-    monkeypatch.setenv("LEMONADE_EXTERNAL", external)
+    monkeypatch.setattr(models_router, "read_live_env_values", lambda _keys: {
+        "LLM_BACKEND": backend,
+        "AMD_INFERENCE_RUNTIME_MODE": runtime_mode,
+        "AMD_INFERENCE_MANAGED": managed,
+        "LEMONADE_EXTERNAL": external,
+    })
 
     assert models_router._external_lemonade_runtime() is expected
+
+
+def test_load_model_rejects_external_lemonade_before_catalog_lookup(test_client, monkeypatch, tmp_path):
+    models_router, install_dir, _data_dir = _patch_model_router_paths(monkeypatch, tmp_path)
+    (install_dir / ".env").write_text("ODS_MODE=lemonade\n", encoding="utf-8")
+    monkeypatch.setattr(models_router, "ODS_MODE_EFFECTIVE", "lemonade")
+    monkeypatch.setattr(models_router, "LLM_BACKEND", "lemonade")
+    monkeypatch.setattr(models_router, "read_live_env_values", lambda _keys: {
+        "LLM_BACKEND": "lemonade",
+        "LEMONADE_EXTERNAL": "true",
+    })
+    monkeypatch.setattr(
+        models_router,
+        "_find_loadable_model",
+        lambda _model_id: (_ for _ in ()).throw(
+            AssertionError("external Lemonade activation reached catalog lookup")
+        ),
+    )
+
+    response = test_client.post(
+        "/api/models/downloaded-model/load", headers=test_client.auth_headers
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == {
+        "error": "Externally managed Lemonade cannot use local model activation",
+        "code": "external_runtime_unmanaged",
+        "requestedModelId": "downloaded-model",
+    }
 
 
 def test_download_model_rejects_while_bootstrap_upgrade_active(test_client, monkeypatch, tmp_path):

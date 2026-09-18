@@ -29,6 +29,7 @@ from config import (
     ODS_MODE_EFFECTIVE,
     SERVICES,
     normalize_ods_mode,
+    read_live_env_values,
 )
 from gpu import get_gpu_info
 from helpers import (
@@ -80,15 +81,23 @@ _ENV_PATH = Path(INSTALL_DIR) / ".env"
 
 def _external_lemonade_runtime() -> bool:
     """Whether Lemonade is owned by the host rather than this ODS install."""
-    if str(LLM_BACKEND).strip().lower() != "lemonade":
-        return False
-    runtime_mode = os.environ.get("AMD_INFERENCE_RUNTIME_MODE", "").strip().lower()
-    managed = os.environ.get("AMD_INFERENCE_MANAGED", "").strip().lower()
-    external = os.environ.get("LEMONADE_EXTERNAL", "").strip().lower()
+    env = read_live_env_values((
+        "LEMONADE_EXTERNAL", "AMD_INFERENCE_RUNTIME_MODE", "AMD_INFERENCE_MANAGED",
+        "ODS_MODE", "LLM_BACKEND", "AMD_INFERENCE_RUNTIME",
+    ))
+    runtime_mode = str(env.get("AMD_INFERENCE_RUNTIME_MODE") or "").strip().casefold()
+    managed = str(env.get("AMD_INFERENCE_MANAGED") or "").strip().casefold()
+    external = str(env.get("LEMONADE_EXTERNAL") or "").strip().casefold()
     return (
         runtime_mode == "external-lemonade"
-        or managed == "false"
         or external in {"1", "true", "yes", "on"}
+        or (
+            managed in {"0", "false", "no", "off"}
+            and any(
+                str(env.get(key) or "").strip().casefold() == "lemonade"
+                for key in ("ODS_MODE", "LLM_BACKEND", "AMD_INFERENCE_RUNTIME")
+            )
+        )
     )
 
 
@@ -2132,6 +2141,15 @@ def load_model(
         raise HTTPException(
             status_code=409,
             detail={**mode_denial, "requestedModelId": model_id},
+        )
+    if _external_lemonade_runtime():
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "Externally managed Lemonade cannot use local model activation",
+                "code": "external_runtime_unmanaged",
+                "requestedModelId": model_id,
+            },
         )
 
     model = _find_loadable_model(model_id)
