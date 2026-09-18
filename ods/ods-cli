@@ -24,8 +24,6 @@ while [[ -L "$_source" ]]; do
     [[ "$_source" != /* ]] && _source="$_dir/$_source"
 done
 SCRIPT_DIR="$(cd "$(dirname "$_source")" && pwd)"
-# shellcheck source=lib/preflight-llm-route.sh
-. "$SCRIPT_DIR/lib/preflight-llm-route.sh"
 
 _resolve_cli_install_dir() {
     if [[ -n "${INSTALL_DIR:-}" ]]; then
@@ -1327,6 +1325,10 @@ cmd_status() {
     cd "$INSTALL_DIR"
     load_env
     sr_load
+    # Only status needs the model-route selector. Keep unrelated CLI commands
+    # usable while repairing a partial install that is missing this library.
+    # shellcheck source=lib/preflight-llm-route.sh
+    . "$SCRIPT_DIR/lib/preflight-llm-route.sh"
 
     local flags_str
     flags_str=$(get_compose_flags)
@@ -1449,6 +1451,8 @@ cmd_status_json() {
     cd "$INSTALL_DIR"
     sr_load
     load_env
+    # shellcheck source=lib/preflight-llm-route.sh
+    . "$SCRIPT_DIR/lib/preflight-llm-route.sh"
 
     local flags_str
     flags_str=$(get_compose_flags)
