@@ -626,7 +626,7 @@ class TestModelsAndEvidence:
         )
         assert ev.status_code == 404
 
-    def test_completed_stream_without_identity_records_routed_evidence(
+    def test_completed_stream_without_identity_records_unknown_response_model(
             self, router):
         mod, client, write_state, calls = router
         write_state()
@@ -649,7 +649,7 @@ class TestModelsAndEvidence:
         record = ev.json()
         assert record["requestedModel"] == "ods/current"
         assert record["routedModel"] == "Concrete.gguf"
-        assert record["responseModel"] == "Concrete.gguf"
+        assert record["responseModel"] == ""
 
     def test_failed_stream_records_no_evidence_and_releases_admission(self, router):
         mod, client, write_state, calls = router

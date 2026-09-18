@@ -1265,7 +1265,10 @@ async def _forward_inner(request: Request, path: str, payload: dict[str, Any],
                         _record_evidence({
                             **evidence_base,
                             "status": upstream.status_code,
-                            "responseModel": rewriter.response_model or route["runtimeModelId"],
+                            # The selected route is already reported separately.
+                            # Never present it as a backend identity when the
+                            # stream supplied no model field to observe.
+                            "responseModel": rewriter.response_model or "",
                             "lemonadeRoute": lemonade_route,
                         })
                     if (
