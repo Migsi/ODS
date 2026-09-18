@@ -10,7 +10,7 @@ function errorText(payload, fallback) {
   return fallback
 }
 
-export default function ExternalLemonadeAdoption({ enabled, minimumContext, onSettled }) {
+export default function ExternalLemonadeAdoption({ enabled, minimumContext, onSettled, compact = false }) {
   const [observation, setObservation] = useState(null)
   const [checking, setChecking] = useState(false)
   const [adopting, setAdopting] = useState(false)
@@ -98,24 +98,26 @@ export default function ExternalLemonadeAdoption({ enabled, minimumContext, onSe
   const context = Number(observation?.contextLength || 0)
   const tooSmall = context > 0 && context < minimumContext
   return (
-    <section aria-label="External Lemonade model" className="mb-5 rounded-xl border border-amber-400/25 bg-amber-500/10 p-4 text-sm text-amber-100">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div className="flex min-w-0 items-start gap-3">
+    <section aria-label="External Lemonade model" className={`rounded-xl border border-amber-400/25 bg-amber-500/10 text-amber-100 ${compact ? 'mb-3 p-2.5 text-xs' : 'mb-5 p-4 text-sm'}`}>
+      <div className={`flex flex-wrap items-start justify-between ${compact ? 'gap-2' : 'gap-3'}`}>
+        <div className={`flex min-w-0 items-start ${compact ? 'gap-2' : 'gap-3'}`}>
           <AlertCircle size={18} className="mt-0.5 shrink-0" aria-hidden="true" />
           <div>
             <p className="font-semibold">Model managed in Lemonade</p>
             {observation && <p className="mt-1 break-all">Loaded: <strong>{observation.modelId}</strong> · {context.toLocaleString()} context tokens</p>}
-            <p className="mt-1 text-amber-100/75">After switching models in Lemonade, adopt the loaded model so Pixel and ODS apps use the same route. ODS will not load or restore the native model.</p>
+            <p className="mt-1 text-amber-100/75">{compact
+              ? 'After switching in Lemonade, adopt here for Pixel and ODS. ODS leaves the native model loaded.'
+              : 'After switching models in Lemonade, adopt the loaded model so Pixel and ODS apps use the same route. ODS will not load or restore the native model.'}</p>
             {tooSmall && <p className="mt-1">Pixel needs at least {minimumContext.toLocaleString()} context tokens; this model cannot be adopted.</p>}
             {pending && <p className="mt-1">Adoption is pending. Pixel stays held until recovery proves the route. <Link className="underline" to="/pixel">Open Pixel recovery</Link>.</p>}
             {error && <p role="alert" className="mt-2 text-red-300">{error}</p>}
           </div>
         </div>
-        <div className="flex shrink-0 flex-wrap gap-2">
-          <button type="button" onClick={recheck} disabled={checking || adopting} className="inline-flex min-h-9 items-center gap-1 rounded-lg border border-amber-300/30 px-3 font-medium disabled:opacity-50">
+        <div className={`flex shrink-0 flex-wrap ${compact ? 'gap-1' : 'gap-2'}`}>
+          <button type="button" onClick={recheck} disabled={checking || adopting} className={`inline-flex items-center gap-1 rounded-lg border border-amber-300/30 font-medium disabled:opacity-50 ${compact ? 'min-h-8 px-2' : 'min-h-9 px-3'}`}>
             <RefreshCw size={14} aria-hidden="true" /> Recheck
           </button>
-          <button type="button" onClick={adopt} disabled={!observation || checking || adopting || tooSmall} className="min-h-9 rounded-lg border border-amber-300/50 px-3 font-semibold disabled:opacity-50">
+          <button type="button" onClick={adopt} disabled={!observation || checking || adopting || tooSmall} className={`rounded-lg border border-amber-300/50 font-semibold disabled:opacity-50 ${compact ? 'min-h-8 px-2' : 'min-h-9 px-3'}`}>
             {adopting ? 'Adopting…' : 'Adopt loaded model in ODS'}
           </button>
         </div>

@@ -351,6 +351,7 @@ export default function Models({ compact = false }) {
         enabled={odsMode === 'lemonade'}
         minimumContext={pixelMinimumContext}
         onSettled={refresh}
+        compact={compact}
       />
 
       {!currentModel && !loadedModel && configuredModel && (

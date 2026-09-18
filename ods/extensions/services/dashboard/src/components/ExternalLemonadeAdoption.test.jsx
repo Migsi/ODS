@@ -7,6 +7,11 @@ const response = (body, status = 200) => ({ ok: status >= 200 && status < 300, s
 const view = (props = {}) => render(
   <MemoryRouter><ExternalLemonadeAdoption enabled minimumContext={16384} {...props} /></MemoryRouter>
 )
+const clickAdopt = async () => {
+  const button = await screen.findByRole('button', { name: 'Adopt loaded model in ODS' })
+  await waitFor(() => expect(button).toBeEnabled())
+  fireEvent.click(button)
+}
 
 afterEach(() => vi.unstubAllGlobals())
 
@@ -26,11 +31,19 @@ test('rechecks the exact physical model before one adoption and refreshes ODS', 
   vi.stubGlobal('fetch', fetch)
   const onSettled = vi.fn()
   view({ onSettled })
-  fireEvent.click(await screen.findByRole('button', { name: 'Adopt loaded model in ODS' }))
+  await clickAdopt()
   await waitFor(() => expect(onSettled).toHaveBeenCalledTimes(1))
   expect(fetch).toHaveBeenCalledTimes(3)
   expect(fetch.mock.calls[2][0]).toBe('/api/models/external-adopt')
   expect(JSON.parse(fetch.mock.calls[2][1].body)).toEqual({ model_id: loaded.modelId })
+})
+
+test('keeps the narrow Portal model drawer concise without hiding the native ownership warning', async () => {
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response(loaded)))
+  view({ compact: true })
+  expect(await screen.findByText(/After switching in Lemonade, adopt here/)).toBeVisible()
+  expect(screen.getByText(/ODS leaves the native model loaded/)).toBeVisible()
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Adopt loaded model in ODS' })).toBeEnabled())
 })
 
 test('a changed external model must be reviewed before adoption', async () => {
@@ -38,7 +51,7 @@ test('a changed external model must be reviewed before adoption', async () => {
   const fetch = vi.fn().mockResolvedValueOnce(response(loaded)).mockResolvedValueOnce(response(changed))
   vi.stubGlobal('fetch', fetch)
   view()
-  fireEvent.click(await screen.findByRole('button', { name: 'Adopt loaded model in ODS' }))
+  await clickAdopt()
   expect(await screen.findByRole('alert')).toHaveTextContent('changed')
   expect(screen.getByText('different-model')).toBeVisible()
   expect(fetch).toHaveBeenCalledTimes(2)
@@ -51,7 +64,7 @@ test('a refresh error does not misreport a committed adoption as failed', async 
     .mockResolvedValueOnce(response({ status: 'adopted', modelId: loaded.modelId }))
   vi.stubGlobal('fetch', fetch)
   view({ onSettled: vi.fn().mockRejectedValue(new Error('refresh unavailable')) })
-  fireEvent.click(await screen.findByRole('button', { name: 'Adopt loaded model in ODS' }))
+  await clickAdopt()
   expect(await screen.findByRole('alert')).toHaveTextContent('model was adopted')
   expect(fetch).toHaveBeenCalledTimes(3)
 })
@@ -65,7 +78,7 @@ test('pending adoption tells the user Pixel remains held', async () => {
     } }, 503))
   vi.stubGlobal('fetch', fetch)
   view()
-  fireEvent.click(await screen.findByRole('button', { name: 'Adopt loaded model in ODS' }))
+  await clickAdopt()
   expect(await screen.findByRole('alert')).toHaveTextContent('Adoption is incomplete')
   expect(screen.getByText(/Pixel stays held until recovery/)).toBeVisible()
   expect(screen.getByRole('link', { name: 'Open Pixel recovery' })).toHaveAttribute('href', '/pixel')
