@@ -812,13 +812,14 @@ function ModelTableRow({
 }) {
   const isLoaded = model.status === 'loaded' || isCurrentModel
   const isDownloaded = model.status === 'downloaded'
+  const isRuntimeManaged = model.metadata?.source === 'runtime'
   const memory = getMemoryMeta(model, gpu)
   const compatibility = getCompatibilityMeta(model, memory, pixelMinimumContext)
   const speed = getSpeedDisplay(model)
   const tags = getModelTags(model, hermesMinimumContext)
   const iconTone = getIconTone(model, compatibility)
   const performanceBadge = getPerformanceBadge(model)
-  const runDisabledReason = getRunDisabledReason({
+  const runDisabledReason = isRuntimeManaged ? null : getRunDisabledReason({
     model,
     gpu,
     canActivateModels,
@@ -835,7 +836,7 @@ function ModelTableRow({
     <div className="model-fit"><span>{compatibility.label}</span><span>{compatibility.detail}</span></div>
     <footer><div className="model-entry-actions">
       <PrimaryAction model={model} isLoaded={isLoaded} isDownloaded={isDownloaded} isLoading={isLoading} activationBusy={activationBusy} downloadBusy={downloadBusy} downloadStarting={downloadStarting} runDisabledReason={runDisabledReason} hermesMinimumContext={hermesMinimumContext} onDownload={onDownload} onLoad={onLoad} onBenchmark={onBenchmark}/>
-      {isLoaded && <button aria-label={`Configure context for ${model.name}`} title={`Configure context for ${model.name}`} disabled={activationBusy} onClick={onLoad}><MetalMetricIcon icon={SlidersHorizontal} size={14}/></button>}
+      {isLoaded && !isRuntimeManaged && <button aria-label={`Configure context for ${model.name}`} title={`Configure context for ${model.name}`} disabled={activationBusy} onClick={onLoad}><MetalMetricIcon icon={SlidersHorizontal} size={14}/></button>}
       <DeleteAction model={model} isLoaded={isLoaded} isDownloaded={isDownloaded} isLoading={isLoading} activationBusy={activationBusy} onDelete={onDelete}/>
     </div><details className="model-entry-details"><summary>Details <ChevronRight size={12}/></summary><div><p>{model.description || 'No description available.'}</p><p>{tags.join(' · ')}</p>{performanceBadge && <p>{performanceBadge.label}</p>}<p>{compatibility.label}: {compatibility.detail}</p>{runDisabledReason && <p>{runDisabledReason}</p>}</div></details></footer>
   </article>
@@ -876,7 +877,7 @@ function ModelTableRow({
           onLoad={onLoad}
           onBenchmark={onBenchmark}
         />
-        {isLoaded && (
+        {isLoaded && !isRuntimeManaged && (
           <button
             type="button"
             onClick={onLoad}
@@ -951,6 +952,10 @@ function PrimaryAction({
   onLoad,
   onBenchmark,
 }) {
+  if (model.metadata?.source === 'runtime') {
+    return <span className="text-xs text-theme-text-muted">Managed by runtime</span>
+  }
+
   if (isLoading) {
     return (
       <button disabled className="inline-flex h-8 min-w-24 items-center justify-center gap-2 rounded-md bg-theme-accent/20 px-3 text-xs font-semibold text-theme-accent">
@@ -1715,6 +1720,9 @@ function getMemoryMeta(model, gpu) {
 }
 
 function getCompatibilityMeta(model, memory, pixelMinimumContext = 0) {
+  if (model?.metadata?.source === 'runtime') {
+    return { label: 'Runtime managed', detail: 'Fit not verified by ODS', tone: 'purple' }
+  }
   if (!model?.fitsVram) {
     const shorterContextFits = Array.isArray(model?.contextOptions) && model.contextOptions.some(option =>
       option?.fitsVram === true && Number(option?.contextLength || 0) >= Number(pixelMinimumContext || 16384)
@@ -1933,6 +1941,7 @@ function getModelTags(model, hermesMinimumContext) {
 }
 
 function getIconTone(model, compatibility) {
+  if (model?.metadata?.source === 'runtime') return { border: 'border-purple-400/35', bg: 'bg-purple-500/10', text: 'text-purple-400' }
   if (!model?.fitsVram) return { border: 'border-orange-400/35', bg: 'bg-orange-500/10', text: 'text-orange-400' }
   if (compatibility.tone === 'amber') return { border: 'border-amber-400/35', bg: 'bg-amber-500/10', text: 'text-amber-300' }
   if (compatibility.detail === 'Best') return { border: 'border-theme-accent/35', bg: 'bg-theme-accent/10', text: 'text-theme-accent' }

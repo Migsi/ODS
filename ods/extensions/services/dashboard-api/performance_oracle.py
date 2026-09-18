@@ -11,6 +11,7 @@ It never returns catalog tok/s estimates as observed performance.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import platform
@@ -1574,6 +1575,33 @@ def build_models_payload(gpu_info: Optional[GPUInfo], loaded_model: Optional[str
             "decode_read_mb": size_mb,
         }
         append_model(fallback, path, "downloaded")
+
+    if isinstance(loaded_model, str) and loaded_model.strip() and current_model_id is None:
+        # An external runtime can report a model that is neither in our catalog
+        # nor an inspectable local GGUF. Show what is actually running without
+        # borrowing a different quantization's size, fit, or activation claims.
+        response_models.append({
+            "id": f"runtime-{hashlib.sha256(loaded_model.encode('utf-8')).hexdigest()[:12]}",
+            "name": loaded_model,
+            "gguf": None,
+            "downloadUrl": None,
+            "size": None,
+            "sizeGb": None,
+            "vramRequired": None,
+            "estimatedRequired": None,
+            "contextLength": context_length,
+            "specialty": "Runtime",
+            "description": "Reported as loaded by the model runtime; not an ODS catalog or inspected local model.",
+            "metadata": {"source": "runtime", "catalogSource": "runtime", "readable": False},
+            "appCompatibility": {},
+            "status": "loaded",
+            "recommended": False,
+            "configured": False,
+            "fitsVram": None,
+            "activationSupport": None,
+            "fitsCurrentVram": None,
+            "performance": None,
+        })
 
     return {
         "models": response_models,

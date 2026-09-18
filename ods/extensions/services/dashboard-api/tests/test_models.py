@@ -1718,6 +1718,45 @@ def test_api_models_returns_full_catalog_without_fake_tokens(test_client, monkey
     assert payload["models"][0]["performance"]["source"] == "benchmark_required"
 
 
+def test_api_models_reports_unmatched_external_runtime_without_fake_performance(test_client, monkeypatch, tmp_path):
+    models_router, install_dir, _data_dir = _patch_model_router_paths(monkeypatch, tmp_path)
+    _write_model_library(install_dir, [{
+        "id": "qwen3.6-35b-a3b-ud-q4",
+        "name": "Qwen 3.6 35B-A3B",
+        "gguf_file": "Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+        "size_mb": 21110,
+        "vram_required_gb": 24,
+        "context_length": 131072,
+        "quantization": "UD-Q4_K_M",
+        "specialty": "Quality",
+        "description": "Catalog quantization, not the observed external runtime.",
+        "llm_model_name": "qwen3.6-35b-a3b",
+    }])
+    runtime_name = "Qwen3.6-35B-A3B-GGUF"
+    recorded = []
+    monkeypatch.setattr(models_router, "get_gpu_info", lambda: _gpu())
+    monkeypatch.setattr(models_router, "get_loaded_model", AsyncMock(return_value=runtime_name))
+    monkeypatch.setattr(models_router, "get_llama_metrics", AsyncMock(return_value={"tokens_per_second": 42}))
+    monkeypatch.setattr(models_router, "get_llama_context_size", AsyncMock(return_value=None))
+    monkeypatch.setattr(models_router, "record_model_performance", lambda *args, **kwargs: recorded.append((args, kwargs)))
+
+    response = test_client.get("/api/models", headers=test_client.auth_headers)
+
+    assert response.status_code == 200
+    payload = response.json()
+    active = [entry for entry in payload["models"] if entry["status"] == "loaded"]
+    assert len(active) == 1
+    assert active[0]["name"] == runtime_name
+    assert active[0]["metadata"]["source"] == "runtime"
+    assert active[0]["sizeGb"] is None
+    assert active[0]["vramRequired"] is None
+    assert active[0]["quantization"] is None
+    assert payload["currentModel"] is None
+    assert payload["activationReadyModel"] is None
+    assert payload["loadedModel"] == runtime_name
+    assert recorded == []
+
+
 def test_download_model_rejects_while_bootstrap_upgrade_active(test_client, monkeypatch, tmp_path):
     models_router, install_dir, _data_dir = _patch_model_router_paths(monkeypatch, tmp_path)
     _write_model_library(install_dir, [

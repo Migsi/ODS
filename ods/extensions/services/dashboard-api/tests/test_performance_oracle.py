@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 
 from helpers import record_model_performance
-from models import GPUInfo
+from models import GPUInfo, ModelLibraryResponse
 from performance_oracle import (
     build_models_payload,
     current_model_matches,
@@ -160,6 +160,46 @@ def test_real_catalog_phi_models_have_exactly_one_loaded_identity(data_dir, tmp_
 
         assert loaded_rows == [expected_id]
         assert payload["currentModel"] == expected_id
+
+
+def test_unmatched_runtime_model_is_visible_without_borrowing_catalog_metadata(data_dir, tmp_path):
+    install_dir = tmp_path / "ods"
+    install_dir.mkdir()
+    catalog_model = {
+        **_model(),
+        "id": "qwen3.6-35b-a3b-ud-q4",
+        "name": "Qwen 3.6 35B-A3B",
+        "gguf_file": "Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+        "llm_model_name": "qwen3.6-35b-a3b",
+        "quantization": "UD-Q4_K_M",
+    }
+    runtime_name = "Qwen3.6-35B-A3B-GGUF"
+
+    payload = build_models_payload(
+        _gpu(), runtime_name, 0, install_dir, data_dir, catalog=[catalog_model], evidence=[]
+    )
+    loaded = [entry for entry in payload["models"] if entry["status"] == "loaded"]
+
+    assert len(loaded) == 1
+    assert loaded[0]["id"].startswith("runtime-")
+    assert loaded[0]["name"] == runtime_name
+    assert loaded[0]["metadata"]["source"] == "runtime"
+    assert loaded[0]["metadata"]["readable"] is False
+    for field in ("gguf", "downloadUrl", "size", "sizeGb", "vramRequired",
+                  "estimatedRequired", "contextLength", "quantization", "architecture",
+                  "fitsVram", "fitsCurrentVram", "activationSupport"):
+        assert loaded[0].get(field) is None, field
+    assert payload["currentModel"] is None
+    assert payload["loadedModel"] == runtime_name
+    assert payload["models"][0]["status"] != "loaded"
+    ModelLibraryResponse(**payload)
+
+    matched = build_models_payload(
+        _gpu(), "qwen3.6-35b-a3b", 0, install_dir, data_dir,
+        catalog=[catalog_model], evidence=[],
+    )
+    assert [entry["id"] for entry in matched["models"] if entry["status"] == "loaded"] == [catalog_model["id"]]
+    assert not any(entry["metadata"]["source"] == "runtime" for entry in matched["models"])
 
 
 def test_benchmark_required_without_measurement_or_evidence(data_dir, tmp_path):

@@ -1358,8 +1358,8 @@ async def list_models(api_key: str = Depends(verify_api_key)):
         payload,
         _model_lifecycle_from_agent_status(agent_status),
     )
-    if gpu_info and loaded_model and live_tps > 0:
-        loaded_entry = next((m for m in payload["models"] if m["status"] == "loaded"), None) or {}
+    loaded_entry = next((m for m in payload["models"] if m["status"] == "loaded"), None) or {}
+    if gpu_info and loaded_model and live_tps > 0 and loaded_entry.get("metadata", {}).get("source") != "runtime":
         signature = build_sample_signature(
             loaded_entry or {"id": loaded_model, "gguf": _read_active_model()},
             gpu_info,
@@ -1386,7 +1386,6 @@ async def list_models(api_key: str = Depends(verify_api_key)):
     payload["odsMode"] = ODS_MODE_EFFECTIVE
     payload["configuredMode"] = _configured_ods_mode()
     payload["llmBackend"] = LLM_BACKEND or "unknown"
-    loaded_entry = next((model for model in payload["models"] if model["status"] == "loaded"), None)
     payload["activationReadyModel"] = (
         payload.get("currentModel")
         if loaded_entry

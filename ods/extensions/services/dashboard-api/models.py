@@ -183,11 +183,11 @@ class ModelLibraryEntry(BaseModel):
     downloadUrl: Optional[str] = None
     downloadSha256: Optional[str] = None
     llmModelName: Optional[str] = None
-    size: str
-    sizeGb: float
-    vramRequired: float
+    size: Optional[str]
+    sizeGb: Optional[float]
+    vramRequired: Optional[float]
     estimatedRequired: Optional[float] = None
-    contextLength: int
+    contextLength: Optional[int]
     maxContextLength: Optional[int] = None
     contextOptions: list[dict[str, Any]] = Field(default_factory=list)
     specialty: str
@@ -205,9 +205,9 @@ class ModelLibraryEntry(BaseModel):
     recommended: bool = False
     configured: bool = False
     recommendation: Optional[dict[str, Any]] = None
-    fitsVram: bool
+    fitsVram: Optional[bool]
     activationSupport: Optional[dict[str, Any]] = None
-    fitsCurrentVram: bool
+    fitsCurrentVram: Optional[bool]
     performance: Optional[dict[str, Any]] = None
     performanceLabel: Optional[str] = None
 

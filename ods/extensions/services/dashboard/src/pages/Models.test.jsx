@@ -141,10 +141,28 @@ test.each([false, true])('displays an observed runtime outside the catalog witho
   useModelsMock.mockReturnValue(baseState({
     loadedModel: 'Qwen3.6-35B-A3B-GGUF',
     configuredModel: 'qwen3.5-9b-q4',
-    models: [model({ status: 'downloaded' })],
+    models: [
+      model({ status: 'downloaded' }),
+      model({
+        id: 'runtime-123456789abc',
+        name: 'Qwen3.6-35B-A3B-GGUF',
+        status: 'loaded',
+        size: null,
+        sizeGb: null,
+        vramRequired: null,
+        contextLength: null,
+        quantization: null,
+        fitsVram: null,
+        metadata: { source: 'runtime', catalogSource: 'runtime', readable: false },
+      }),
+    ],
   }))
   render(createElement(MemoryRouter, null, createElement(Models, { compact })))
-  expect(screen.getByText(/Qwen3\.6-35B-A3B-GGUF/)).toBeInTheDocument()
+  expect(screen.getAllByText(/Qwen3\.6-35B-A3B-GGUF/).length).toBeGreaterThan(0)
+  expect(screen.getByText('Managed by runtime')).toBeInTheDocument()
+  expect(screen.getByText('Runtime managed')).toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: 'Configure context for Qwen3.6-35B-A3B-GGUF' })).toBeNull()
+  expect(screen.queryByRole('button', { name: /benchmark/i })).toBeNull()
   expect(screen.queryByText(/Selected during install:/)).not.toBeInTheDocument()
   expect(screen.getAllByTitle('Run Qwen 3.5 9B')[0]).not.toBeDisabled()
 })
