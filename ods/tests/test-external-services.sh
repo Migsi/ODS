@@ -450,6 +450,48 @@ else
     fail "AMD external reuse .env contract"
 fi
 
+probe_retries_after_one_transport_failure() (
+    local curl_failure="$1" calls=0
+    curl() {
+        calls=$((calls + 1))
+        [[ "${*: -1}" == "http://127.0.0.1:18080/v1/chat/completions" ]] || return 99
+        [[ "$calls" -eq 2 ]] || return "$curl_failure"
+    }
+    sleep() { [[ "$1" == 2 ]]; }
+    external_llm_probe_completion 'http://127.0.0.1:18080' 'test-model' >/dev/null 2>&1 &&
+        [[ "$calls" -eq 2 ]]
+)
+assert_true "external completion probe retries one transient timeout" probe_retries_after_one_transport_failure 28
+assert_true "external completion probe retries one connection failure" probe_retries_after_one_transport_failure 7
+
+probe_fails_after_two_timeouts() (
+    local calls=0
+    curl() {
+        calls=$((calls + 1))
+        return 28
+    }
+    sleep() { [[ "$1" == 2 ]]; }
+    if external_llm_probe_completion 'http://127.0.0.1:18080' 'test-model' >/dev/null 2>&1; then
+        return 1
+    fi
+    [[ "$calls" -eq 2 ]]
+)
+assert_true "external completion probe stays red after bounded retries" probe_fails_after_two_timeouts
+
+probe_does_not_retry_http_error() (
+    local calls=0
+    curl() {
+        calls=$((calls + 1))
+        return 22
+    }
+    sleep() { return 99; }
+    if external_llm_probe_completion 'http://127.0.0.1:18080' 'test-model' >/dev/null 2>&1; then
+        return 1
+    fi
+    [[ "$calls" -eq 1 ]]
+)
+assert_true "external completion probe does not retry a hard HTTP error" probe_does_not_retry_http_error
+
 if python3 "$ROOT_DIR/tests/test-external-completion-probe.py"; then
     pass "completion probe distinguishes reasoning budget exhaustion from invalid responses"
 else

@@ -217,7 +217,7 @@ _phase12_verify_external_lemonade_completion() {
 }
 
 _phase12_verify_external_llm_completion() {
-    local host_url container_url provider model dashboard_container response
+    local host_url container_url provider model dashboard_container response probe_diagnostics
     local -a docker_cmd_arr=()
     host_url="${EXTERNAL_LLM_URL:-$(_phase12_env_get EXTERNAL_LLM_URL "")}"
     container_url="${EXTERNAL_LLM_CONTAINER_URL:-$(_phase12_env_get EXTERNAL_LLM_CONTAINER_URL "")}"
@@ -239,9 +239,11 @@ _phase12_verify_external_llm_completion() {
         ai "Restore the model/service, or re-run the installer with --no-external-llm."
         return 1
     fi
-    if ! external_llm_probe_completion "$host_url" "$model"; then
+    if ! probe_diagnostics="$(external_llm_probe_completion "$host_url" "$model" 2>&1)"; then
         ai_bad "External ${provider} accepted discovery but failed a real completion for ${model}."
-        ai "Check the provider logs and model readiness, then re-run the installer."
+        ai "Check the probe diagnostic in ${LOG_FILE} and provider readiness, then re-run the installer."
+        printf 'External %s completion probe diagnostic:\n%.*s\n' \
+            "$provider" 2048 "$probe_diagnostics" >> "$LOG_FILE"
         return 1
     fi
 

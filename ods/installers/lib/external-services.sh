@@ -145,7 +145,7 @@ external_llm_resolve_model() {
 }
 
 external_llm_probe_completion() {
-    local url="${1:-}" model="${2:-}" body
+    local url="${1:-}" model="${2:-}" body attempt curl_status
     url="$(external_llm_host_url "$url")"
     body="$(
         EXTERNAL_LLM_MODEL_VALUE="$model" python3 - <<'PY'
@@ -161,10 +161,31 @@ print(json.dumps({
 }))
 PY
     )"
-    curl -fsS --max-time "${EXTERNAL_LLM_PROBE_TIMEOUT:-60}" \
-        -H "Content-Type: application/json" \
-        -d "$body" \
-        "${url}/v1/chat/completions" >/dev/null
+    # A discovered external model can be serving another long prompt when the
+    # installer makes its first real completion. Retry once after a transport
+    # failure, but never accept discovery alone as proof of working inference.
+    for attempt in 1 2; do
+        if curl -fsS --max-time "${EXTERNAL_LLM_PROBE_TIMEOUT:-60}" \
+            -H "Content-Type: application/json" \
+            -d "$body" \
+            "${url}/v1/chat/completions" >/dev/null; then
+            return 0
+        else
+            curl_status=$?
+        fi
+        printf 'External LLM completion probe attempt %d/2 failed (curl exit %d).\n' \
+            "$attempt" "$curl_status" >&2
+        # HTTP errors and malformed requests need a configuration fix, not a
+        # second inference attempt. Only transient transport failures retry.
+        case "$curl_status" in
+            7|28|52|55|56) ;;
+            *) return "$curl_status" ;;
+        esac
+        if [[ "$attempt" -eq 1 ]]; then
+            sleep 2
+        fi
+    done
+    return "$curl_status"
 }
 
 external_llm_env_value() {
