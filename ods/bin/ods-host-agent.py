@@ -5169,7 +5169,11 @@ def _running_under_wsl(
     return "microsoft" in str(release).casefold()
 
 
-def _resolve_agent_bind_addr(env: dict, system_name: str | None = None) -> str:
+def _resolve_agent_bind_addr(
+    env: dict,
+    system_name: str | None = None,
+    require_ods_network: bool = False,
+) -> str:
     """Resolve the host-agent bind address without exposing LAN by default."""
     system_name = system_name or platform.system()
     explicit = env.get("ODS_AGENT_BIND", "").strip()
@@ -5194,14 +5198,20 @@ def _resolve_agent_bind_addr(env: dict, system_name: str | None = None) -> str:
         return "127.0.0.1"
 
     if system_name == "Linux":
-        # Prefer ODS's actual compose network. The bridge fallback keeps
-        # older/partial installs reachable without binding the Docker
-        # management API to every LAN interface.
-        return (
-            _detect_docker_network_gateway("ods-network")
-            or _detect_docker_bridge_gateway()
-            or "127.0.0.1"
-        )
+        # A managed system service must not settle on the default bridge during
+        # boot before Compose restores ods-network. Dashboard API uses the ODS
+        # network gateway, so a successful bind to another bridge leaves Pixel
+        # and host-agent actions unreachable until someone restarts the unit.
+        gateway = _detect_docker_network_gateway("ods-network")
+        if gateway:
+            return gateway
+        if require_ods_network:
+            raise RuntimeError(
+                "ods-network is unavailable; refusing a fallback host-agent bind"
+            )
+        # Preserve the compatibility path for unmanaged/session agents and
+        # partial installs, which do not have systemd restart supervision.
+        return _detect_docker_bridge_gateway() or "127.0.0.1"
 
     return "127.0.0.1"
 
@@ -16399,6 +16409,10 @@ def main():
     parser.add_argument("--port", type=int, default=7710, help="Listen port (default: 7710)")
     parser.add_argument("--pid-file", type=str, default="", help="Write PID to this file")
     parser.add_argument("--install-dir", type=str, default="", help="ODS install directory")
+    parser.add_argument(
+        "--require-ods-network", action="store_true",
+        help="Fail closed until the ODS Docker network exists (systemd will retry)",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -16471,7 +16485,13 @@ def main():
     # keeps the loopback path because its reported bridge is not locally bindable.
     # The bridge gateway fallback keeps partial/older native-Linux installs
     # reachable until phase 11 can restart the service after ods-network exists.
-    bind_addr = _resolve_agent_bind_addr(env)
+    try:
+        bind_addr = _resolve_agent_bind_addr(
+            env, require_ods_network=args.require_ods_network
+        )
+    except RuntimeError as exc:
+        logger.error("%s", exc)
+        sys.exit(1)
 
     server = _create_host_agent_server(env, bind_addr, port)
     signal.signal(signal.SIGTERM, lambda signum, _frame: _request_server_shutdown(server, signum))
