@@ -273,6 +273,27 @@ def test_external_lemonade_local_activation_rejects_before_mutation(
     assert env_path.read_text(encoding="utf-8") == original
 
 
+@pytest.mark.parametrize("recovery", [
+    {"pending": True},
+    RuntimeError("unsafe journal"),
+])
+def test_host_model_status_marks_uncertain_native_transaction_pending(
+    monkeypatch, recovery,
+):
+    monkeypatch.setattr(_mod, "_active_remote_provider_pixel_runtime", lambda: None)
+    monkeypatch.setattr(_mod, "_switchboard_state", None)
+
+    def status():
+        if isinstance(recovery, Exception):
+            raise recovery
+        return recovery
+
+    monkeypatch.setattr(_mod, "_pixel_model_recovery_status", status)
+    payload = {}
+    _mod._project_switchboard_agent_viability(payload)
+    assert payload["modelTransactionPending"] is True
+
+
 def _external_lemonade_observation_fixture():
     checkpoint = "unsloth/Qwen3.6-35B-A3B-GGUF:Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf"
     health = {

@@ -359,6 +359,8 @@ async def _local_inference_issue(host_status: object) -> str | None:
 
 
 def _model_readiness_issue_from_status(status: object) -> tuple[str, str] | None:
+    if isinstance(status, dict) and status.get("modelTransactionPending") is True:
+        return "model_switching", _MODEL_SWITCH_DETAIL
     switching = (
         isinstance(status, dict)
         and status.get("activeOperation") == "model_activation"
@@ -1141,4 +1143,3 @@ async def pixel_chat_stream(request: Request, body: ChatStreamRequest, owner: st
             "X-Accel-Buffering": "no",
         },
     )
-

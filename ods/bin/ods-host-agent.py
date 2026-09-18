@@ -2176,6 +2176,12 @@ def _project_switchboard_agent_viability(payload: dict) -> None:
     structurally validated. Missing, stale, or malformed state remains unknown
     rather than inventing either readiness or failure for legacy installations.
     """
+    try:
+        payload["modelTransactionPending"] = bool(_pixel_model_recovery_status()["pending"])
+    except (OSError, ValueError, RuntimeError, KeyError, TypeError):
+        # An unreadable native transaction journal is not proof that the
+        # model transition finished. Pixel must remain unavailable for chat.
+        payload["modelTransactionPending"] = True
     remote_runtime = _active_remote_provider_pixel_runtime()
     if remote_runtime is not None:
         payload["activeAgentViable"] = True

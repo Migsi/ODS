@@ -658,6 +658,28 @@ async def test_status_projects_active_model_switch_without_touching_edge(monkeyp
 
 
 @pytest.mark.asyncio
+async def test_pending_native_model_transaction_blocks_pixel_after_host_restart(monkeypatch):
+    async def pending_transaction(*_args, **_kwargs):
+        return {"status": "idle", "modelTransactionPending": True}
+
+    monkeypatch.setattr(pixel, "request_agent_json", pending_transaction)
+    with patch.object(
+        pixel.httpx,
+        "AsyncClient",
+        side_effect=AssertionError("pending model transaction reached Pixel edge"),
+    ):
+        status = await pixel.pixel_status()
+        assert status["available"] is False
+        assert status["state"] == "model_switching"
+        body = pixel.ChatStreamRequest.model_validate({
+            "chat_id": "pending_model", "messages": [{"role": "user", "content": "hello"}],
+        })
+        with pytest.raises(HTTPException) as exc:
+            await pixel.pixel_chat_stream(ConnectedRequest(), body)
+        assert exc.value.status_code == 409
+
+
+@pytest.mark.asyncio
 async def test_status_keeps_adaptive_model_available_with_fixed_advisory(monkeypatch):
     async def adaptive_model(*_args, **_kwargs):
         return {
