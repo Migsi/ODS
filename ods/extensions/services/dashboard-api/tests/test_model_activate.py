@@ -245,6 +245,34 @@ def test_external_lemonade_catalog_does_not_fall_back_to_stale_local_model(
     assert model == {}
 
 
+def test_external_lemonade_local_activation_rejects_before_mutation(
+    monkeypatch, tmp_path,
+):
+    install = tmp_path / "ods"
+    install.mkdir()
+    env_path = install / ".env"
+    original = (
+        "ODS_MODE=lemonade\nLLM_BACKEND=lemonade\nLEMONADE_EXTERNAL=true\n"
+        "LEMONADE_MODEL=Qwen3.6-35B-A3B-GGUF\n"
+    )
+    env_path.write_text(original, encoding="utf-8")
+    monkeypatch.setattr(_mod, "INSTALL_DIR", install)
+    monkeypatch.setattr(_mod, "STARTUP_ODS_MODE", "lemonade")
+    monkeypatch.setattr(
+        _mod, "_load_model_library_records",
+        lambda: pytest.fail("external runtime must be rejected before model lookup"),
+    )
+    monkeypatch.setattr(
+        _mod, "_recreate_llama_server",
+        lambda *_args, **_kwargs: pytest.fail("external runtime must not be recreated"),
+    )
+    handler = _ResponseHandler()
+    _mod.AgentHandler._do_model_activate(handler, "Qwen3.5-2B-Q4_K_M")
+    assert handler.response_code == 409
+    assert handler.parse_response()["code"] == "external_runtime_unmanaged"
+    assert env_path.read_text(encoding="utf-8") == original
+
+
 def _external_lemonade_observation_fixture():
     checkpoint = "unsloth/Qwen3.6-35B-A3B-GGUF:Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf"
     health = {

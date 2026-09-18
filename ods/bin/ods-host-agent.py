@@ -10729,6 +10729,18 @@ class AgentHandler(BaseHTTPRequestHandler):
             )
             return
 
+        if _external_lemonade_runtime(persisted_env):
+            # Local GGUF activation owns the inference process and rolls back
+            # by restoring the previous physical model. Neither assumption is
+            # valid for a separately managed Lemonade service. Reject before
+            # looking up model files or changing any consumer configuration.
+            json_response(self, 409, {
+                "error": "Externally managed Lemonade cannot use local model activation",
+                "code": "external_runtime_unmanaged",
+                "requestedModelId": model_id,
+            })
+            return
+
         def local_gguf_model_from_id(raw_model_id: str) -> dict | None:
             matching = []
             for store in _model_stores.registered_stores(INSTALL_DIR / "data", container=bool(os.environ.get("ODS_HOST_INSTALL_DIR"))):
