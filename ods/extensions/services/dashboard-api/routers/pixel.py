@@ -27,6 +27,7 @@ from pixel_runtime_state import begin_pixel_stream, end_pixel_stream, try_begin_
 from pixel_chat_results import ChatResultStore, ResultCapacity, ResultConflict, owner_namespace
 from security import verify_api_key
 from config import read_live_env_value
+from helpers import get_loaded_model
 from pixel_chat_identity import asks_display_name, confirmed_display_name, display_name_stream, messages_with_identity
 from pixel_chat_context import HistorySnapshot, public_context
 
@@ -63,6 +64,10 @@ _OPS_STATUSES = frozenset(
 )
 _CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 _MODEL_SWITCH_DETAIL = "Model switch in progress; Pixel will be ready when activation completes"
+_MODEL_IDENTITY_DETAIL = (
+    "Pixel cannot verify its recorded model against the loaded Lemonade model. "
+    "Re-select the model in Models before using Pixel."
+)
 _MODEL_ADAPTIVE_DETAIL = (
     "Pixel is ready and adapts its tool flow for this model. Model capability "
     "affects the quality and persistence of complex work, not access or the "
@@ -377,13 +382,13 @@ def _model_support_from_status(status: object) -> dict[str, str] | None:
 
 
 async def _model_readiness_issue() -> tuple[str, str] | None:
-    """Return a host-proven model transition, if present.
+    """Return a host-proven transition or an unverified Lemonade route.
 
-    A failed lifecycle probe does not falsely take down an otherwise healthy
-    Pixel edge. Model quality metadata is advisory; the edge readiness check
-    remains authoritative.
+    A failed host lifecycle probe alone does not take down the Pixel edge.
+    A recorded Lemonade route does require live identity proof before chat.
+    Model quality metadata remains advisory, not an access restriction.
     """
-    return _model_readiness_issue_from_status(await _host_model_status())
+    return await _model_readiness_issue_for_status(await _host_model_status())
 
 
 def _active_runtime_projection(status: object) -> dict[str, object] | None:
@@ -422,6 +427,40 @@ def _active_runtime_projection(status: object) -> dict[str, object] | None:
     return {key: runtime[key] for key in expected | {"routeFingerprint"} if key in runtime}
 
 
+def _model_identity_tokens(value: str | None) -> set[str]:
+    """Compare a Lemonade ID with the equivalent GGUF basename, not a path."""
+    if not isinstance(value, str) or not value.strip():
+        return set()
+    name = Path(value.strip()).name.casefold()
+    tokens = {name}
+    if name.startswith("extra."):
+        tokens.add(name[6:])
+    for token in tuple(tokens):
+        if token.endswith(".gguf"):
+            tokens.add(token[:-5])
+    return tokens
+
+
+async def _model_readiness_issue_for_status(status: object) -> tuple[str, str] | None:
+    issue = _model_readiness_issue_from_status(status)
+    if issue is not None:
+        return issue
+    runtime = _active_runtime_projection(status)
+    if (runtime is None or runtime.get("source") != "local-switchboard"
+            or read_live_env_value("LLM_BACKEND").strip().casefold() != "lemonade"):
+        return None
+    try:
+        loaded = await asyncio.wait_for(get_loaded_model(), timeout=3.0)
+    except Exception as exc:
+        # Probe failures cannot validate a recorded external route. Do not log
+        # exception text; it may contain the private backend origin or key.
+        logger.warning("Pixel Lemonade identity probe failed (%s)", type(exc).__name__)
+        return "model_unavailable", _MODEL_IDENTITY_DETAIL
+    if not (_model_identity_tokens(runtime["model"]) & _model_identity_tokens(loaded)):
+        return "model_unavailable", _MODEL_IDENTITY_DETAIL
+    return None
+
+
 async def _model_activation_in_progress() -> bool:
     """Compatibility wrapper retained for focused lifecycle callers/tests."""
     issue = await _model_readiness_issue()
@@ -446,7 +485,7 @@ async def pixel_status() -> dict[str, object]:
     if config is None:
         return {"available": False, "model": None, "detail": "Pixel is not enabled"}
     host_status = await _host_model_status()
-    readiness_issue = _model_readiness_issue_from_status(host_status)
+    readiness_issue = await _model_readiness_issue_for_status(host_status)
     if readiness_issue is not None:
         state, detail = readiness_issue
         return {
