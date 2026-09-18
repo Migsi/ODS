@@ -559,6 +559,9 @@ for f in "${_resolver_callers[@]}"; do
 done
 unset _resolver_callers
 
+echo "[contract] dry-run does not install a missing jq prerequisite"
+bash tests/test-installer-dry-run-jq.sh
+
 echo "[contract] optional extension compose files are installer-gated"
 bash tests/test-installer-feature-state-sync.sh
 # Bundled optional/recommended services that ship compose.yaml must not enter

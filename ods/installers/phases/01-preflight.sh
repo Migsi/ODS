@@ -44,22 +44,8 @@ if ! command -v curl &> /dev/null; then
 fi
 log "curl: $(curl --version 2>/dev/null | sed -n '1p')"
 
-if ! command -v jq &> /dev/null; then
-    log "jq not found - attempting auto-install..."
-    if ! ods_sudo_available; then
-        error "jq is required but not installed and privileged package installation is unavailable. Install jq first, then re-run ODS."
-    fi
-    case "$PKG_MANAGER" in
-        dnf)    ods_sudo dnf install -y jq ;;
-        pacman) ods_sudo pacman -S --noconfirm jq ;;
-        zypper) ods_sudo zypper install -y jq ;;
-        apk)    ods_sudo apk add jq ;;
-        apt)    ods_sudo apt-get update -qq && ods_sudo apt-get install -y jq ;;
-        *)      ods_sudo apt-get install -y jq ;;
-    esac
-    command -v jq &> /dev/null || error "Failed to install jq automatically. Install it manually and re-run."
-fi
-log "jq: $(jq --version 2>/dev/null)"
+source "$SCRIPT_DIR/installers/lib/preflight-jq.sh"
+ods_preflight_require_jq
 
 # Check optional tools (warn but don't fail)
 OPTIONAL_TOOLS_MISSING=""
