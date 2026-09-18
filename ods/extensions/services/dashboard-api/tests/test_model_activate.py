@@ -245,6 +245,119 @@ def test_external_lemonade_catalog_does_not_fall_back_to_stale_local_model(
     assert model == {}
 
 
+def _external_lemonade_observation_fixture():
+    checkpoint = "unsloth/Qwen3.6-35B-A3B-GGUF:Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf"
+    health = {
+        "status": "ok",
+        "model_loaded": "Qwen3.6-35B-A3B-GGUF",
+        "all_models_loaded": [{
+            "type": "llm",
+            "model_name": "Qwen3.6-35B-A3B-GGUF",
+            "recipe": "llamacpp",
+            "checkpoint": checkpoint,
+            "recipe_options": {"ctx_size": 65536, "llamacpp_backend": "vulkan"},
+        }],
+    }
+    catalog = {"data": [{
+        "id": "Qwen3.6-35B-A3B-GGUF",
+        "downloaded": True,
+        "recipe": "llamacpp",
+        "checkpoint": checkpoint,
+    }]}
+    return health, catalog
+
+
+def test_external_lemonade_observation_requires_exact_live_checkpoint():
+    health, catalog = _external_lemonade_observation_fixture()
+    assert _mod._verified_external_lemonade_observation(health, catalog) == {
+        "modelId": "Qwen3.6-35B-A3B-GGUF",
+        "checkpoint": catalog["data"][0]["checkpoint"],
+        "contextLength": 65536,
+        "backend": "vulkan",
+    }
+
+
+@pytest.mark.parametrize("damage", [
+    lambda health, catalog: health.update(status="loading"),
+    lambda health, catalog: health.update(model_loaded="another-model"),
+    lambda health, catalog: health["all_models_loaded"].append(
+        dict(health["all_models_loaded"][0])
+    ),
+    lambda health, catalog: health["all_models_loaded"][0]["recipe_options"].update(
+        ctx_size=True
+    ),
+    lambda health, catalog: catalog["data"][0].update(downloaded=False),
+    lambda health, catalog: catalog["data"][0].update(checkpoint="different.gguf"),
+    lambda health, catalog: catalog["data"].append(dict(catalog["data"][0])),
+])
+def test_external_lemonade_observation_fails_closed_on_ambiguous_evidence(damage):
+    health, catalog = _external_lemonade_observation_fixture()
+    damage(health, catalog)
+    with pytest.raises(ValueError, match="External Lemonade"):
+        _mod._verified_external_lemonade_observation(health, catalog)
+
+
+def test_external_lemonade_observation_endpoint_is_authenticated_and_redacted(monkeypatch):
+    monkeypatch.setattr(_mod, "AGENT_API_KEY", "observation-test-key")
+    monkeypatch.setattr(_mod, "load_env", lambda _path: {"LEMONADE_EXTERNAL": "true"})
+    monkeypatch.setattr(_mod, "_read_external_lemonade_observation", lambda _env: {
+        "modelId": "Qwen3.6-35B-A3B-GGUF",
+        "checkpoint": "private-checkpoint-path.gguf",
+        "contextLength": 65536,
+        "backend": "vulkan",
+    })
+    server = _mod.ThreadedHTTPServer(("127.0.0.1", 0), _mod.AgentHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=5)
+        connection.request("GET", "/v1/model/external-observation")
+        denied = connection.getresponse()
+        assert denied.status == 401
+        denied.read()
+        connection.request("GET", "/v1/model/external-observation", headers={
+            "Authorization": "Bearer observation-test-key",
+        })
+        response = connection.getresponse()
+        assert response.status == 200
+        assert json.loads(response.read()) == {
+            "status": "verified",
+            "modelId": "Qwen3.6-35B-A3B-GGUF",
+            "contextLength": 65536,
+            "backend": "vulkan",
+        }
+        connection.close()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_external_lemonade_observation_rechecks_health_after_catalog(monkeypatch):
+    health, catalog = _external_lemonade_observation_fixture()
+    changed = json.loads(json.dumps(health))
+    changed["model_loaded"] = "another-model"
+    responses = iter([health, catalog, changed])
+    requested = []
+
+    class _Opener:
+        def open(self, request, timeout):
+            requested.append((request.full_url, timeout))
+            return io.BytesIO(json.dumps(next(responses)).encode("utf-8"))
+
+    monkeypatch.setattr(_mod.urllib_request, "build_opener", lambda *_args: _Opener())
+    with pytest.raises(ValueError, match="External Lemonade"):
+        _mod._read_external_lemonade_observation({
+            "LEMONADE_EXTERNAL": "true",
+            "LEMONADE_BASE_URL": "http://127.0.0.1:8080",
+        })
+    assert requested == [
+        ("http://127.0.0.1:8080/api/v1/health", 5),
+        ("http://127.0.0.1:8080/api/v1/models", 5),
+        ("http://127.0.0.1:8080/api/v1/health", 5),
+    ]
+
+
 def test_host_agent_keeps_gets_alive_and_closes_posts(monkeypatch):
     class _CountingServer(_mod.ThreadedHTTPServer):
         accepted_connections = 0

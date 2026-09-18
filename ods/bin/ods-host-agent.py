@@ -7070,6 +7070,8 @@ class AgentHandler(BaseHTTPRequestHandler):
             self._handle_model_list()
         elif path == "/v1/model/status":
             self._handle_model_status()
+        elif path == "/v1/model/external-observation":
+            self._handle_external_model_observation()
         elif path == "/v1/model/recovery":
             self._handle_model_recovery_status()
         elif path == "/v1/network/wifi-scan":
@@ -9860,6 +9862,34 @@ class AgentHandler(BaseHTTPRequestHandler):
             _verify_switchboard_route_for_status(data, "model-status")
             _project_switchboard_agent_viability(data)
             json_response(self, 200, data)
+
+    def _handle_external_model_observation(self):
+        """Expose only a verified, nonsecret external runtime identity."""
+        if not check_auth(self):
+            return
+        try:
+            env = load_env(INSTALL_DIR / ".env")
+            if not _external_lemonade_runtime(env):
+                json_response(
+                    self, 409, {"error": "External Lemonade is not configured"},
+                    no_store=True,
+                )
+                return
+            observed = _read_external_lemonade_observation(env)
+        except (OSError, ValueError, RuntimeError, urllib_error.URLError):
+            # Neither the configured origin nor upstream response is safe to
+            # reflect into an authenticated browser-visible error.
+            json_response(
+                self, 503, {"error": "External Lemonade identity is unavailable"},
+                no_store=True,
+            )
+            return
+        json_response(self, 200, {
+            "status": "verified",
+            "modelId": observed["modelId"],
+            "contextLength": observed["contextLength"],
+            "backend": observed["backend"],
+        }, no_store=True)
 
     def _handle_model_download(self):
         """Start async model download. Only one download at a time.
@@ -12685,6 +12715,88 @@ def _lemonade_loaded_model_entry(
         ):
             return entry
     return None
+
+
+def _verified_external_lemonade_observation(health: object, catalog: object) -> dict:
+    """Prove the one physically loaded external Lemonade model, without aliases.
+
+    This deliberately does not adopt or publish a route. An external runtime
+    may change independently of ODS, so a stale switchboard record must keep
+    Pixel fail-closed until a separate transactional reconciliation succeeds.
+    """
+    if not isinstance(health, dict) or health.get("status") != "ok":
+        raise ValueError("External Lemonade health is not verified")
+    model_id = health.get("model_loaded")
+    if (
+        not _valid_pixel_model_name(model_id)
+        or "://" in model_id
+        or not isinstance(catalog, dict)
+        or not isinstance(catalog.get("data"), list)
+    ):
+        raise ValueError("External Lemonade identity is not verified")
+    loaded = health.get("all_models_loaded")
+    if not isinstance(loaded, list):
+        raise ValueError("External Lemonade loaded models are unavailable")
+    llms = [row for row in loaded if isinstance(row, dict) and row.get("type") == "llm"]
+    if len(llms) != 1 or llms[0].get("model_name") != model_id:
+        raise ValueError("External Lemonade loaded LLM is ambiguous")
+    row = llms[0]
+    options = row.get("recipe_options")
+    context = options.get("ctx_size") if isinstance(options, dict) else None
+    backend = options.get("llamacpp_backend") if isinstance(options, dict) else None
+    checkpoint = row.get("checkpoint")
+    if (
+        row.get("recipe") != "llamacpp"
+        or not isinstance(checkpoint, str)
+        or not checkpoint.strip()
+        or type(context) is not int
+        or not 4096 <= context <= 10_000_000
+        or backend not in {"vulkan", "rocm", "metal", "cpu"}
+    ):
+        raise ValueError("External Lemonade runtime contract is incomplete")
+    matches = [
+        item for item in catalog["data"]
+        if isinstance(item, dict) and item.get("id") == model_id
+    ]
+    if (
+        len(matches) != 1
+        or matches[0].get("downloaded") is not True
+        or matches[0].get("recipe") != "llamacpp"
+        or matches[0].get("checkpoint") != checkpoint
+    ):
+        raise ValueError("External Lemonade catalog does not prove the loaded checkpoint")
+    return {
+        "modelId": model_id,
+        "checkpoint": checkpoint,
+        "contextLength": context,
+        "backend": backend,
+    }
+
+
+def _read_external_lemonade_observation(env: dict) -> dict:
+    """Read bounded health/catalog/health observations from one fixed origin."""
+    if not _external_lemonade_runtime(env):
+        raise ValueError("External Lemonade is not configured")
+    base_url = _lemonade_runtime_base_url(env)
+    if not base_url:
+        raise ValueError("External Lemonade origin is invalid")
+    opener = urllib_request.build_opener(
+        urllib_request.ProxyHandler({}), _BackendHealthNoRedirect()
+    )
+    payloads = []
+    for path in ("/api/v1/health", "/api/v1/models", "/api/v1/health"):
+        request = urllib_request.Request(
+            f"{base_url}{path}", headers={"Accept": "application/json"}
+        )
+        with opener.open(request, timeout=5) as response:
+            raw = response.read(4 * 1024 * 1024 + 1)
+        if len(raw) > 4 * 1024 * 1024:
+            raise ValueError("External Lemonade response is too large")
+        payloads.append(json.loads(raw.decode("utf-8")))
+    observed = _verified_external_lemonade_observation(payloads[0], payloads[1])
+    if _verified_external_lemonade_observation(payloads[2], payloads[1]) != observed:
+        raise ValueError("External Lemonade identity changed during observation")
+    return observed
 
 
 def _lemonade_loaded_context_length(
