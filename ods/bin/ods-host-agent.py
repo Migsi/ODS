@@ -3952,6 +3952,18 @@ def _prove_pixel_model_contract(config: dict, contract: dict) -> bool:
             return False
         _verify_litellm_route(config, model='ods/current')
         return True
+    if _external_lemonade_runtime(config):
+        # An externally managed Lemonade process is the authority for its
+        # loaded model. The local GGUF_FILE can be an unrelated installer
+        # artifact, so it cannot prove either commit or rollback here.
+        observed = _read_external_lemonade_observation(config)
+        return (
+            observed['modelId'] == contract['model']
+            and observed['contextLength'] == contract['contextLength']
+            and str(config.get('LEMONADE_MODEL') or '') == contract['model']
+            and str(config.get('CTX_SIZE') or '') == str(contract['contextLength'])
+            and str(config.get('MAX_CONTEXT') or '') == str(contract['contextLength'])
+        )
     gguf = str(config.get('GGUF_FILE') or '')
     if not gguf:
         return False
@@ -3992,7 +4004,8 @@ def _recover_pixel_model_transaction(config: dict) -> dict:
             if (journal['phase']=='prepared' and not status['pending']
                     and status['contract']==journal['previous']
                     and 'unavailable' not in journal['before'].values()
-                    and _pixel_model_config_digests()==journal['before']):
+                    and _pixel_model_config_digests()==journal['before']
+                    and _prove_pixel_model_contract(config,journal['previous'])):
                 journal.update(phase='completed',outcome='rollback')
                 _atomic_write_json(_pixel_model_journal_path(),journal)
                 return {'pending':False,'phase':'completed','transactionId':journal['transactionId'],'outcome':'rollback'}

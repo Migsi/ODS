@@ -407,6 +407,34 @@ def test_external_lemonade_observation_rechecks_health_after_catalog(monkeypatch
     ]
 
 
+@pytest.mark.parametrize(("persisted_model", "persisted_context", "live_model", "live_context", "proven"), [
+    ("Qwen3.5-2B-Q4_K_M", "65536", "Qwen3.5-2B-Q4_K_M", 65536, True),
+    ("Qwen3.6-35B-A3B-GGUF", "65536", "Qwen3.5-2B-Q4_K_M", 65536, False),
+    ("Qwen3.5-2B-Q4_K_M", "65536", "Qwen3.5-2B-Q4_K_M", 32768, False),
+    ("Qwen3.5-2B-Q4_K_M", "32768", "Qwen3.5-2B-Q4_K_M", 65536, False),
+])
+def test_external_pixel_recovery_proves_physical_and_persisted_model(
+    monkeypatch, persisted_model, persisted_context, live_model, live_context, proven,
+):
+    config = {
+        "LEMONADE_EXTERNAL": "true",
+        "LEMONADE_MODEL": persisted_model,
+        "CTX_SIZE": persisted_context,
+        "MAX_CONTEXT": persisted_context,
+        # The installer's local GGUF is unrelated to native Lemonade.
+        "GGUF_FILE": "Qwen3.5-9B-Q4_K_M.gguf",
+    }
+    monkeypatch.setattr(_mod, "_read_external_lemonade_observation", lambda _env: {
+        "modelId": live_model, "contextLength": live_context,
+    })
+    monkeypatch.setattr(_mod, "_wait_for_model_readiness", lambda *_args, **_kwargs: (
+        pytest.fail("stale local GGUF must not prove external recovery")
+    ))
+    assert _mod._prove_pixel_model_contract(config, {
+        "model": "Qwen3.5-2B-Q4_K_M", "contextLength": 65536,
+    }) is proven
+
+
 def test_host_agent_keeps_gets_alive_and_closes_posts(monkeypatch):
     class _CountingServer(_mod.ThreadedHTTPServer):
         accepted_connections = 0

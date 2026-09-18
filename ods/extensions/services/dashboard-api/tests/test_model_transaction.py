@@ -100,6 +100,21 @@ def test_partial_host_mutation_cannot_be_recovered_by_a_generic_reset(controller
     assert calls.count('model-begin')==1
 
 
+def test_unreceived_begin_cannot_clear_hold_when_external_model_changed(controller,monkeypatch):
+    _,state,calls,_=controller
+    env={'PIXEL_OPENWEBUI_KEY':'configured'}
+    tx=host._PixelModelTransaction(env)
+    tx.previous=copy.deepcopy(OLD)
+    tx._save('prepared')
+    monkeypatch.setattr(host,'_prove_pixel_model_contract',lambda *_:False)
+    assert host._recover_pixel_model_transaction(env)['pending'] is True
+    assert host._pixel_model_recovery_status()['pending'] is True
+    assert state['transactionId'] is None
+    assert 'model-finish' not in calls
+    monkeypatch.setattr(host,'_prove_pixel_model_contract',lambda *_:True)
+    assert host._recover_pixel_model_transaction(env)['outcome']=='rollback'
+
+
 @pytest.mark.parametrize('outcome',['commit','rollback'])
 def test_finish_recovery_qualifies_exact_state_when_one_gate_was_already_released(controller,monkeypatch,outcome):
     config,state,calls,call=controller
