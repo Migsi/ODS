@@ -1716,10 +1716,14 @@ def test_api_models_returns_full_catalog_without_fake_tokens(test_client, monkey
     assert payload["models"][0]["tokensPerSec"] is None
     assert payload["models"][0]["tokensPerSecEstimate"] == 130
     assert payload["models"][0]["performance"]["source"] == "benchmark_required"
+    assert payload["externalLemonade"] is False
 
 
 def test_api_models_reports_unmatched_external_runtime_without_fake_performance(test_client, monkeypatch, tmp_path):
     models_router, install_dir, _data_dir = _patch_model_router_paths(monkeypatch, tmp_path)
+    monkeypatch.setattr(models_router, "LLM_BACKEND", "lemonade")
+    monkeypatch.setenv("AMD_INFERENCE_RUNTIME_MODE", "external-lemonade")
+    monkeypatch.setenv("AMD_INFERENCE_MANAGED", "false")
     _write_model_library(install_dir, [{
         "id": "qwen3.6-35b-a3b-ud-q4",
         "name": "Qwen 3.6 35B-A3B",
@@ -1754,7 +1758,31 @@ def test_api_models_reports_unmatched_external_runtime_without_fake_performance(
     assert payload["currentModel"] is None
     assert payload["activationReadyModel"] is None
     assert payload["loadedModel"] == runtime_name
+    assert payload["externalLemonade"] is True
     assert recorded == []
+
+
+@pytest.mark.parametrize(
+    ("backend", "runtime_mode", "managed", "external", "expected"),
+    [
+        ("lemonade", "external-lemonade", "false", "", True),
+        ("lemonade", "windows-legacy-lemonade", "true", "", False),
+        ("lemonade", "", "", "true", True),
+        ("lemonade", "", "false", "", True),
+        ("llama-server", "external-lemonade", "false", "true", False),
+    ],
+)
+def test_external_lemonade_runtime_flag(
+    monkeypatch, backend, runtime_mode, managed, external, expected
+):
+    import routers.models as models_router
+
+    monkeypatch.setattr(models_router, "LLM_BACKEND", backend)
+    monkeypatch.setenv("AMD_INFERENCE_RUNTIME_MODE", runtime_mode)
+    monkeypatch.setenv("AMD_INFERENCE_MANAGED", managed)
+    monkeypatch.setenv("LEMONADE_EXTERNAL", external)
+
+    assert models_router._external_lemonade_runtime() is expected
 
 
 def test_download_model_rejects_while_bootstrap_upgrade_active(test_client, monkeypatch, tmp_path):

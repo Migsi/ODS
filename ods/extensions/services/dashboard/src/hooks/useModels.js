@@ -172,9 +172,12 @@ function normalizeOdsMode(value) {
   return ODS_MODES.has(mode) ? mode : 'unknown'
 }
 
-function modelActivationModeError(effectiveMode, configuredMode, llmBackend) {
+function modelActivationModeError(effectiveMode, configuredMode, llmBackend, externalLemonade) {
   if (llmBackend === 'external') {
     return 'ODS is using an external Ollama or LM Studio backend. Re-run the installer with --no-external-llm before activating a downloaded local model.'
+  }
+  if (llmBackend === 'lemonade' && externalLemonade) {
+    return 'Lemonade is managed outside ODS. Change the loaded model in Lemonade, then use Adopt loaded model here to update ODS and Pixel.'
   }
   if (effectiveMode === 'unknown' || configuredMode === 'unknown') {
     return 'ODS could not verify the active runtime mode. Repair or restart ODS before running a local model.'
@@ -212,6 +215,7 @@ export function useModels() {
   const [odsMode, setOdsMode] = useState(USE_MOCK_DATA ? MOCK_MODES.odsMode : 'unknown')
   const [configuredMode, setConfiguredMode] = useState(USE_MOCK_DATA ? MOCK_MODES.configuredMode : 'unknown')
   const [llmBackend, setLlmBackend] = useState(USE_MOCK_DATA ? 'llama-server' : 'unknown')
+  const [externalLemonade, setExternalLemonade] = useState(false)
   const [recommendationAlternatives, setRecommendationAlternatives] = useState([])
   const [hermesMinimumContext, setHermesMinimumContext] = useState(DEFAULT_HERMES_MIN_CONTEXT)
   const [pixelMinimumContext, setPixelMinimumContext] = useState(DEFAULT_PIXEL_MIN_CONTEXT)
@@ -305,6 +309,7 @@ export function useModels() {
       setOdsMode(effectiveMode)
       setConfiguredMode(normalizeOdsMode(data.configuredMode ?? data.odsMode))
       setLlmBackend(typeof data.llmBackend === 'string' ? data.llmBackend.trim().toLowerCase() : 'unknown')
+      setExternalLemonade(data.externalLemonade === true)
       setRecommendationAlternatives(data.recommendationAlternatives ?? [])
       setHermesMinimumContext(Number(data.hermesMinimumContext || DEFAULT_HERMES_MIN_CONTEXT))
       setPixelMinimumContext(Number(data.pixelMinimumContext || DEFAULT_PIXEL_MIN_CONTEXT))
@@ -378,7 +383,7 @@ export function useModels() {
   }
 
   const loadModel = async (modelId, options = {}) => {
-    const modeError = modelActivationModeError(odsMode, configuredMode, llmBackend)
+    const modeError = modelActivationModeError(odsMode, configuredMode, llmBackend, externalLemonade)
     if (modeError) {
       setMutationError(modeError)
       return
@@ -548,7 +553,7 @@ export function useModels() {
     ].filter(Boolean)),
   ]
   const error = mutationError || fetchError
-  const activationModeError = modelActivationModeError(odsMode, configuredMode, llmBackend)
+  const activationModeError = modelActivationModeError(odsMode, configuredMode, llmBackend, externalLemonade)
 
   return {
     models,
@@ -561,6 +566,7 @@ export function useModels() {
     odsMode,
     configuredMode,
     llmBackend,
+    externalLemonade,
     canActivateModels: activationModeError === null,
     clearMutationError,
     activationModeError,

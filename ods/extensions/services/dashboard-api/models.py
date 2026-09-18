@@ -234,3 +234,4 @@ class ModelLibraryResponse(BaseModel):
     odsMode: str = "unknown"
     configuredMode: str = "unknown"
     llmBackend: str = "unknown"
+    externalLemonade: bool = False

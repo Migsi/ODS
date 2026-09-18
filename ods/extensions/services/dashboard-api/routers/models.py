@@ -76,6 +76,22 @@ def _installed_model_paths() -> dict[str, Path]:
 def _installed_model_path(filename: str) -> Path | None:
     return next((path for name, path in _installed_model_paths().items() if name.casefold() == filename.casefold()), None)
 _ENV_PATH = Path(INSTALL_DIR) / ".env"
+
+
+def _external_lemonade_runtime() -> bool:
+    """Whether Lemonade is owned by the host rather than this ODS install."""
+    if str(LLM_BACKEND).strip().lower() != "lemonade":
+        return False
+    runtime_mode = os.environ.get("AMD_INFERENCE_RUNTIME_MODE", "").strip().lower()
+    managed = os.environ.get("AMD_INFERENCE_MANAGED", "").strip().lower()
+    external = os.environ.get("LEMONADE_EXTERNAL", "").strip().lower()
+    return (
+        runtime_mode == "external-lemonade"
+        or managed == "false"
+        or external in {"1", "true", "yes", "on"}
+    )
+
+
 _HF_API_BASE = "https://huggingface.co"
 _HF_REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,95}/[A-Za-z0-9][A-Za-z0-9._-]{0,95}$")
 _HF_AUTHOR_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$")
@@ -1386,6 +1402,7 @@ async def list_models(api_key: str = Depends(verify_api_key)):
     payload["odsMode"] = ODS_MODE_EFFECTIVE
     payload["configuredMode"] = _configured_ods_mode()
     payload["llmBackend"] = LLM_BACKEND or "unknown"
+    payload["externalLemonade"] = _external_lemonade_runtime()
     payload["activationReadyModel"] = (
         payload.get("currentModel")
         if loaded_entry

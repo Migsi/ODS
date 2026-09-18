@@ -190,6 +190,37 @@ describe('useModels', () => {
     expect(result.current.error).toContain('external Ollama or LM Studio backend')
   })
 
+  test('externally managed Lemonade keeps browsing but routes switching through adoption', async () => {
+    const target = 'downloaded-model'
+    fetch.mockResolvedValue(modelsResponse(
+      [{ id: target, status: 'downloaded' }],
+      { odsMode: 'lemonade', configuredMode: 'lemonade', llmBackend: 'lemonade', externalLemonade: true }
+    ))
+
+    const { result } = renderHook(() => useModels())
+    await waitFor(() => expect(result.current.externalLemonade).toBe(true))
+
+    expect(result.current.models).toHaveLength(1)
+    expect(result.current.canActivateModels).toBe(false)
+    expect(result.current.activationModeError).toContain('Adopt loaded model')
+
+    await act(async () => { await result.current.loadModel(target) })
+
+    expect(fetch.mock.calls.filter(([, options]) => options?.method === 'POST')).toHaveLength(0)
+    expect(result.current.error).toContain('managed outside ODS')
+  })
+
+  test('ODS-managed Lemonade retains local model activation', async () => {
+    fetch.mockResolvedValue(modelsResponse([], {
+      odsMode: 'lemonade', configuredMode: 'lemonade',
+      llmBackend: 'lemonade', externalLemonade: false,
+    }))
+
+    const { result } = renderHook(() => useModels())
+    await waitFor(() => expect(result.current.odsMode).toBe('lemonade'))
+    expect(result.current.canActivateModels).toBe(true)
+  })
+
   test('does not activate when effective and configured modes differ', async () => {
     const target = 'downloaded-model'
     fetch.mockResolvedValue(modelsResponse(
