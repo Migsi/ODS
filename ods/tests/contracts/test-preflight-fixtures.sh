@@ -75,6 +75,57 @@ scripts/preflight-engine.sh \
 blockers="$(json_summary_blockers "$tmpdir/macos-mvp-good.json")"
 assert_eq "$blockers" "0" "macos-mvp-good blockers"
 
+echo "[contract] preflight fixture: T1 alias uses its 30GB floor"
+scripts/preflight-engine.sh \
+  --report "$tmpdir/t1-alias-disk.json" \
+  --tier T1 \
+  --ram-gb 16 \
+  --disk-gb 40 \
+  --gpu-backend cpu \
+  --gpu-vram-mb 0 \
+  --gpu-name "CPU" \
+  --platform-id linux \
+  --compose-overlays docker-compose.base.yml \
+  --script-dir "$ROOT_DIR" \
+  --env >/dev/null
+assert_eq "$(json_summary_blockers "$tmpdir/t1-alias-disk.json")" "0" "T1 alias disk floor"
+
+echo "[contract] preflight fixture: T3 alias uses its 80GB floor"
+scripts/preflight-engine.sh \
+  --report "$tmpdir/t3-alias-disk.json" \
+  --tier T3 \
+  --ram-gb 48 \
+  --disk-gb 65 \
+  --gpu-backend nvidia \
+  --gpu-vram-mb 24576 \
+  --gpu-name "RTX 4090" \
+  --platform-id linux \
+  --compose-overlays docker-compose.base.yml,docker-compose.nvidia.yml \
+  --script-dir "$ROOT_DIR" \
+  --env >/dev/null
+if [[ "$(json_summary_blockers "$tmpdir/t3-alias-disk.json")" -lt 1 ]]; then
+  echo "[FAIL] T3 alias must block below 80GB"
+  exit 1
+fi
+
+echo "[contract] preflight fixture: T4 alias uses its 150GB floor"
+scripts/preflight-engine.sh \
+  --report "$tmpdir/t4-alias-disk.json" \
+  --tier T4 \
+  --ram-gb 64 \
+  --disk-gb 100 \
+  --gpu-backend nvidia \
+  --gpu-vram-mb 24576 \
+  --gpu-name "RTX 4090" \
+  --platform-id linux \
+  --compose-overlays docker-compose.base.yml,docker-compose.nvidia.yml \
+  --script-dir "$ROOT_DIR" \
+  --env >/dev/null
+if [[ "$(json_summary_blockers "$tmpdir/t4-alias-disk.json")" -lt 1 ]]; then
+  echo "[FAIL] T4 alias must block below 150GB"
+  exit 1
+fi
+
 echo "[contract] preflight fixture: disk-blocker"
 scripts/preflight-engine.sh \
   --report "$tmpdir/disk-blocker.json" \
