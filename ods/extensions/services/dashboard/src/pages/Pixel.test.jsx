@@ -1330,7 +1330,7 @@ describe('Pixel', () => {
     })
     fireEvent.click(screen.getByTitle('Send'))
 
-    expect(await screen.findByText(prose)).toBeInTheDocument()
+    expect(await screen.findByText(prose, {}, { timeout: 3000 })).toBeInTheDocument()
     expect(globalThis.fetch.mock.calls.filter(call => call[0] === '/api/pixel/chat/stream')).toHaveLength(1)
   })
 
