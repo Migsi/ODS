@@ -12,6 +12,9 @@ command -v jq >/dev/null 2>&1 || {
 echo "[contract] n8n nonstandard-UID home and cookie policy"
 bash tests/test-n8n-cookie-policy.sh
 
+echo "[contract] installed preflight model route"
+bash tests/test-ods-preflight-llm-route.sh
+
 echo "[contract] backend contract files"
 for f in config/backends/amd.json config/backends/nvidia.json config/backends/cpu.json config/backends/apple.json; do
   test -f "$f" || { echo "[FAIL] missing $f"; exit 1; }
