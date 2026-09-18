@@ -112,8 +112,44 @@ if (( RAM_GB == 0 )) && [[ -f "$ROOT_DIR/.env" ]]; then
     [[ -n "${_env_ram:-}" ]] && RAM_GB="$_env_ram"
 fi
 
-# Disk: POSIX df -k — works on BSD and GNU identically (df -BG is GNU-only).
-DISK_GB="$(df -k "$HOME" 2>/dev/null | tail -1 | awk '{print int($4/1024/1024)}' || echo 0)"
+_doctor_disk_free_gb() {
+    local path="$1" value
+    value="$(df -k "$path" 2>/dev/null | tail -1 | awk '{print int($4/1024/1024)}' || true)"
+    [[ "$value" =~ ^[0-9]+$ ]] || value=0
+    printf '%s\n' "$value"
+}
+
+_doctor_external_inference_enabled() {
+    [[ -n "${EXTERNAL_LLM_URL:-}" \
+        || "${LEMONADE_EXTERNAL:-false}" == "true" \
+        || "${ODS_MODE:-local}" == "cloud" ]]
+}
+
+_doctor_select_disk() {
+    local home_path="${HOME:-$ROOT_DIR}" docker_root="" docker_disk_gb=0
+    DOCTOR_HOME_DISK_GB="$(_doctor_disk_free_gb "$home_path")"
+    DOCTOR_DISK_SOURCE="$home_path"
+    DISK_GB="$DOCTOR_HOME_DISK_GB"
+
+    # External inference stores neither the served model nor Docker images
+    # under HOME. When Docker has a separate data-root, apply the existing
+    # tier floor to the filesystem that actually grows during installation.
+    # Fall back to HOME if the daemon or data-root cannot be observed.
+    if _doctor_external_inference_enabled && command -v docker >/dev/null 2>&1; then
+        docker_root="$(docker info --format '{{.DockerRootDir}}' 2>/dev/null || true)"
+        if [[ "$docker_root" == /* ]]; then
+            docker_disk_gb="$(_doctor_disk_free_gb "$docker_root")"
+            if [[ "$docker_disk_gb" =~ ^[0-9]+$ && "$docker_disk_gb" -gt 0 ]]; then
+                DISK_GB="$docker_disk_gb"
+                DOCTOR_DISK_SOURCE="$docker_root"
+            fi
+        fi
+    fi
+    export DISK_GB DOCTOR_HOME_DISK_GB DOCTOR_DISK_SOURCE
+}
+
+# POSIX df -k works on BSD and GNU identically (df -BG is GNU-only).
+_doctor_select_disk
 
 if [[ -x "$SCRIPT_DIR/scripts/build-capability-profile.sh" ]]; then
     CAP_ENV="$("$DOCTOR_BASH_CMD" "$SCRIPT_DIR/scripts/build-capability-profile.sh" --output "$CAP_FILE" --env)"
