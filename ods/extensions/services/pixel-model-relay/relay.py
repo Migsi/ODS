@@ -1,8 +1,8 @@
-"""Authenticated, Pixel-only host loopback bridge to the ODS model router.
+"""Authenticated, Pixel-only host loopback bridge to the ODS model route.
 
-The router remains the single dynamic model/swap/telemetry authority. This
-bridge exists because the shared LiteLLM proxy can retain inference after an
-OpenClaw client disconnects. It cannot forward arbitrary URLs or endpoints.
+Managed inference uses model-router as the dynamic model/swap authority.
+Cloud and external-LLM installs have no managed router, so their fixed route
+is the authenticated LiteLLM gateway. No caller can select a URL or endpoint.
 """
 
 import asyncio
@@ -14,7 +14,17 @@ from contextlib import suppress
 from aiohttp import ClientSession, ClientTimeout, web
 
 KEY = os.environ.get("PIXEL_MODEL_RELAY_KEY", "")
-UPSTREAM = "http://model-router:9099"
+LITELLM_KEY = os.environ.get("LITELLM_KEY", "")
+
+
+def _upstream_route(ods_mode, external_llm_url):
+    if ods_mode == "cloud" or external_llm_url:
+        return "http://litellm:4000", True
+    return "http://model-router:9099", False
+
+
+UPSTREAM, UPSTREAM_REQUIRES_KEY = _upstream_route(
+    os.environ.get("ODS_MODE", "local"), os.environ.get("EXTERNAL_LLM_URL", ""))
 ALIASES = {"ods/current", "default"}
 MAX_BODY = 2 * 1024 * 1024
 WRITE_TIMEOUT_SECONDS = 30.0  # Host-local OpenClaw must drain promptly.
@@ -50,9 +60,12 @@ async def _inference(request):
             raise web.HTTPBadRequest()
 
     async with ClientSession(timeout=ClientTimeout(total=None)) as client:
+        upstream_headers = {"Content-Type": "application/json"}
+        if UPSTREAM_REQUIRES_KEY:
+            upstream_headers["Authorization"] = "Bearer " + LITELLM_KEY
         upstream_task = asyncio.create_task(client.request(
             request.method, UPSTREAM + request.path, data=body,
-            headers={"Content-Type": "application/json"}))
+            headers=upstream_headers))
         disconnected = asyncio.create_task(_disconnect(request))
         try:
             done, _ = await asyncio.wait({upstream_task, disconnected}, return_when=asyncio.FIRST_COMPLETED)
@@ -104,6 +117,11 @@ def create_app():
     if not KEY or not KEY.isascii() or len(KEY) > 4096 \
             or any(ord(c) < 32 or ord(c) == 127 for c in KEY):
         raise RuntimeError("invalid Pixel model relay key")
+    if UPSTREAM_REQUIRES_KEY and (
+        not LITELLM_KEY or not LITELLM_KEY.isascii() or len(LITELLM_KEY) > 4096
+        or any(ord(c) < 32 or ord(c) == 127 for c in LITELLM_KEY)
+    ):
+        raise RuntimeError("invalid LiteLLM model relay key")
     app = web.Application(client_max_size=MAX_BODY)
     app.router.add_get("/health", _health)
     app.router.add_route("*", "/v1/models", _inference)

@@ -4601,6 +4601,12 @@ ods_pixel_install_default_agent() {
     # provider is Parallel. ODS also shares SearXNG with OWUI/Perplexica, so
     # a clean install must start it before Pixel plans its host deployment.
     local -a pixel_prerequisites=(litellm dashboard-api pixel-edge pixel-model-relay searxng)
+    # Managed inference needs the router before the relay's real model probe.
+    # Cloud/external installs instead bind the relay to authenticated LiteLLM;
+    # their Compose overlays intentionally profile model-router out.
+    if [[ "${ODS_MODE:-local}" != cloud && -z "${EXTERNAL_LLM_URL:-}" ]]; then
+        pixel_prerequisites+=(model-router)
+    fi
     owner="${PIXEL_SERVICE_USER:-$(ods_pixel_install_owner)}" || return 1
     home="$(ods_pixel_owner_home "$owner")" || return 1
     pixel_gateway_port="$(_ods_pixel_gateway_port)" || {

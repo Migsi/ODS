@@ -9,6 +9,8 @@ import unittest
 from aiohttp import ClientSession, web
 
 os.environ["PIXEL_MODEL_RELAY_KEY"] = "test-only-pixel-relay-key"
+os.environ["ODS_MODE"] = "local"
+os.environ["EXTERNAL_LLM_URL"] = ""
 spec = importlib.util.spec_from_file_location("relay", Path(__file__).parents[1] / "relay.py")
 relay = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(relay)
@@ -100,6 +102,47 @@ class RelayTests(unittest.IsolatedAsyncioTestCase):
                 relay.create_app()
         finally:
             relay.KEY = original
+
+    async def test_cloud_and_external_routes_are_fixed_internal_targets(self):
+        self.assertEqual(relay._upstream_route("local", ""),
+                         ("http://model-router:9099", False))
+        self.assertEqual(relay._upstream_route("cloud", ""),
+                         ("http://litellm:4000", True))
+        self.assertEqual(relay._upstream_route("local", "http://untrusted.example/v1"),
+                         ("http://litellm:4000", True))
+
+    async def test_litellm_route_uses_only_its_gateway_key(self):
+        seen = []
+
+        async def keyed_models(request):
+            seen.append(request.headers.get("Authorization"))
+            return web.json_response({"data": [{"id": "ods/current"}]})
+
+        keyed = web.Application()
+        keyed.router.add_get("/v1/models", keyed_models)
+        runner, upstream = await start(keyed)
+        prior = relay.UPSTREAM, relay.UPSTREAM_REQUIRES_KEY, relay.LITELLM_KEY
+        relay.UPSTREAM, relay.UPSTREAM_REQUIRES_KEY, relay.LITELLM_KEY = (
+            upstream, True, "litellm-only-test-key")
+        try:
+            async with ClientSession() as client:
+                async with client.get(self.url + "/v1/models", headers={
+                    "Authorization": "Bearer test-only-pixel-relay-key"
+                }) as response:
+                    self.assertEqual(response.status, 200)
+            self.assertEqual(seen, ["Bearer litellm-only-test-key"])
+        finally:
+            relay.UPSTREAM, relay.UPSTREAM_REQUIRES_KEY, relay.LITELLM_KEY = prior
+            await runner.cleanup()
+
+    async def test_litellm_route_requires_a_valid_gateway_key(self):
+        prior = relay.UPSTREAM_REQUIRES_KEY, relay.LITELLM_KEY
+        relay.UPSTREAM_REQUIRES_KEY, relay.LITELLM_KEY = True, ""
+        try:
+            with self.assertRaisesRegex(RuntimeError, "invalid LiteLLM model relay key"):
+                relay.create_app()
+        finally:
+            relay.UPSTREAM_REQUIRES_KEY, relay.LITELLM_KEY = prior
 
 
 if __name__ == "__main__":

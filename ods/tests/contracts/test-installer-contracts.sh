@@ -599,6 +599,7 @@ done
 
 echo "[contract] SearXNG follows web search consumers, not only --recommended"
 bash tests/test-pixel-support-services.sh
+bash tests/test-pixel-model-relay-compose.sh
 grep -qE 'ENABLE_RECOMMENDED:-false' "$features_phase" \
   || { echo "[FAIL] ENABLE_SEARXNG derivation must consult ENABLE_RECOMMENDED"; exit 1; }
 grep -qE 'ENABLE_PIXEL_RUNTIME:-false' "$features_phase" \
