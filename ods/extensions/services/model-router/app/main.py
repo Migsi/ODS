@@ -781,6 +781,8 @@ class _SSERewriter:
         # Evidence needs only an irreversible mismatch verdict. Retaining one
         # decoded model string per token makes long responses grow in memory.
         self.identity_matches = True
+        self.response_model: str | None = None
+        self.response_model_consistent = True
         self.usage = {
             "input_tokens": 0,
             "output_tokens": 0,
@@ -802,6 +804,21 @@ class _SSERewriter:
                 self.stop_reason = stop_reason
             self.completed = self.completed or _is_terminal_stream_payload(payload)
 
+    def _observe_models(self, models: list[str]) -> None:
+        self.identity_matches = self.identity_matches and all(
+            model == self.expected_model for model in models
+        )
+        for model in models:
+            # A receipt reports the backend identity actually observed, but
+            # must not hide a mid-stream identity change or retain unbounded
+            # backend-controlled strings.
+            if len(model) > 256:
+                self.response_model_consistent = False
+            elif self.response_model is None:
+                self.response_model = model
+            elif model != self.response_model:
+                self.response_model_consistent = False
+
     def feed(self, chunk: bytes) -> list[bytes]:
         self.buffer += chunk
         output: list[bytes] = []
@@ -815,9 +832,7 @@ class _SSERewriter:
             rewritten, models, payloads, saw_done = _rewrite_sse_event(
                 event, self.alias
             )
-            self.identity_matches = self.identity_matches and all(
-                model == self.expected_model for model in models
-            )
+            self._observe_models(models)
             self._observe(payloads, saw_done=saw_done)
             output.append(rewritten + delimiter)
         return output
@@ -828,9 +843,7 @@ class _SSERewriter:
         rewritten, models, payloads, saw_done = _rewrite_sse_event(
             self.buffer, self.alias
         )
-        self.identity_matches = self.identity_matches and all(
-            model == self.expected_model for model in models
-        )
+        self._observe_models(models)
         self._observe(payloads, saw_done=saw_done)
         self.buffer = b""
         return rewritten
@@ -1247,12 +1260,12 @@ async def _forward_inner(request: Request, path: str, payload: dict[str, Any],
                         and rewriter.completed
                         and probe_id
                         and 200 <= upstream.status_code < 300
-                        and rewriter.identity_matches
+                        and rewriter.response_model_consistent
                     ):
                         _record_evidence({
                             **evidence_base,
                             "status": upstream.status_code,
-                            "responseModel": route["runtimeModelId"],
+                            "responseModel": rewriter.response_model or route["runtimeModelId"],
                             "lemonadeRoute": lemonade_route,
                         })
                     if (

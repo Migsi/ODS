@@ -41,8 +41,8 @@ def test_rewrites_nested_response_identity_and_records_concrete_model(router, al
     assert mod._inflight == 0
 
 
-@pytest.mark.parametrize("models", [("Wrong.gguf",), ("Wrong.gguf", "Concrete.gguf")])
-def test_nested_mismatched_identity_cannot_produce_success_evidence(router, models):
+@pytest.mark.parametrize("models, status", [(("Wrong.gguf",), 200), (("Wrong.gguf", "Concrete.gguf"), 404)])
+def test_nested_unpinned_identity_records_observed_model_only_when_consistent(router, models, status):
     mod, client, write_state, _ = router
     write_state()
     probe = str(uuid.uuid4())
@@ -54,7 +54,10 @@ def test_nested_mismatched_identity_cannot_produce_success_evidence(router, mode
     evidence = client.get(f"/internal/route-evidence/{probe}", headers={
         "Authorization": "Bearer internal-secret",
     })
-    assert evidence.status_code == 404
+    assert evidence.status_code == status
+    if status == 200:
+        assert evidence.json()["routedModel"] == "Concrete.gguf"
+        assert evidence.json()["responseModel"] == "Wrong.gguf"
     assert mod._inflight == 0
 
 
