@@ -698,8 +698,20 @@ if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; 
             fail "Rendered external-LLM stack still contains model-router"
         elif ! grep -Fq 'ODS_TALK_VISION_URL: http://host.docker.internal:11434/v1' "$compose_config_file"; then
             fail "Rendered external-LLM stack does not route ODS Talk vision to the external backend"
+        elif ! awk '
+            /^  dashboard-api:/ { in_dashboard = 1; next }
+            in_dashboard && /^  [^ ]/ { exit }
+            in_dashboard { print }
+        ' "$compose_config_file" | grep -Fq 'EXTERNAL_LLM_CONTAINER_URL: http://host.docker.internal:11434'; then
+            fail "Rendered Dashboard API lacks the physical external-LLM URL"
+        elif ! awk '
+            /^  dashboard-api:/ { in_dashboard = 1; next }
+            in_dashboard && /^  [^ ]/ { exit }
+            in_dashboard { print }
+        ' "$compose_config_file" | grep -Fq 'EXTERNAL_LLM_PROVIDER: ollama'; then
+            fail "Rendered Dashboard API lacks the external-LLM provider"
         else
-            pass "Real external-LLM Compose stack renders without managed inference and routes ODS Talk externally"
+            pass "Real external-LLM Compose stack routes ODS Talk and Dashboard model discovery externally"
         fi
     else
         fail "Real external-LLM Compose stack failed docker compose config"
