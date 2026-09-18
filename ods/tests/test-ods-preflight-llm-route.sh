@@ -36,7 +36,7 @@ grep -Fq 'LLM_CONTAINER="ods-litellm"' "$ROOT_DIR/scripts/ods-preflight.sh" || {
     printf 'FAIL quick preflight did not check the external model gateway\n' >&2
     exit 1
 }
-if [[ "$(grep -Fc '[[ "$sid" == "llama-server" ]] && ods_preflight_uses_litellm' "$ROOT_DIR/ods-cli")" != 2 ]]; then
+if [[ "$(grep -Fc '[[ "$sid" == "llama-server" || "$sid" == "model-router" ]] && ods_preflight_uses_litellm' "$ROOT_DIR/ods-cli")" != 2 ]]; then
     printf 'FAIL text and JSON status must omit disabled managed inference\n' >&2
     exit 1
 fi

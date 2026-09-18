@@ -1358,8 +1358,8 @@ cmd_status() {
     # Launch parallel health checks
     for sid in "${SERVICE_IDS[@]}"; do
         # Cloud and external-model installs intentionally do not start the
-        # managed llama-server. Report the active LiteLLM gateway instead.
-        if [[ "$sid" == "llama-server" ]] && ods_preflight_uses_litellm; then
+        # managed model stack. Report the active LiteLLM gateway instead.
+        if [[ "$sid" == "llama-server" || "$sid" == "model-router" ]] && ods_preflight_uses_litellm; then
             continue
         fi
         local health="${SERVICE_HEALTH[$sid]}"
@@ -1469,7 +1469,7 @@ cmd_status_json() {
     trap 'rm -f "$tmp"' RETURN
 
     for sid in "${SERVICE_IDS[@]}"; do
-        if [[ "$sid" == "llama-server" ]] && ods_preflight_uses_litellm; then
+        if [[ "$sid" == "llama-server" || "$sid" == "model-router" ]] && ods_preflight_uses_litellm; then
             continue
         fi
         local cat="${SERVICE_CATEGORIES[$sid]}"
