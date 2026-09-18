@@ -1049,6 +1049,19 @@ describe('Pixel', () => {
     expect(screen.getByPlaceholderText('Message Portal...')).toBeEnabled()
   })
 
+  it('shows a verified fixed external-host model without inventing a context window', async () => {
+    globalThis.fetch.mockResolvedValue(response({
+      available: true,
+      model: 'pixel/default',
+      runtime: { source: 'external-host', model: 'Qwen3.5-9B-Q4_K_M.gguf' },
+    }))
+    render(<Pixel systemStatus={{ inference: { loadedModel: 'stale-local-model', contextSize: 32768 } }} />)
+    await waitFor(() => expect(screen.getByText('Available')).toBeInTheDocument())
+    expect(screen.getByRole('button',{name:'Choose model: Qwen 3.5 9B'})).toBeInTheDocument()
+    expect(screen.getByRole('button',{name:'Token usage unavailable'})).toBeInTheDocument()
+    expect(screen.queryByText('stale-local-model')).not.toBeInTheDocument()
+  })
+
   it('ignores an unknown runtime source and keeps the fallback local identity', async () => {
     globalThis.fetch.mockResolvedValue(
       response({

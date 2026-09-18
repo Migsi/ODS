@@ -192,6 +192,16 @@ it('routes remote-provider conversations to their settings instead of switching 
   expect(posts()).toHaveLength(0)
 })
 
+it('identifies a fixed external-host model and never offers a local switch',async()=>{
+  render(view({runtimeSource:'external-host',activeModel:'Qwen3.5-9B-Q4_K_M.gguf'}))
+  fireEvent.click(screen.getByRole('button',{name:'Choose model: Qwen 3.5 9B'}))
+  await waitFor(()=>expect(screen.getByRole('menuitemradio',{name:/Qwen 3.5 2B/})).toBeDisabled())
+  expect(screen.getByText('This model is managed on the external host.')).toBeInTheDocument()
+  expect(screen.getByText('Change this model on its external host.')).toBeInTheDocument()
+  expect(screen.queryByRole('link',{name:'Manage models'})).toBeNull()
+  expect(posts()).toHaveLength(0)
+})
+
 it.each([undefined,'unrecognized-source'])('blocks local activation until runtime source %s is confirmed',async runtimeSource=>{
   const {rerender}=render(view({runtimeSource,activeModel:'Remote Chat Model'}))
   fireEvent.click(screen.getByRole('button',{name:'Choose model: Remote Chat Model'}))

@@ -627,7 +627,9 @@ export default function Pixel({ systemStatus = null }) {
   const previewAccess = resolvePreviewAccess(currentPreview)
   const restoredActive = interrupted && !sending && restoredActivity === 'active'
   const restoredChecking = interrupted && !sending && restoredActivity === 'checking'
-  const contextCapacity=Number(contextRuntime?.contextLength || systemStatus?.inference?.contextSize || systemStatus?.model?.contextLength) || null
+  const contextCapacity=contextRuntime?.source==='external-host'
+    ? Number(contextRuntime.contextLength) || null
+    : Number(contextRuntime?.contextLength || systemStatus?.inference?.contextSize || systemStatus?.model?.contextLength) || null
   const contextControl=usePortalContext({chatId:chatIdRef.current,
     runtimeIdentity:{model:contextRuntime?.model || activeModel,source:contextRuntime?.source || '',routeFingerprint:contextRuntime?.routeFingerprint},capacity:contextCapacity,
     initialRequestId:compactionRequestRef.current,
@@ -751,13 +753,19 @@ export default function Pixel({ systemStatus = null }) {
           && runtime.contextLength >= 4096
         const validLocalRuntime = runtimeKeys === ['contextLength', 'model', 'source'].join('\n')
           && runtime.source === 'local-switchboard'
-        const confirmedRuntime = (validRemoteRuntime || validLocalRuntime)
+        const validExternalRuntime = [
+          ['model', 'source'].join('\n'),
+          ['contextLength', 'model', 'source'].join('\n'),
+        ].includes(runtimeKeys) && runtime.source === 'external-host'
+        const validContext = (validExternalRuntime && runtime.contextLength === undefined)
+          || Number.isInteger(runtime?.contextLength)
+            && runtime.contextLength >= 1
+            && runtime.contextLength <= 10_000_000
+        const confirmedRuntime = (validRemoteRuntime || validLocalRuntime || validExternalRuntime)
           && typeof runtime.model === 'string'
           && runtime.model.length > 0
           && runtime.model.length <= 256
-          && Number.isInteger(runtime.contextLength)
-          && runtime.contextLength >= 1
-          && runtime.contextLength <= 10_000_000
+          && validContext
             ? runtime
             : null
         // Keep the last confirmed identity only for measured context. Model

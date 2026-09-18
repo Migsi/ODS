@@ -50,7 +50,7 @@ function LoadedModelSelector({activeModel='',runtimeSource,busy=false,onSwitchin
   const [open,setOpen]=useState(true),[confirmId,setConfirmId]=useState(null),[pending,setPending]=useState(false),[localError,setLocalError]=useState('')
   const [recoveryPending,setRecoveryPending]=useState(false),[recoveryBusy,setRecoveryBusy]=useState(false)
   const root=useRef(null),trigger=useRef(null),list=useRef(null),mounted=useRef(true),submitLock=useRef(false)
-  const id=useId(),remote=runtimeSource==='remote-provider',local=runtimeSource==='local-switchboard'
+  const id=useId(),remote=runtimeSource==='remote-provider',external=runtimeSource==='external-host',local=runtimeSource==='local-switchboard'
   const switching=pending || recoveryBusy || Boolean(activationLoading) || Boolean(modelLifecycle?.active && modelLifecycle.operation==='model_activation')
   const current=local?models.find(model=>model.id===currentModel):null
   const selectedId=local && activationReadyModel===currentModel?currentModel:null
@@ -77,6 +77,7 @@ function LoadedModelSelector({activeModel='',runtimeSource,busy=false,onSwitchin
     if(switching || modelLifecycle?.active || actionLoadingModels.length)return 'A model operation is in progress.'
     if(recoveryPending)return 'Recover the interrupted model switch before loading another model.'
     if(remote)return 'This conversation uses a remote provider. Choose its model in provider settings.'
+    if(external)return 'This model is managed on the external host. Switch it there.'
     if(!local)return 'The conversation’s model source is not confirmed. Review Models before switching.'
     if(busy)return 'Wait for the active task to finish before switching models.'
     if(!canActivateModels)return activationModeError || 'Model switching is unavailable for this runtime.'
@@ -99,7 +100,7 @@ function LoadedModelSelector({activeModel='',runtimeSource,busy=false,onSwitchin
       if(mounted.current){setPending(false);onSettled?.()}
     }
   }
-  const reason=switching?'':confirmation?unavailable(confirmation):remote?'This conversation uses a remote provider.':!local?'The conversation’s model source is not confirmed.':busy?'The current task is still running.':!canActivateModels && !loading?activationModeError:''
+  const reason=switching?'':confirmation?unavailable(confirmation):remote?'This conversation uses a remote provider.':external?'This model is managed on the external host.':!local?'The conversation’s model source is not confirmed.':busy?'The current task is still running.':!canActivateModels && !loading?activationModeError:''
   const showActiveFallback=activeModel && !current
   return <div ref={root} className="portal-model-selector">
     <button ref={trigger} type="button" className="portal-model-trigger" aria-label={`Choose model: ${modelDisplayName(activeName,true)}`} aria-haspopup="dialog" aria-expanded={open} aria-controls={open?id:undefined} title={modelDisplayName(activeName)} onClick={()=>{if(open)close();else {setOpen(true);void refresh()}}}>
@@ -120,14 +121,16 @@ function LoadedModelSelector({activeModel='',runtimeSource,busy=false,onSwitchin
           const next=event.key==='Home'?0:event.key==='End'?options.length-1:(index+(event.key==='ArrowDown'?1:-1)+options.length)%options.length
           options[next]?.focus()
         }}>
-          {showActiveFallback && <div role="menuitemradio" aria-checked="true" className="portal-model-option"><span><strong>{modelDisplayName(activeModel)}</strong><small>{remote?'Remote provider':'Active model'}</small></span><Check size={15} aria-hidden="true"/></div>}
+          {showActiveFallback && <div role="menuitemradio" aria-checked="true" className="portal-model-option"><span><strong>{modelDisplayName(activeModel)}</strong><small>{remote?'Remote provider':external?'External host':'Active model'}</small></span><Check size={15} aria-hidden="true"/></div>}
           {installed.map(model=>{const selected=model.id===selectedId,disabled=unavailable(model);return <button key={model.id} role="menuitemradio" aria-checked={selected} type="button" className="portal-model-option" disabled={!selected && Boolean(disabled)} title={disabled || modelDisplayName(model)} onClick={()=>{if(selected)close(true);else if(!disabled)setConfirmId(model.id)}}><span><strong>{modelDisplayName(model)}</strong><small>{details(model)}</small></span>{model.id===activationLoading?<Loader2 size={15} className="portal-model-loading" aria-hidden="true"/>:selected?<Check size={15} aria-hidden="true"/>:null}</button>})}
         </div>
         {loading && <p role="status" className="portal-model-notice">Loading models…</p>}
         {!loading && !installed.length && !showActiveFallback && <p className="portal-model-notice">No installed models found.</p>}
         {reason && <p className="portal-model-notice" role="status">{reason}</p>}
         {(localError || error) && <p role="alert" className="portal-model-notice">{localError || error} <button type="button" onClick={()=>void refresh()}>Refresh</button></p>}
-        <Link className="portal-model-manage" to={remote?'/pixel/settings?section=connections':'/models'}><SlidersHorizontal size={14} aria-hidden="true"/>{remote?'Provider settings':'Manage models'}</Link>
+        {external
+          ? <p className="portal-model-notice">Change this model on its external host.</p>
+          : <Link className="portal-model-manage" to={remote?'/pixel/settings?section=connections':'/models'}><SlidersHorizontal size={14} aria-hidden="true"/>{remote?'Provider settings':'Manage models'}</Link>}
       </>}
       <PortalModelRecovery active={open} refreshKey={`${pending}:${Boolean(activationLoading)}`} onPendingChange={setRecoveryPending} onBusyChange={setRecoveryBusy} onRecovered={()=>{setLocalError('');clearMutationError();void refresh();onSettled?.()}}/>
     </section>

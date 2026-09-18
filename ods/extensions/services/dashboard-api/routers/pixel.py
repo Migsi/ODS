@@ -27,7 +27,7 @@ from pixel_runtime_state import begin_pixel_stream, end_pixel_stream, try_begin_
 from pixel_chat_results import ChatResultStore, ResultCapacity, ResultConflict, owner_namespace
 from security import verify_api_key
 from config import read_live_env_value
-from helpers import get_loaded_model
+from helpers import get_loaded_model, get_llama_context_size
 from pixel_chat_identity import asks_display_name, confirmed_display_name, display_name_stream, messages_with_identity
 from pixel_chat_context import HistorySnapshot, public_context
 
@@ -406,6 +406,21 @@ def _active_runtime_projection(status: object) -> dict[str, object] | None:
         ):
             return {key: runtime[key] for key in expected}
         return None
+    if isinstance(runtime, dict) and runtime.get("source") == "external-host":
+        expected = {"source", "model"}
+        if (
+            expected <= set(runtime) <= expected | {"contextLength"}
+            and isinstance(runtime.get("model"), str)
+            and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/+:-]{0,255}", runtime["model"])
+            and "://" not in runtime["model"]
+            and (
+                "contextLength" not in runtime
+                or type(runtime["contextLength"]) is int
+                and 1 <= runtime["contextLength"] <= 10_000_000
+            )
+        ):
+            return {key: runtime[key] for key in expected | {"contextLength"} if key in runtime}
+        return None
     expected = {"source", "model", "contextLength", "maxTokens", "reasoning"}
     if (
         not isinstance(runtime, dict)
@@ -425,6 +440,43 @@ def _active_runtime_projection(status: object) -> dict[str, object] | None:
     ):
         return None
     return {key: runtime[key] for key in expected | {"routeFingerprint"} if key in runtime}
+
+
+async def _verified_external_host_runtime(host_status: object) -> dict[str, object] | None:
+    """Identify a fixed external model from a live probe, never .env alone.
+
+    This is a status identity, not a model-switch or agent-quality proof. Do not
+    expose the configured origin, credentials, or provider response body.
+    """
+    if (
+        not isinstance(host_status, dict)
+        or host_status.get("activeRuntime") is not None
+        or os.environ.get("LLM_BACKEND", "").strip().casefold() != "external"
+        or read_live_env_value("LLM_BACKEND").strip().casefold() != "external"
+        or read_live_env_value("ODS_MODEL_SWITCHBOARD").strip().casefold() != "observe"
+        or read_live_env_value("EXTERNAL_LLM_PROVIDER").strip().casefold() != "openai-compatible"
+    ):
+        return None
+    expected = read_live_env_value("EXTERNAL_LLM_MODEL").strip()
+    if (
+        re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/+:-]{0,255}", expected) is None
+        or "://" in expected
+    ):
+        return None
+    try:
+        loaded = await asyncio.wait_for(get_loaded_model(), timeout=3.0)
+    except (asyncio.TimeoutError, httpx.HTTPError, OSError, ValueError, TypeError):
+        return None
+    if loaded != expected:
+        return None
+    runtime: dict[str, object] = {"source": "external-host", "model": loaded}
+    try:
+        context = await asyncio.wait_for(get_llama_context_size(loaded), timeout=3.0)
+    except (asyncio.TimeoutError, httpx.HTTPError, OSError, ValueError, TypeError):
+        context = None
+    if type(context) is int and 1 <= context <= 10_000_000:
+        runtime["contextLength"] = context
+    return _active_runtime_projection({"activeRuntime": runtime})
 
 
 def _model_identity_tokens(value: str | None) -> set[str]:
@@ -523,6 +575,8 @@ async def pixel_status() -> dict[str, object]:
             if inference_issue:
                 return {"available": False, "model": None, "state": "model_unavailable", "detail": inference_issue}
         runtime = _active_runtime_projection(host_status)
+        if available and runtime is None:
+            runtime = await _verified_external_host_runtime(host_status)
         if available and runtime is not None:
             result["runtime"] = runtime
         model_support = _model_support_from_status(host_status)

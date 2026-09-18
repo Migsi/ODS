@@ -340,6 +340,83 @@ async def test_status_returns_only_fixed_projection():
 
 
 @pytest.mark.asyncio
+async def test_status_projects_live_fixed_external_host_without_private_origin(monkeypatch):
+    monkeypatch.setenv("LLM_BACKEND", "external")
+    values = {
+        "LLM_BACKEND": "external",
+        "ODS_MODEL_SWITCHBOARD": "observe",
+        "EXTERNAL_LLM_PROVIDER": "openai-compatible",
+        "EXTERNAL_LLM_MODEL": "Qwen3.5-9B-Q4_K_M.gguf",
+    }
+    monkeypatch.setattr(pixel, "read_live_env_value", lambda key, default="": values.get(key, default))
+
+    async def loaded():
+        return "Qwen3.5-9B-Q4_K_M.gguf"
+
+    async def context(model):
+        assert model == "Qwen3.5-9B-Q4_K_M.gguf"
+        return 65536
+
+    monkeypatch.setattr(pixel, "get_loaded_model", loaded)
+    monkeypatch.setattr(pixel, "get_llama_context_size", context)
+    body = json.dumps({"data": [{"id": "pixel/default"}]}).encode()
+    with patch.object(pixel.httpx, "AsyncClient", return_value=FakeClient(FakeResponse(chunks=[body]))):
+        result = await pixel.pixel_status()
+
+    assert result["runtime"] == {
+        "source": "external-host", "model": "Qwen3.5-9B-Q4_K_M.gguf", "contextLength": 65536,
+    }
+    assert "host.lima.internal" not in json.dumps(result)
+    assert "apiKey" not in json.dumps(result)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("loaded_model", [None, "different-model"])
+async def test_status_does_not_invent_external_host_identity_from_env(monkeypatch, loaded_model):
+    monkeypatch.setenv("LLM_BACKEND", "external")
+    values = {
+        "LLM_BACKEND": "external",
+        "ODS_MODEL_SWITCHBOARD": "observe",
+        "EXTERNAL_LLM_PROVIDER": "openai-compatible",
+        "EXTERNAL_LLM_MODEL": "Qwen3.5-9B-Q4_K_M.gguf",
+    }
+    monkeypatch.setattr(pixel, "read_live_env_value", lambda key, default="": values.get(key, default))
+
+    async def loaded():
+        return loaded_model
+
+    monkeypatch.setattr(pixel, "get_loaded_model", loaded)
+    body = json.dumps({"data": [{"id": "pixel/default"}]}).encode()
+    with patch.object(pixel.httpx, "AsyncClient", return_value=FakeClient(FakeResponse(chunks=[body]))):
+        result = await pixel.pixel_status()
+    assert "runtime" not in result
+
+
+@pytest.mark.asyncio
+async def test_external_host_identity_omits_unverified_context(monkeypatch):
+    monkeypatch.setenv("LLM_BACKEND", "external")
+    values = {
+        "LLM_BACKEND": "external",
+        "ODS_MODEL_SWITCHBOARD": "observe",
+        "EXTERNAL_LLM_PROVIDER": "openai-compatible",
+        "EXTERNAL_LLM_MODEL": "Qwen3.5-9B-Q4_K_M.gguf",
+    }
+    monkeypatch.setattr(pixel, "read_live_env_value", lambda key, default="": values.get(key, default))
+
+    async def loaded():
+        return "Qwen3.5-9B-Q4_K_M.gguf"
+
+    async def unknown_context(_model):
+        return None
+
+    monkeypatch.setattr(pixel, "get_loaded_model", loaded)
+    monkeypatch.setattr(pixel, "get_llama_context_size", unknown_context)
+    assert await pixel._verified_external_host_runtime({"status": "idle"}) == {
+        "source": "external-host", "model": "Qwen3.5-9B-Q4_K_M.gguf",
+    }
+
+
+@pytest.mark.asyncio
 async def test_status_projects_only_validated_active_remote_runtime(monkeypatch):
     async def active_remote_runtime(*_args, **_kwargs):
         return {
@@ -384,6 +461,9 @@ async def test_status_projects_only_validated_active_remote_runtime(monkeypatch)
         {"source": "local-switchboard", "model": "local-model", "contextLength": 0},
         {"source": "local-switchboard", "model": "local-model", "contextLength": 65536,
          "apiKey": "must-not-project"},
+        {"source": "external-host", "model": "Qwen.gguf", "apiKey": "must-not-project"},
+        {"source": "external-host", "model": "Qwen.gguf", "contextLength": True},
+        {"source": "external-host", "model": "http://private-origin"},
         {
             "source": "local",
             "model": "forged",
