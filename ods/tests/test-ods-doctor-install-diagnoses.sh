@@ -254,7 +254,7 @@ AMD_INFERENCE_MANAGED=false
 AMD_INFERENCE_RUNTIME_MODE=external-lemonade
 ENV
 cat > "$FLAGS_PATH" <<'FLAGS'
--f docker-compose.base.yml -f docker-compose.cloud.yml -f docker-compose.lemonade-external.yml
+-f docker-compose.base.yml -f docker-compose.lemonade-external.yml
 FLAGS
 
 if (cd "$ROOT_DIR" && bash scripts/ods-doctor.sh "$REPORT" >/dev/null 2>&1); then
@@ -268,6 +268,24 @@ if jq -e '.diagnoses[] | select(.id == "ODS-RUNTIME-EXTERNAL-LEMONADE-UNAUTHENTI
 else
     fail "external Lemonade host route without user API key was not diagnosed"
 fi
+
+if jq -e '.diagnoses[] | select(.id == "ODS-RUNTIME-EXTERNAL-LEMONADE-CLOUD-OVERLAY-CONFLICT")' "$REPORT" >/dev/null; then
+    fail "current external Lemonade flags must not trigger a cloud overlay conflict"
+else
+    pass "current external Lemonade flags retain model-router"
+fi
+cat > "$FLAGS_PATH" <<'FLAGS'
+-f docker-compose.base.yml -f docker-compose.cloud.yml -f docker-compose.lemonade-external.yml
+FLAGS
+if (cd "$ROOT_DIR" && bash scripts/ods-doctor.sh "$REPORT" >/dev/null 2>&1) && \
+   jq -e '.diagnoses[] | select(.id == "ODS-RUNTIME-EXTERNAL-LEMONADE-CLOUD-OVERLAY-CONFLICT")' "$REPORT" >/dev/null; then
+    pass "stale external Lemonade cloud overlay is diagnosed"
+else
+    fail "stale external Lemonade cloud overlay was not diagnosed"
+fi
+cat > "$FLAGS_PATH" <<'FLAGS'
+-f docker-compose.base.yml -f docker-compose.lemonade-external.yml
+FLAGS
 
 cat > "$ENV_PATH" <<'ENV'
 ODS_MODE=lemonade

@@ -135,8 +135,8 @@ JSON.
 ODS supports several deployment shapes, but support cases often fail
 when the install metadata and runtime routing disagree. For example, cloud mode
 should not start or target ODS's managed `llama-server`, and external
-Lemonade should route ODS services through LiteLLM while leaving Lemonade
-itself host-managed.
+Lemonade should remain host-managed while ODS keeps LiteLLM and model-router
+available for clients, Pixel, and model switching.
 
 ODS Doctor records those expectations under `runtime.inference_contract` and
 adds diagnoses when the evidence contradicts the selected mode:
@@ -150,9 +150,10 @@ adds diagnoses when the evidence contradicts the selected mode:
   at local `llama-server`.
 - `ODS-RUNTIME-CLOUD-GATEWAY-BYPASS`: cloud mode points ODS services somewhere
   other than the LiteLLM gateway.
-- `ODS-RUNTIME-EXTERNAL-LEMONADE-CLOUD-OVERLAY-MISSING`: external Lemonade is
-  active while cached `.compose-flags` lacks the cloud overlay that profiles
-  out managed local inference.
+- `ODS-RUNTIME-EXTERNAL-LEMONADE-CLOUD-OVERLAY-CONFLICT`: external Lemonade is
+  active while cached `.compose-flags` includes the cloud overlay, which
+  incorrectly profiles out model-router. The dedicated Lemonade overlay
+  profiles out only managed `llama-server`.
 - `ODS-RUNTIME-EXTERNAL-LEMONADE-OVERLAY-MISSING`: external Lemonade is active
   while cached `.compose-flags` lacks `docker-compose.lemonade-external.yml`.
 - `ODS-RUNTIME-EXTERNAL-LEMONADE-LOCAL-ROUTE`: external Lemonade still routes

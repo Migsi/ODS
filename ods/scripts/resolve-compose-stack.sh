@@ -117,8 +117,12 @@ primary = "docker-compose.yml"
 # An explicit external runtime owns inference selection, even when hardware
 # detection supplied a local CPU/AMD/NVIDIA profile to the installer.
 if lemonade_external and ods_mode == "lemonade":
-    if existing(["docker-compose.base.yml", "docker-compose.cloud.yml", "docker-compose.lemonade-external.yml"]):
-        resolved = ["docker-compose.base.yml", "docker-compose.cloud.yml", "docker-compose.lemonade-external.yml"]
+    # External Lemonade is still a local, switchable runtime. The cloud
+    # overlay profiles model-router out and can leave a stale router container
+    # serving Pixel after reinstall. The external overlay disables only the
+    # managed llama-server, preserving a freshly built model-router.
+    if existing(["docker-compose.base.yml", "docker-compose.lemonade-external.yml"]):
+        resolved = ["docker-compose.base.yml", "docker-compose.lemonade-external.yml"]
         primary = "docker-compose.lemonade-external.yml"
     elif existing(["docker-compose.base.yml", "docker-compose.cloud.yml"]):
         resolved = ["docker-compose.base.yml", "docker-compose.cloud.yml"]

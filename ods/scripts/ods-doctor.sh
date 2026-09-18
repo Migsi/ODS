@@ -1110,13 +1110,13 @@ def _collect_inference_contract():
             )
 
     if lemonade_external:
-        if compose_flags_exists and not cloud_overlay:
+        if compose_flags_exists and cloud_overlay:
             issues.append(
                 _inference_issue(
-                    "ODS-RUNTIME-EXTERNAL-LEMONADE-CLOUD-OVERLAY-MISSING",
+                    "ODS-RUNTIME-EXTERNAL-LEMONADE-CLOUD-OVERLAY-CONFLICT",
                     "blocker",
                     ".compose-flags",
-                    "External Lemonade needs the cloud overlay so ODS does not start a managed llama-server.",
+                    "The cloud overlay disables model-router; external Lemonade must use its dedicated overlay so Pixel and model switching remain live.",
                 )
             )
         if compose_flags_exists and not lemonade_external_overlay:
@@ -1183,7 +1183,7 @@ def _collect_inference_contract():
         "ODS-RUNTIME-CLOUD-LLM-LOCAL-ROUTE": "Cloud mode still routes chat clients to local llama-server",
         "ODS-RUNTIME-CLOUD-HERMES-LOCAL-ROUTE": "Cloud mode still routes Hermes to local llama-server",
         "ODS-RUNTIME-CLOUD-GATEWAY-BYPASS": "Cloud mode bypasses the LiteLLM gateway",
-        "ODS-RUNTIME-EXTERNAL-LEMONADE-CLOUD-OVERLAY-MISSING": "External Lemonade is missing the cloud compose overlay",
+        "ODS-RUNTIME-EXTERNAL-LEMONADE-CLOUD-OVERLAY-CONFLICT": "External Lemonade incorrectly includes the cloud compose overlay",
         "ODS-RUNTIME-EXTERNAL-LEMONADE-OVERLAY-MISSING": "External Lemonade is missing its compose overlay",
         "ODS-RUNTIME-EXTERNAL-LEMONADE-LOCAL-ROUTE": "External Lemonade still routes clients to local llama-server",
         "ODS-RUNTIME-EXTERNAL-LEMONADE-UNAUTHENTICATED-HOST-ROUTE": "External Lemonade host route has no user-provided API key",
@@ -1206,8 +1206,8 @@ def _collect_inference_contract():
         "ODS-RUNTIME-CLOUD-GATEWAY-BYPASS": [
             "Route ODS services through LiteLLM so hosted, private-cloud, and auth behavior stay consistent.",
         ],
-        "ODS-RUNTIME-EXTERNAL-LEMONADE-CLOUD-OVERLAY-MISSING": [
-            "Regenerate compose flags for external Lemonade so the managed llama-server is profiled out.",
+        "ODS-RUNTIME-EXTERNAL-LEMONADE-CLOUD-OVERLAY-CONFLICT": [
+            "Regenerate compose flags for external Lemonade without docker-compose.cloud.yml; its dedicated overlay disables only managed llama-server and retains model-router.",
         ],
         "ODS-RUNTIME-EXTERNAL-LEMONADE-OVERLAY-MISSING": [
             "Include docker-compose.lemonade-external.yml when LEMONADE_EXTERNAL=true.",
