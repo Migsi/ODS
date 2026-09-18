@@ -3761,6 +3761,10 @@ class _PixelModelTransactionRejected(RuntimeError):
     """The controller definitively refused admission without performing it."""
 
 
+class _ExternalAdoptionReceiptUnavailable(RuntimeError):
+    """The route committed, but its separate dashboard receipt was not written."""
+
+
 def _pixel_model_journal_path() -> Path:
     return INSTALL_DIR / 'data' / 'pixel-model-transaction.json'
 
@@ -3782,6 +3786,51 @@ def _publish_activation_route(env: dict, model_id: str, proof: dict, capabilitie
         native_route=lemonade or None, context_length=proof["contextLength"],
         capabilities=capabilities,
     )
+
+
+def _external_adoption_route_published(model_id: str, context_length: int) -> bool:
+    """Avoid recording a second route when a held adoption is retried."""
+    if _switchboard_state is None:
+        return False
+    doc, errors = _switchboard_state.read_state(INSTALL_DIR / "data" / "model-state.json")
+    if errors or not isinstance(doc, dict):
+        raise RuntimeError("Existing model route cannot be verified")
+    active = doc.get("active")
+    if not isinstance(active, dict):
+        return False
+    backend = active.get("backend")
+    proof = active.get("proof")
+    return bool(
+        active.get("catalogId") == model_id
+        and active.get("runtimeModelId") == model_id
+        and active.get("contextLength") == context_length
+        and active.get("reconstructed") is not True
+        and isinstance(active.get("verifiedAt"), str) and active["verifiedAt"]
+        and isinstance(backend, dict) and backend.get("kind") == "lemonade"
+        and backend.get("nativeRoute") == model_id
+        and isinstance(proof, dict) and proof.get("identity") == model_id
+        and proof.get("completion") is True
+    )
+
+
+def _external_adoption_capabilities(model_id: str, context_length: int) -> dict[str, bool]:
+    """Apply the same catalog advisory as local activation when identifiable."""
+    try:
+        candidates = [item for item in _load_model_library_records() if
+            _runtime_model_identity_matches(
+                model_id, model_id=str(item.get("id") or ""),
+                gguf_file=str(item.get("gguf_file") or ""),
+                llm_model_name=str(item.get("llm_model_name") or ""),
+            )]
+    except RuntimeError:
+        candidates = []
+    model = candidates[0] if len(candidates) == 1 else {}
+    return {
+        "chat": True,
+        "tools": bool(model.get("tools")),
+        "vision": bool(model.get("vision")),
+        "agentViable": _model_agent_viable(model, context_length),
+    }
 
 
 def _pixel_model_config_paths() -> dict:
@@ -3943,6 +3992,47 @@ def _begin_pixel_model_transaction(config: dict):
     if recovery['pending']:
         raise _PixelModelTransactionUncertain('Managed model recovery requires explicit repair; no inference change was attempted')
     return _PixelModelTransaction(config).begin()
+
+
+def _begin_or_resume_external_pixel_transaction(config: dict, target: dict):
+    """Resume a proved adoption without replaying an ambiguous native mutation."""
+    if not config.get('PIXEL_OPENWEBUI_KEY') or not _valid_managed_pixel_runtime_contract(target):
+        raise RuntimeError('Managed Pixel adoption contract is unavailable')
+    journal = _read_pixel_model_journal()
+    if journal is not None and journal['phase'] != 'completed':
+        if journal['phase'] not in {'held', 'applying', 'applied'} or journal['target'] != target:
+            raise _PixelModelTransactionUncertain(
+                'Another managed model transaction requires explicit recovery'
+            )
+        transaction = _PixelModelTransaction(config)
+        transaction.id = journal['transactionId']
+        transaction.previous = journal['previous']
+        transaction.target = journal['target']
+        transaction.journal = journal
+        if journal['phase'] == 'held':
+            transaction.verify_held()
+        else:
+            # A lost apply reply is never replayed. Native status must prove
+            # that the exact target was already applied before we can finish.
+            try:
+                status = _runtime_model_control('model-status', config=config)
+            except Exception as exc:
+                raise _PixelModelTransactionUncertain(
+                    'Managed model apply is unconfirmed; recovery is required'
+                ) from exc
+            if status['status'] != 'applied' or not transaction._matches(status, 'applied', target):
+                raise _PixelModelTransactionUncertain(
+                    'Managed model apply is unconfirmed; recovery is required'
+                )
+            if journal['phase'] == 'applying':
+                transaction._save('applied')
+        return transaction
+    recovery = _recover_pixel_model_transaction(config)
+    if recovery['pending']:
+        raise _PixelModelTransactionUncertain('Managed model recovery is pending')
+    transaction = _PixelModelTransaction(config)
+    transaction.target = dict(target)
+    return transaction.begin()
 
 
 def _prove_pixel_model_contract(config: dict, contract: dict) -> bool:
@@ -7633,6 +7723,8 @@ class AgentHandler(BaseHTTPRequestHandler):
             self._handle_model_download_cancel()
         elif self.path == "/v1/model/activate":
             self._handle_model_activate()
+        elif self.path == "/v1/model/external-adopt":
+            self._handle_external_model_adopt()
         elif self.path == "/v1/model/recover":
             self._handle_model_recover()
         elif self.path == "/v1/remote-provider/plan":
@@ -9909,6 +10001,69 @@ class AgentHandler(BaseHTTPRequestHandler):
             "contextLength": observed["contextLength"],
             "backend": observed["backend"],
         }, no_store=True)
+
+    def _handle_external_model_adopt(self):
+        """Converge ODS consumers on the already loaded external model."""
+        if not check_auth(self):
+            return
+        body = read_json_body(self)
+        if body is None:
+            return
+        model_id = body.get("model_id") if isinstance(body, dict) else None
+        if not isinstance(body, dict) or set(body) != {"model_id"} or not _valid_pixel_model_name(model_id):
+            json_response(self, 400, {"error": "An exact model_id is required"}, no_store=True)
+            return
+        acquired, active = _begin_model_activation(model_id)
+        if not acquired:
+            json_response(self, 409, {
+                "error": "Another model lifecycle operation is in progress",
+                "code": "model_lifecycle_busy", "activeModelId": active,
+            }, no_store=True)
+            return
+        try:
+            result = _adopt_external_lemonade_model(model_id)
+        except ValueError:
+            json_response(self, 409, {
+                "error": "The requested external model does not match the loaded runtime",
+                "code": "external_model_mismatch",
+            }, no_store=True)
+        except _ExternalAdoptionReceiptUnavailable:
+            logger.exception("External Lemonade adoption committed without a dashboard receipt")
+            json_response(self, 503, {
+                "error": "The model route was committed, but its dashboard receipt could not be saved; check live status before retrying",
+                "code": "external_adoption_receipt_unavailable", "pending": False,
+            }, no_store=True)
+        except _PixelModelTransactionUncertain:
+            logger.exception("External Lemonade adoption could not be proved")
+            try:
+                pending = _pixel_model_recovery_status()["pending"]
+            except Exception:
+                pending = True
+            json_response(self, 503, {
+                "error": "External model adoption is incomplete; managed recovery is required",
+                "code": "managed_model_recovery_required",
+                "pending": pending,
+            }, no_store=True)
+        except Exception:
+            logger.exception("External Lemonade adoption preflight failed")
+            try:
+                pending = _pixel_model_recovery_status()["pending"]
+            except Exception:
+                pending = True
+            if pending:
+                json_response(self, 503, {
+                    "error": "External model adoption is incomplete; managed recovery is required",
+                    "code": "managed_model_recovery_required", "pending": True,
+                }, no_store=True)
+            else:
+                json_response(self, 503, {
+                    "error": "External model adoption prerequisites are unavailable",
+                    "code": "external_adoption_unavailable", "pending": False,
+                }, no_store=True)
+        else:
+            json_response(self, 200, result, no_store=True)
+        finally:
+            _end_model_activation()
 
     def _handle_model_download(self):
         """Start async model download. Only one download at a time.
@@ -12828,6 +12983,158 @@ def _read_external_lemonade_observation(env: dict) -> dict:
     if _verified_external_lemonade_observation(payloads[2], payloads[1]) != observed:
         raise ValueError("External Lemonade identity changed during observation")
     return observed
+
+
+def _adopt_external_lemonade_model(expected_model_id: str) -> dict:
+    """Forward-only reconciliation after a separately managed model switch.
+
+    ODS never attempts to load, stop, or restore the native Lemonade process.
+    A failure before proven native completion remains pending; a receipt
+    failure after commit is reported separately without inventing a hold.
+    """
+    env_path = INSTALL_DIR / ".env"
+    env = load_env(env_path)
+    if not _external_lemonade_runtime(env):
+        raise ValueError("External Lemonade is not configured")
+    observed = _read_external_lemonade_observation(env)
+    if observed["modelId"] != expected_model_id:
+        raise ValueError("The loaded model differs from the requested model")
+    context_length = observed["contextLength"]
+    if context_length < _MIN_MANAGED_PIXEL_CONTEXT:
+        raise ValueError("The loaded model context is too small for managed Pixel")
+    if not env.get("PIXEL_OPENWEBUI_KEY") or _switchboard_state is None:
+        raise RuntimeError("External adoption requires managed Pixel and switchboard")
+
+    target = {
+        "model": expected_model_id,
+        "contextLength": context_length,
+        "maxTokens": _pixel_max_tokens_for_context(context_length),
+        "reasoning": _pixel_model_reasoning_capable(expected_model_id, env),
+    }
+    original_env = _snapshot_text_file(env_path)
+    hermes_path = INSTALL_DIR / "data" / "hermes" / "config.yaml"
+    hermes_template = INSTALL_DIR / "extensions" / "services" / "hermes" / "cli-config.yaml.template"
+    hermes_snapshot = _capture_hermes_live_config(hermes_path)
+    opencode_snapshot = _capture_opencode_config()
+    opencode_state = _capture_managed_opencode_state() if opencode_snapshot is not None else None
+    states = {name: _capture_container_state(name) for name in (
+        "ods-litellm", "ods-hermes", "ods-openclaw", "ods-perplexica",
+    )}
+    if not states["ods-litellm"]["running"]:
+        raise RuntimeError("LiteLLM must be running to adopt an external model")
+    if states["ods-hermes"]["running"] and hermes_snapshot.get("source") == "deferred_absent":
+        raise RuntimeError("Running Hermes configuration cannot be captured")
+    perplexica_snapshot = _capture_perplexica_config(env, states["ods-perplexica"])
+    _assert_text_file_matches_snapshot(env_path, original_env)
+
+    # Hold both native Pixel gates before the first host-side write. The
+    # physical switch may have preceded this request; Pixel's live-model
+    # identity check rejects the old route during that pre-adoption gap.
+    transaction = _begin_or_resume_external_pixel_transaction(env, target)
+    try:
+        _assert_text_file_matches_snapshot(env_path, original_env)
+        updated = str(original_env.get("text") or "")
+        for key, value in (
+            ("LEMONADE_MODEL", expected_model_id),
+            ("LLM_MODEL", expected_model_id),
+            ("CTX_SIZE", str(context_length)),
+            ("MAX_CONTEXT", str(context_length)),
+            ("MODEL_SELECTION_SOURCE", "external-lemonade-adoption"),
+        ):
+            updated = _upsert_env_text(updated, key, value)
+        _write_bound_env_text(env_path, updated)
+        current_env = load_env(env_path)
+        if not _prove_pixel_model_contract(current_env, target):
+            raise RuntimeError("The native model changed before consumer reconciliation")
+
+        # GGUF_FILE is a local installer artifact on this topology, not the
+        # physical Windows checkpoint. Every active route receives the exact
+        # native model ID explicitly; no local GGUF lookup or load is attempted.
+        gguf_file = str(current_env.get("GGUF_FILE") or "")
+        _write_lemonade_config(INSTALL_DIR, gguf_file, expected_model_id)
+        _render_model_router_runtime_configs(
+            INSTALL_DIR, current_env, model=expected_model_id,
+            gguf_file=gguf_file, lemonade_model_id=expected_model_id,
+            context_length=context_length,
+        )
+        hermes_base_url = current_env.get("HERMES_LLM_BASE_URL") or "http://litellm:4000/v1"
+        if hermes_snapshot.get("exists") and hermes_snapshot.get("source") != "deferred_absent":
+            patched, _changed = _patch_hermes_config_text(
+                str(hermes_snapshot.get("text") or ""), expected_model_id,
+                base_url=hermes_base_url, context_length=context_length,
+            )
+            _write_hermes_live_config(
+                hermes_path, patched, hermes_snapshot.get("source"),
+                hermes_snapshot.get("mode"),
+            )
+            if not _hermes_config_matches(patched, expected_model_id, hermes_base_url, context_length):
+                raise RuntimeError("Hermes route could not be verified")
+        _patch_hermes_model_config(
+            hermes_template, expected_model_id, base_url=hermes_base_url,
+            context_length=context_length,
+        )
+        if opencode_snapshot is not None:
+            _update_opencode_config(
+                current_env, opencode_snapshot, expected_model_id,
+                context_length, display_name=expected_model_id,
+            )
+        if perplexica_snapshot is not None:
+            _update_perplexica_model(
+                current_env, perplexica_snapshot, gguf_file=gguf_file,
+                lemonade_model_id=expected_model_id,
+            )
+        _restart_existing_container("ods-litellm", states["ods-litellm"], recreate=True)
+        _wait_for_container_health("ods-litellm")
+        _verify_litellm_route(current_env)
+        if states["ods-hermes"]["running"]:
+            _restart_existing_container("ods-hermes", states["ods-hermes"], recreate=True)
+            _wait_for_container_health("ods-hermes")
+            _verify_running_hermes_route(expected_model_id, hermes_base_url, context_length)
+        if states["ods-openclaw"]["running"]:
+            _recreate_openclaw_if_present(states["ods-openclaw"])
+            _verify_openclaw_model_env(expected_model_id)
+            _wait_for_container_health("ods-openclaw")
+        if opencode_state and opencode_state.get("active"):
+            _restart_managed_opencode(opencode_state)
+
+        final = _read_external_lemonade_observation(current_env)
+        if final != observed or not _prove_pixel_model_contract(current_env, target):
+            raise RuntimeError("The native model changed during consumer reconciliation")
+        if not _external_adoption_route_published(expected_model_id, context_length):
+            _publish_activation_route(
+                current_env, expected_model_id,
+                {"identity": expected_model_id, "contextLength": context_length,
+                 "contextVerified": True},
+                _external_adoption_capabilities(expected_model_id, context_length),
+            )
+        if transaction.journal['phase'] != 'applied':
+            transaction.apply(target)
+        transaction.finish("commit")
+    except Exception as exc:
+        # Restoring ODS's old files would lie: native Lemonade may still be
+        # serving B. Preserve the durable journal for proof instead of
+        # invoking local activation's runtime rollback.
+        raise _PixelModelTransactionUncertain(
+            "External adoption is incomplete; physical model and consumers require repair"
+        ) from exc
+    # Receipt I/O is outside the held transaction. A failure here must never
+    # misreport an already committed route as a still-held Pixel transition.
+    try:
+        _atomic_write_json(INSTALL_DIR / "data" / "model-activation-receipt.json", {
+            "schema": "ods.model-activation-receipt.v1",
+            "status": "complete", "source": "external-lemonade-adoption",
+            "modelId": expected_model_id, "runtimeModelId": expected_model_id,
+            "contextLength": context_length, "contextVerified": True,
+            "modelTransactionId": transaction.id, "verifiedAt": _iso_now(),
+        })
+    except Exception as exc:
+        raise _ExternalAdoptionReceiptUnavailable(
+            "External model route committed but activation receipt could not be saved"
+        ) from exc
+    return {
+        "status": "adopted", "modelId": expected_model_id,
+        "contextLength": context_length, "modelTransactionId": transaction.id,
+    }
 
 
 def _lemonade_loaded_context_length(

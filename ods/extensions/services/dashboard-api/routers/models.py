@@ -2014,6 +2014,91 @@ def recover_model_switch(body: dict | None = Body(default=None), api_key: str = 
     return value if isinstance(value, JSONResponse) else JSONResponse(value, headers={'Cache-Control': 'no-store'})
 
 
+def _external_model_observation_projection(value: Any) -> dict[str, Any]:
+    """Keep the browser response limited to a proved, nonsecret model identity."""
+    if not isinstance(value, dict):
+        raise ValueError('External model observation is invalid')
+    model_id = value.get('modelId')
+    context_length = value.get('contextLength')
+    backend = value.get('backend')
+    if (
+        value.get('status') != 'verified'
+        or not isinstance(model_id, str)
+        or re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._+:/ @(),=-]{0,255}', model_id) is None
+        or type(context_length) is not int
+        or not 1 <= context_length <= 10_000_000
+        or not isinstance(backend, str)
+        or re.fullmatch(r'[A-Za-z0-9._-]{1,64}', backend) is None
+    ):
+        raise ValueError('External model observation is invalid')
+    return {
+        'status': 'verified', 'modelId': model_id,
+        'contextLength': context_length, 'backend': backend,
+    }
+
+
+@router.get('/api/models/external-observation')
+def external_model_observation(api_key: str = Depends(verify_api_key)):
+    try:
+        value = request_agent_json('GET', '/v1/model/external-observation', timeout=20)
+        return JSONResponse(_external_model_observation_projection(value), headers={'Cache-Control': 'no-store'})
+    except AgentHTTPError as exc:
+        if exc.status_code == 409:
+            raise HTTPException(status_code=409, detail='External Lemonade is not configured') from None
+        raise HTTPException(status_code=503, detail='External Lemonade identity is unavailable') from None
+    except (AgentClientError, ValueError):
+        raise HTTPException(status_code=503, detail='External Lemonade identity is unavailable') from None
+
+
+@router.post('/api/models/external-adopt')
+def adopt_external_model(
+    body: dict | None = Body(default=None),
+    api_key: str = Depends(verify_api_key),
+):
+    model_id = body.get('model_id') if isinstance(body, dict) else None
+    if (
+        not isinstance(body, dict) or set(body) != {'model_id'}
+        or not isinstance(model_id, str)
+        or re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._+:/ @(),=-]{0,255}', model_id) is None
+    ):
+        raise HTTPException(status_code=400, detail='An exact model_id is required')
+    if pixel_stream_active():
+        raise HTTPException(status_code=409, detail={
+            'code': 'pixel_chat_active',
+            'message': 'Pixel is working. Stop the active response before adopting a model.',
+        })
+    try:
+        value = request_agent_json(
+            'POST', '/v1/model/external-adopt', payload={'model_id': model_id}, timeout=600,
+        )
+    except AgentHTTPError as exc:
+        if exc.status_code in {400, 409, 503}:
+            detail = _agent_http_detail(exc)
+            if isinstance(detail, dict):
+                projected = {key: detail[key] for key in ('error', 'code', 'pending') if key in detail}
+                detail = projected or 'External model adoption was not confirmed'
+            else:
+                detail = 'External model adoption was not confirmed'
+            raise HTTPException(status_code=exc.status_code, detail=detail) from None
+        raise HTTPException(status_code=502, detail='External model adoption failed') from None
+    except AgentClientError:
+        raise HTTPException(status_code=503, detail='External model adoption was not confirmed; refresh recovery status') from None
+    if (
+        not isinstance(value, dict) or value.get('status') != 'adopted'
+        or value.get('modelId') != model_id
+        or type(value.get('contextLength')) is not int
+        or not 16384 <= value['contextLength'] <= 10_000_000
+        or not isinstance(value.get('modelTransactionId'), str)
+        or re.fullmatch(r'[a-f0-9]{64}', value['modelTransactionId']) is None
+    ):
+        raise HTTPException(status_code=502, detail='External model adoption response is invalid')
+    return JSONResponse({
+        'status': 'adopted', 'modelId': model_id,
+        'contextLength': value.get('contextLength'),
+        'modelTransactionId': value.get('modelTransactionId'),
+    }, headers={'Cache-Control': 'no-store'})
+
+
 @router.post("/api/models/{model_id}/load")
 def load_model(
     model_id: str,

@@ -20,6 +20,7 @@ import { Link } from 'react-router-dom'
 import { useModels } from '../hooks/useModels'
 import { useDownloadProgress } from '../hooks/useDownloadProgress'
 import HuggingFaceModelBrowser from '../components/model-library/HuggingFaceModelBrowser'
+import ExternalLemonadeAdoption from '../components/ExternalLemonadeAdoption'
 import MetalMetricIcon from '../components/MetalMetricIcon'
 import FittedLibraryPage from '../components/FittedLibraryPage'
 import './models-refined.css'
@@ -344,6 +345,12 @@ export default function Models({ compact = false }) {
         model={activeModel}
         currentModel={currentModel || loadedModel}
         gpu={gpu}
+      />
+
+      <ExternalLemonadeAdoption
+        enabled={odsMode === 'lemonade'}
+        minimumContext={pixelMinimumContext}
+        onSettled={refresh}
       />
 
       {!currentModel && !loadedModel && configuredModel && (
