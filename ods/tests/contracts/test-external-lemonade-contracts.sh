@@ -174,10 +174,12 @@ rm -f -- "$LOG_FILE"
 unset -f curl
 
 echo "[contract] external Lemonade preflight checks LiteLLM instead of managed llama-server"
-grep -q 'is_external_lemonade()' ods-preflight.sh \
+grep -q 'is_external_lemonade()' lib/preflight-llm-route.sh \
   || { echo "[FAIL] ods-preflight must detect external Lemonade mode"; exit 1; }
-grep -q 'LiteLLM external Lemonade gateway' ods-preflight.sh \
-  || { echo "[FAIL] ods-preflight must label the external Lemonade LiteLLM route"; exit 1; }
+grep -q 'if ods_preflight_uses_litellm; then' ods-preflight.sh \
+  || { echo "[FAIL] ods-preflight must select the external Lemonade LiteLLM route"; exit 1; }
+grep -q 'LiteLLM gateway' ods-preflight.sh \
+  || { echo "[FAIL] ods-preflight must label the LiteLLM route"; exit 1; }
 grep -q 'ods-litellm' ods-preflight.sh \
   || { echo "[FAIL] ods-preflight must check ods-litellm for external Lemonade"; exit 1; }
 
