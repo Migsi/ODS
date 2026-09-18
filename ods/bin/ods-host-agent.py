@@ -13085,6 +13085,21 @@ def _adopt_external_lemonade_model(expected_model_id: str) -> dict:
             )
         _restart_existing_container("ods-litellm", states["ods-litellm"], recreate=True)
         _wait_for_container_health("ods-litellm")
+        # LiteLLM's public alias goes through model-router, whose active
+        # model-state is independent of the rendered endpoints/config. Prove
+        # the native target is still loaded, then publish it *before* asking
+        # the alias for a completion. Otherwise that probe routes to the old
+        # model and Lemonade auto-loads it, evicting this external target.
+        if _read_external_lemonade_observation(current_env) != observed or \
+                not _prove_pixel_model_contract(current_env, target):
+            raise RuntimeError("The native model changed before route publication")
+        if not _external_adoption_route_published(expected_model_id, context_length):
+            _publish_activation_route(
+                current_env, expected_model_id,
+                {"identity": expected_model_id, "contextLength": context_length,
+                 "contextVerified": True},
+                _external_adoption_capabilities(expected_model_id, context_length),
+            )
         _verify_litellm_route(current_env)
         if states["ods-hermes"]["running"]:
             _restart_existing_container("ods-hermes", states["ods-hermes"], recreate=True)
@@ -13100,13 +13115,6 @@ def _adopt_external_lemonade_model(expected_model_id: str) -> dict:
         final = _read_external_lemonade_observation(current_env)
         if final != observed or not _prove_pixel_model_contract(current_env, target):
             raise RuntimeError("The native model changed during consumer reconciliation")
-        if not _external_adoption_route_published(expected_model_id, context_length):
-            _publish_activation_route(
-                current_env, expected_model_id,
-                {"identity": expected_model_id, "contextLength": context_length,
-                 "contextVerified": True},
-                _external_adoption_capabilities(expected_model_id, context_length),
-            )
         if transaction.journal['phase'] != 'applied':
             transaction.apply(target)
         transaction.finish("commit")

@@ -579,7 +579,10 @@ def test_external_adoption_converges_consumers_without_touching_native_runtime(
         with pytest.raises(_mod._PixelModelTransactionUncertain):
             _mod._adopt_external_lemonade_model(loaded["modelId"])
         assert not any(isinstance(event, tuple) and event[0] == "pixel-finish" for event in events)
-        assert "route" not in events
+        # A failed alias probe leaves a forward-only, held transaction. The
+        # proved B route must already be published so the probe cannot cause
+        # Lemonade to auto-load the previous A model.
+        assert events.index("route") < events.index("_verify_litellm_route")
         assert _mod.load_env(env_path)["LEMONADE_MODEL"] == loaded["modelId"]
         return
     if failure == "receipt":
@@ -592,6 +595,7 @@ def test_external_adoption_converges_consumers_without_touching_native_runtime(
     persisted = _mod.load_env(env_path)
     assert persisted["LEMONADE_MODEL"] == loaded["modelId"]
     assert persisted["CTX_SIZE"] == persisted["MAX_CONTEXT"] == "65536"
+    assert events.index("route") < events.index("_verify_litellm_route")
     assert events.index("route") < events.index(("pixel-apply", loaded["modelId"]))
     assert events.index(("pixel-finish", "commit")) < events.index("receipt")
     assert events[-1] == "receipt"
