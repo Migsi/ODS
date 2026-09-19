@@ -486,7 +486,7 @@ def test_external_pixel_recovery_proves_physical_and_persisted_model(
     }) is proven
 
 
-@pytest.mark.parametrize("failure", [None, "litellm", "receipt"])
+@pytest.mark.parametrize("failure", [None, "router-stopped", "litellm", "receipt"])
 def test_external_adoption_converges_consumers_without_touching_native_runtime(
     monkeypatch, tmp_path, failure,
 ):
@@ -516,8 +516,9 @@ def test_external_adoption_converges_consumers_without_touching_native_runtime(
     monkeypatch.setattr(_mod, "_capture_managed_opencode_state", lambda: {
         "active": True, "system": "Linux",
     })
-    monkeypatch.setattr(_mod, "_capture_container_state", lambda _name: {
-        "exists": True, "running": True,
+    monkeypatch.setattr(_mod, "_capture_container_state", lambda name: {
+        "exists": True,
+        "running": not (failure == "router-stopped" and name == "ods-model-router"),
     })
     monkeypatch.setattr(_mod, "_capture_perplexica_config", lambda *_args: {"values": {}})
 
@@ -542,13 +543,22 @@ def test_external_adoption_converges_consumers_without_touching_native_runtime(
     for name in (
         "_write_lemonade_config", "_render_model_router_runtime_configs",
         "_patch_hermes_model_config", "_update_opencode_config",
-        "_update_perplexica_model", "_wait_for_container_health",
+        "_update_perplexica_model",
         "_verify_litellm_route", "_verify_running_hermes_route",
         "_verify_openclaw_model_env", "_restart_managed_opencode",
     ):
         monkeypatch.setattr(_mod, name, lambda *_args, _name=name, **_kwargs: (
             events.append(_name) or True
         ))
+    monkeypatch.setattr(_mod, "_wait_for_container_health", lambda name: (
+        events.append(("health", name)) or True
+    ))
+    if failure == "router-stopped":
+        with pytest.raises(RuntimeError, match="Model router must be running"):
+            _mod._adopt_external_lemonade_model(loaded["modelId"])
+        assert env_path.read_text(encoding="utf-8").startswith("ODS_MODE=lemonade\n")
+        assert not any(isinstance(event, tuple) and event[0] == "journal" for event in events)
+        return
     if failure == "litellm":
         def fail_route(_env):
             events.append("_verify_litellm_route")
@@ -595,6 +605,16 @@ def test_external_adoption_converges_consumers_without_touching_native_runtime(
     persisted = _mod.load_env(env_path)
     assert persisted["LEMONADE_MODEL"] == loaded["modelId"]
     assert persisted["CTX_SIZE"] == persisted["MAX_CONTEXT"] == "65536"
+    assert events.index("_render_model_router_runtime_configs") < events.index(
+        ("restart", "ods-model-router")
+    )
+    assert events.index(("restart", "ods-model-router")) < events.index(
+        ("health", "ods-model-router")
+    )
+    assert events.index(("health", "ods-model-router")) < events.index(
+        ("restart", "ods-litellm")
+    )
+    assert events.index(("restart", "ods-litellm")) < events.index("route")
     assert events.index("route") < events.index("_verify_litellm_route")
     assert events.index("route") < events.index(("pixel-apply", loaded["modelId"]))
     assert events.index(("pixel-finish", "commit")) < events.index("receipt")
@@ -1661,6 +1681,34 @@ class TestSwitchboardRuntimeConfig:
             "AMD_INFERENCE_LOCATION": "host",
             "AMD_INFERENCE_PORT": "9234",
         }) == "http://host.docker.internal:9234/api/v1"
+
+    @pytest.mark.parametrize(
+        "api_path",
+        [
+            "api/v1",
+            "/",
+            "/../admin",
+            "/api/../admin",
+            "/api\\v1",
+            "/api/v1?debug=1",
+            "/api/v1#fragment",
+            "/api/v1\nX-Injected: yes",
+            "/api/ v1",
+            "/api/v1\x7f",
+        ],
+    )
+    def test_host_lemonade_runtime_base_rejects_unsafe_api_path(self, api_path):
+        assert _mod._runtime_lemonade_api_base({
+            "AMD_INFERENCE_LOCATION": "host",
+            "LEMONADE_CONTAINER_BASE_URL": "http://192.168.0.166:8080",
+            "LEMONADE_API_BASE_PATH": api_path,
+        }) == "http://192.168.0.166:8080/api/v1"
+
+    def test_host_lemonade_runtime_base_rejects_invalid_fallback_port(self):
+        assert _mod._runtime_lemonade_api_base({
+            "AMD_INFERENCE_LOCATION": "host",
+            "AMD_INFERENCE_PORT": "8080/api/v1\nX-Injected: yes",
+        }) == "http://host.docker.internal:8080/api/v1"
 
     def test_windows_native_runtime_base_uses_host_gateway(self, monkeypatch):
         monkeypatch.setattr(_mod, "_is_windows_host_llama_server", lambda _env: True)

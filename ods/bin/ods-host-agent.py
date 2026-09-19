@@ -13018,8 +13018,11 @@ def _adopt_external_lemonade_model(expected_model_id: str) -> dict:
     opencode_snapshot = _capture_opencode_config()
     opencode_state = _capture_managed_opencode_state() if opencode_snapshot is not None else None
     states = {name: _capture_container_state(name) for name in (
-        "ods-litellm", "ods-hermes", "ods-openclaw", "ods-perplexica",
+        "ods-model-router", "ods-litellm", "ods-hermes", "ods-openclaw",
+        "ods-perplexica",
     )}
+    if not states["ods-model-router"]["running"]:
+        raise RuntimeError("Model router must be running to adopt an external model")
     if not states["ods-litellm"]["running"]:
         raise RuntimeError("LiteLLM must be running to adopt an external model")
     if states["ods-hermes"]["running"] and hermes_snapshot.get("source") == "deferred_absent":
@@ -13057,6 +13060,14 @@ def _adopt_external_lemonade_model(expected_model_id: str) -> dict:
             gguf_file=gguf_file, lemonade_model_id=expected_model_id,
             context_length=context_length,
         )
+        # The router loads endpoints.json into memory at process start. Merely
+        # rewriting the mounted file leaves the old native origin active, so
+        # recreate it before any downstream consumer or alias probe can route
+        # through stale state.
+        _restart_existing_container(
+            "ods-model-router", states["ods-model-router"], recreate=True,
+        )
+        _wait_for_container_health("ods-model-router")
         hermes_base_url = current_env.get("HERMES_LLM_BASE_URL") or "http://litellm:4000/v1"
         if hermes_snapshot.get("exists") and hermes_snapshot.get("source") != "deferred_absent":
             patched, _changed = _patch_hermes_config_text(
@@ -14417,9 +14428,18 @@ def _runtime_lemonade_api_base(env: dict) -> str:
         )
         if not container_base:
             lemonade_port = env.get("AMD_INFERENCE_PORT", "8080") or "8080"
-            container_base = f"http://host.docker.internal:{lemonade_port}"
+            container_base = _normalized_lemonade_base_url(
+                f"http://host.docker.internal:{lemonade_port}"
+            ) or "http://host.docker.internal:8080"
         api_path = str(env.get("LEMONADE_API_BASE_PATH") or "/api/v1").strip()
-        if not api_path.startswith("/") or any(char in api_path for char in "?#"):
+        path_segments = api_path.split("/")
+        if (
+            api_path in {"", "/"}
+            or not api_path.startswith("/")
+            or any(ord(char) < 33 or ord(char) == 127 for char in api_path)
+            or any(char in api_path for char in "?#\\")
+            or ".." in path_segments
+        ):
             api_path = "/api/v1"
         base = f"{container_base}{api_path.rstrip('/')}"
     return base
