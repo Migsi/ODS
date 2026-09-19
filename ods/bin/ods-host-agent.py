@@ -14407,8 +14407,21 @@ def _normal_switchboard_mode(env: dict) -> str:
 def _runtime_lemonade_api_base(env: dict) -> str:
     base = "http://llama-server:8080/api/v1"
     if str(env.get("AMD_INFERENCE_LOCATION") or "").lower() == "host":
-        lemonade_port = env.get("AMD_INFERENCE_PORT", "8080") or "8080"
-        base = f"http://host.docker.internal:{lemonade_port}/api/v1"
+        # External/native topologies may persist a container-reachable LAN or
+        # Colima gateway that is intentionally different from the host-facing
+        # Lemonade origin.  Re-rendering after a model adoption must preserve
+        # that proven route instead of silently replacing it with Docker
+        # Desktop's host.docker.internal convention.
+        container_base = _normalized_lemonade_base_url(
+            env.get("LEMONADE_CONTAINER_BASE_URL")
+        )
+        if not container_base:
+            lemonade_port = env.get("AMD_INFERENCE_PORT", "8080") or "8080"
+            container_base = f"http://host.docker.internal:{lemonade_port}"
+        api_path = str(env.get("LEMONADE_API_BASE_PATH") or "/api/v1").strip()
+        if not api_path.startswith("/") or any(char in api_path for char in "?#"):
+            api_path = "/api/v1"
+        base = f"{container_base}{api_path.rstrip('/')}"
     return base
 
 
@@ -14488,10 +14501,7 @@ def _write_lemonade_config(
     )
     ods_mode = env.get("ODS_MODE", "lemonade")
     gpu_backend = env.get("GPU_BACKEND", "amd")
-    lemonade_api_base = "http://llama-server:8080/api/v1"
-    if env.get("AMD_INFERENCE_LOCATION", "").lower() == "host":
-        lemonade_port = env.get("AMD_INFERENCE_PORT", "8080") or "8080"
-        lemonade_api_base = f"http://host.docker.internal:{lemonade_port}/api/v1"
+    lemonade_api_base = _runtime_lemonade_api_base(env)
     if not _render_runtime_config(
         install_dir,
         "litellm-lemonade",

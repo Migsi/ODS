@@ -1536,6 +1536,32 @@ class TestWriteLemonadeConfig:
         assert "model: openai/Modern-Model" in content
         assert "extra.Modern-Model.gguf" not in content
 
+    def test_preserves_explicit_container_route_after_external_adoption(
+        self, monkeypatch, tmp_path,
+    ):
+        (tmp_path / ".env").write_text(
+            "AMD_INFERENCE_LOCATION=host\n"
+            "AMD_INFERENCE_PORT=8080\n"
+            "LEMONADE_CONTAINER_BASE_URL=http://192.168.0.166:8080\n"
+            "LEMONADE_API_BASE_PATH=/api/v1\n",
+            encoding="utf-8",
+        )
+        calls = []
+        monkeypatch.setattr(
+            _mod,
+            "_render_runtime_config",
+            lambda install_dir, surface, **kwargs: (
+                calls.append((install_dir, surface, kwargs)) or True
+            ),
+        )
+
+        _write_lemonade_config(tmp_path, "Modern-Model.gguf", "Modern-Model")
+
+        assert calls[0][1] == "litellm-lemonade"
+        assert calls[0][2]["lemonade_api_base"] == (
+            "http://192.168.0.166:8080/api/v1"
+        )
+
     def test_overwrites_previous(self, tmp_path):
         litellm_dir = tmp_path / "config" / "litellm"
         litellm_dir.mkdir(parents=True)
@@ -1615,6 +1641,26 @@ class TestSwitchboardRuntimeConfig:
         assert _mod._runtime_llama_api_base({
             "LLM_API_URL": "http://litellm:4000/v1",
         }) == "http://llama-server:8080/v1"
+
+    @pytest.mark.parametrize(
+        "container_base",
+        ["http://192.168.0.166:8080", "http://192.168.0.166:8080/api/v1"],
+    )
+    def test_host_lemonade_runtime_base_preserves_explicit_container_route(
+        self, container_base,
+    ):
+        assert _mod._runtime_lemonade_api_base({
+            "AMD_INFERENCE_LOCATION": "host",
+            "AMD_INFERENCE_PORT": "8080",
+            "LEMONADE_CONTAINER_BASE_URL": container_base,
+            "LEMONADE_API_BASE_PATH": "/api/v1",
+        }) == "http://192.168.0.166:8080/api/v1"
+
+    def test_host_lemonade_runtime_base_keeps_gateway_fallback(self):
+        assert _mod._runtime_lemonade_api_base({
+            "AMD_INFERENCE_LOCATION": "host",
+            "AMD_INFERENCE_PORT": "9234",
+        }) == "http://host.docker.internal:9234/api/v1"
 
     def test_windows_native_runtime_base_uses_host_gateway(self, monkeypatch):
         monkeypatch.setattr(_mod, "_is_windows_host_llama_server", lambda _env: True)
