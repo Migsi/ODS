@@ -411,14 +411,14 @@ detect_gpu() {
                 GPU_DEVICE_ID="$device"
                 GPU_COUNT=1
                 local vram_bytes
-                # Try to get VRAM size from BAR 2 (universal when reBAR enabled)
+                # Try to get VRAM size from BAR 2 (universal when ReBAR enabled)
                 vram_bytes=$(awk 'NR==3 { print strtonum($2) - strtonum($1) + 1 }' "$card_dir/resource") || vram_bytes=0
                 # Test for 256 MiB threshold (268435456 bytes), might indicate missing ReBAR
                 if (( vram_bytes <= 268435456 )); then
                     log "GPU: Detected $vram_bytes Bytes of VRAM"
                     log "This is below threshold and might indicate ReBAR is disabled or detection failed"
                     log "Trying legacy VRAM detection method"
-                    # Try to get VRAM size from sysfs (lmem_total_bytes on Arc)
+                    # Try to get VRAM size from sysfs (lmem_total_bytes on i915 driver)
                     vram_bytes=$(cat "$card_dir/lmem_total_bytes" 2>/dev/null) || vram_bytes=0
                 fi
                 GPU_VRAM=$(( vram_bytes / 1048576 ))  # in MB
